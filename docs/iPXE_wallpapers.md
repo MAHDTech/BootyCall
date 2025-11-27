@@ -111,3 +111,17 @@ done 3< <(find "$IMAGES_SOURCE" -type f -name "grok_image*.jpg")
 ## Part 3: Making iPXE randomize wallpapers
 
 Caddy templates ftw!
+
+Serve up a dynamic template like this
+
+```caddyfile
+# Handler for dynamic wallpapers
+handle /dynamic/wallpaper.ipxe {
+    rewrite * /templates/wallpaper.tmpl
+    header Content-Type text/plain
+    templates {
+        between {{ }}
+    }
+    file_server
+}
+```

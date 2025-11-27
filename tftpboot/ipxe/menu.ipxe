@@ -23,10 +23,6 @@ cpair --foreground 7 --background 1 7       # White selection on hot pink (pair 
 # Wallpaper
 #########################
 
-# Static Wallpaper
-#console --picture http://bootycall.saltlabs.cloud/images/wallpapers/background.png --depth 32 --keep
-
-# TODO: Dynamic Wallpaper
 chain --autofree http://bootycall.saltlabs.cloud/dynamic/wallpaper.ipxe
 
 #########################
@@ -35,14 +31,13 @@ chain --autofree http://bootycall.saltlabs.cloud/dynamic/wallpaper.ipxe
 
 menu BootyCall iPXE Menu
 
-item --gap              BootyCall iPXE Server
+item --gap              Always answers the call (to boot your server)
 item
 item netboot            Netboot (default)
 item mt86plus           Memtest86+
 item mt86passmark       MemTest86 PassMark
-item threefold          Threefold Cloud
-item nce                Nutanix Community Edition (Memdisk)
-item nce_uefi           Nutanix Community Edition (UEFI)
+item threefold          Threefold ZeroOS
+item nce                Nutanix Community Edition
 item
 item shell              iPXE shell
 item reboot             Reboot
@@ -81,11 +76,7 @@ goto start
 
 echo Loading Memtest86+ ...
 
-#kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 ||
-#goto failed
-#boot || goto failed
-
-sanboot --no-describe --drive 0x80 http://bootycall.saltlabs.cloud/iso/memtest86.iso || goto failed
+chain http://bootycall.saltlabs.cloud/tools/mt86plus/memtest86plus.efi || goto failed
 
 goto start
 
@@ -95,15 +86,23 @@ goto start
 
 echo Loading PassMark MemTest86 ...
 
+# NOTE: Only site version works with chain.
+#chain http://bootycall.saltlabs.cloud/tools/memtest86/memtest86.efi || goto failed
+
+# NOTE: Free version seems to work with sanboot.
 sanboot http://bootycall.saltlabs.cloud/tools/memtest86/memtest86-usb.img || goto failed
+
+goto start
 
 #########################
 :threefold
 #########################
 
-echo Loading Threefold Cloud ZeroOS ...
+echo Loading Threefold ZeroOS ...
 
 chain --autofree http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
+
+goto start
 
 #########################
 :nce
@@ -111,15 +110,11 @@ chain --autofree http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto fai
 
 echo Loading Nutanix Community Edition (Phoenix ISO) ...
 
-kernel http://bootycall.saltlabs.cloud/syslinux/memdisk iso raw keeppxe || goto failed
-initrd http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso || goto failed
+kernel http://bootycall.saltlabs.cloud/iso-extracted/phoenix/boot/kernel root=live:/dev/ram0 rd.live.image rd.live.dir=/ boot=LABEL=PHOENIX init=/installer intel_iommu=on iommu=pt quiet console=ttyS0,115200n8 console=tty0 net.ifnames=0
+initrd http://bootycall.saltlabs.cloud/iso-extracted/phoenix/boot/initrd
 boot || goto failed
 
-#########################
-:nce_uefi
-#########################
-
-sanboot --no-describe --drive 0x80 http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso || goto failed
+goto start
 
 #########################
 :failed

@@ -1,6 +1,6 @@
 {{- /*
 ============================================
-Logic block
+Logic
 ============================================
 */ -}}
 
@@ -26,7 +26,7 @@ Logic block
 
 {{- /*
 ============================================
-Output block
+Output
 ============================================
 */ -}}
 
@@ -35,7 +35,7 @@ Output block
 # Selected Wallpaper: {{ $selected }}
 # Total candidates: {{ $count }}
 
-console --picture http://{{.Host}}{{$imageDir}}/{{$selected}} --depth 32 --keep || goto failed
+console --x 1024 --y 768 --picture http://{{.Host}}{{$imageDir}}/{{$selected}} --depth 32 --keep || goto failed
 exit
 
 :failed

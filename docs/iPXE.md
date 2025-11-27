@@ -31,6 +31,9 @@ sed -i 's|-mlittle-endian||g' arch/arm64/Makefile
 # Enable CONSOLE_CMD for console, colour, and cpair support
 sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_CMD|#define CONSOLE_CMD|' config/general.h
 
+# Enable CONSOLE_FRAMEBUFFER for framebuffer support
+sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_FRAMEBUFFER|#define CONSOLE_FRAMEBUFFER|' config/console.h
+
 # Enable reboot and poweroff support
 sed -i 's|//[[:space:]]*#define[[:space:]]\+REBOOT_CMD|#define REBOOT_CMD|' config/general.h
 sed -i 's|//[[:space:]]*#define[[:space:]]\+POWEROFF_CMD|#define POWEROFF_CMD|' config/general.h

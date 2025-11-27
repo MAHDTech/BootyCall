@@ -4,15 +4,22 @@
 # Colours
 #########################
 
-cpair --foreground 11 --background 4 heading        # cyan heading on blue
-cpair --foreground 15 --background 1 item--selected # white on bright blue
-cpair --foreground 0 --background 7 item            # black on light gray
-cpair --foreground 3 --background 0 item--hotkey    # yellow hotkey on black
+# Define custom colours
+colour --rgb 0x00ffff 6                     # Neon cyan
+colour --rgb 0xff00ff 5                     # Magenta/purple glow
+colour --rgb 0xffd700 3                     # Bright gold accents
+colour --rgb 0x9400d3 4                     # Dark violet BG
+colour --rgb 0xff69b4 1                     # Hot pink
 
-colour --rgb 0x00ff00 prompt                        # green prompt
-colour --rgb 0xff5555 error                         # red error text
+# Define custom UI Pairs
+cpair --foreground 6 --background 0 0       # Neon cyan prompt on black (pair 0)
+cpair --foreground 7 --background 15 1      # White text on transparent (pair 1: normal items; crisp on dark BG)
+cpair --foreground 1 --background 0 2       # Pink hotkeys on black (pair 2)
+cpair --foreground 3 --background 4 3       # Bright gold heading on dark violet (pair 3: separators; pops vividly)
+cpair --foreground 3 --background 5 5       # Gold errors on magenta (pair 5; warm alert)
+cpair --foreground 7 --background 1 7       # White selection on hot pink (pair 7: highlighted; brighter text for clarity)
 
-console --picture http://bootycall.saltlabs.cloud/images/logo.png --left 100 --right -100
+console --x 1024 --y 768 --picture http://bootycall.saltlabs.cloud/images/background.png --depth 32 --keep
 
 #########################
 :start
@@ -64,7 +71,7 @@ chain http://bootycall.saltlabs.cloud/ipxe/netboot.ipxe || goto failed
 
 echo Loading Memtest86+ ...
 
-kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 || 
+kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 ||
 kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_i586 || goto failed
 boot || goto failed
 
@@ -143,4 +150,3 @@ reboot
 echo Exit
 
 exit
-

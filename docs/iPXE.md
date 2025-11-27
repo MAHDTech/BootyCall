@@ -34,15 +34,18 @@ sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_CMD|#define CONSOLE_CMD|' co
 # Enable CONSOLE_FRAMEBUFFER for framebuffer support
 sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_FRAMEBUFFER|#define CONSOLE_FRAMEBUFFER|' config/console.h
 
+# Enable IMAGE_PNG for PNG image support
+sed -i 's|//[[:space:]]*#define[[:space:]]\+IMAGE_PNG|#define IMAGE_PNG|' config/general.h
+
 # Enable reboot and poweroff support
 sed -i 's|//[[:space:]]*#define[[:space:]]\+REBOOT_CMD|#define REBOOT_CMD|' config/general.h
 sed -i 's|//[[:space:]]*#define[[:space:]]\+POWEROFF_CMD|#define POWEROFF_CMD|' config/general.h
 
-# Enable HTTPS downloads
-sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_HTTPS|#define DOWNLOAD_PROTO_HTTPS|' config/general.h
-
 # Enable ping command in the iPXE shell.
 sed -i 's|//[[:space:]]*#define[[:space:]]\+PING_CMD|#define PING_CMD|' config/general.h
+
+# Enable NTP
+sed -i 's|//[[:space:]]*#define[[:space:]]\+NTP_CMD|#define NTP_CMD|' config/general.h
 ```
 
 - Make the embed script
@@ -70,7 +73,7 @@ Build the x86_64 EFI and legacy BIOS iPXE images using native tools.
 - Create a nix shell config for native builds
 
 ```bash
-cat > shell.nix <<'EOF'
+cat > shell-amd64.nix <<'EOF'
 let
   pkgs = import <nixpkgs> { };
 
@@ -117,7 +120,7 @@ EOF
 - Launch the nix shell for native builds
 
 ```bash
-nix-shell
+nix-shell shell-amd64.nix
 ```
 
 - Build the native images
@@ -126,7 +129,6 @@ nix-shell
 # x86_64 UEFI
 make -j$(nproc) bin-x86_64-efi/ipxe.efi \
     EMBED=embed.ipxe \
-    CONFIG=cloud \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
@@ -138,7 +140,6 @@ make -j$(nproc) bin-x86_64-efi/ipxe.efi \
 # Legacy BIOS
 make -j$(nproc) bin/undionly.kpxe \
     EMBED=embed.ipxe \
-    CONFIG=cloud \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
@@ -161,7 +162,7 @@ Build the ARM64 UEFI iPXE image using cross-compilation tools.
 - Create a nix shell config for cross-compilation
 
 ```bash
-cat > shell.nix <<'EOF'
+cat > shell-arm64.nix <<'EOF'
 let
 
   pkgs = import <nixpkgs> { };
@@ -263,7 +264,7 @@ EOF
 - Launch the nix shell for cross-compilation
 
 ```bash
-nix-shell
+nix-shell shell-arm64.nix
 ```
 
 - Build the ARM64 image
@@ -272,7 +273,6 @@ nix-shell
 make -j$(nproc) bin-arm64-efi/ipxe.efi \
     EMBED=embed.ipxe \
     CROSS=aarch64-linux-gnu- \
-    CONFIG=cloud \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
@@ -308,3 +308,7 @@ scp bin-arm64-efi/ipxe.efi root@bootycall.saltlabs.cloud:/mnt/hdd/tftpboot/boot/
 ```bash
 chown -R tftp:tftp /mnt/hdd/tftpboot
 ```
+
+## Part 4: iPXE Wallpaper fun
+
+See [iPXE Wallpapers](./iPXE_wallpapers.md)

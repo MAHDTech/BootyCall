@@ -1,0 +1,43 @@
+{{- /*
+============================================
+Logic block
+============================================
+*/ -}}
+
+{{- $imageDir := "/images/wallpapers" -}}
+{{- $allFiles := listFiles $imageDir -}}
+{{- $validImages := list -}}
+
+{{- /* Filter for PNGs */ -}}
+{{- range $file := $allFiles -}}
+    {{- if (hasSuffix ".png" $file) -}}
+        {{- $validImages = append $validImages $file -}}
+    {{- end -}}
+{{- end -}}
+
+{{- /* Select Image (Default or Random) */ -}}
+{{- $selected := "background.png" -}}
+{{- $count := len $validImages -}}
+
+{{- if gt $count 0 -}}
+    {{- $randomIndex := randInt 0 $count -}}
+    {{- $selected = index $validImages $randomIndex -}}
+{{- end -}}
+
+{{- /*
+============================================
+Output block
+============================================
+*/ -}}
+
+#!ipxe
+
+# Selected Wallpaper: {{ $selected }}
+# Total candidates: {{ $count }}
+
+console --picture http://{{.Host}}{{$imageDir}}/{{$selected}} --depth 32 --keep || goto failed
+exit
+
+:failed
+echo ERROR: Failed to load wallpaper ({{ $selected }})
+sleep 5

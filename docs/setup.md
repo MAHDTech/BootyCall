@@ -86,10 +86,40 @@ apt install caddy
 
 ```
 cat <<-EOF > /etc/caddy/Caddyfile
+{
+    debug
+}
 :80 {
-    root * /mnt/hdd/tftpboot
+    root * /mnt/hdd/tftpboot/
 
-    file_server
+    # Handler for dynamic wallpapers
+    handle /dynamic/wallpaper.ipxe {
+        rewrite * /templates/wallpaper.tmpl
+        header Content-Type text/plain
+        templates {
+            between {{ }}
+        }
+        file_server
+    }
+
+    file_server browse
+
+    handle_errors {
+        respond "Error: Template render failed (500)" 500
+    }
+
+    log {
+        output file /var/log/caddy/access.log
+    }
+
+    @binaries {
+        path *.efi *.kpxe *.ipxe
+    }
+
+    header @binaries {
+        Content-Type "application/octet-stream"
+        Content-Disposition "attachment"
+    }
 }
 EOF
 ```

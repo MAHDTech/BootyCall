@@ -6,20 +6,7 @@
 
 echo Loading netboot.xyz...
 
-set base https://boot.netboot.xyz/ipxe/
-
-set suffix
-isset ${buildarch} && iseq ${buildarch} arm64 && set suffix -arm64
-
-# Try SNP only first.
-chain --autofree ${base}netboot.xyz${suffix}-snponly.efi ||
-
-# Try full driver-embedded next.
-chain --autofree ${base}netboot.xyz${suffix}.efi ||
-
-# Fallback to universal URL.
 chain --autofree https://boot.netboot.xyz ||
-
 goto failed
 
 goto done
@@ -38,3 +25,4 @@ reboot
 :done
 #########################
 
+exit

@@ -19,7 +19,15 @@ cpair --foreground 3 --background 4 3       # Bright gold heading on dark violet
 cpair --foreground 3 --background 5 5       # Gold errors on magenta (pair 5; warm alert)
 cpair --foreground 7 --background 1 7       # White selection on hot pink (pair 7: highlighted; brighter text for clarity)
 
-console --x 1024 --y 768 --picture http://bootycall.saltlabs.cloud/images/background.png --depth 32 --keep
+#########################
+# Wallpaper
+#########################
+
+# Static Wallpaper
+#console --picture http://bootycall.saltlabs.cloud/images/wallpapers/background.png --depth 32 --keep
+
+# TODO: Dynamic Wallpaper
+chain --autofree http://bootycall.saltlabs.cloud/dynamic/wallpaper.ipxe
 
 #########################
 :start
@@ -63,7 +71,9 @@ item --key x exit           [X] Exit to BIOS/UEFI
 
 echo Loading Netboot menu ...
 
-chain http://bootycall.saltlabs.cloud/ipxe/netboot.ipxe || goto failed
+chain --autofree http://bootycall.saltlabs.cloud/ipxe/netboot.ipxe || goto failed
+
+goto start
 
 #########################
 :mt86plus
@@ -89,7 +99,7 @@ sanboot http://bootycall.saltlabs.cloud/tools/memtest86/memtest86-usb.img || got
 
 echo Loading Threefold Cloud ZeroOS ...
 
-chain http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
+chain --autofree http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
 
 #########################
 :nce

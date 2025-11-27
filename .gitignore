@@ -1,0 +1,14 @@
+# git ignore
+
+# Ignore ISO files
+*.iso
+!tftpboot/iso/.gitkeep
+
+# Ignore IMG files
+*.img
+!tftpboot/tools/memtest86/memtest86-usb.img
+
+# Ignore archives
+*.tar.gz
+*.zip
+

@@ -1,0 +1,21 @@
+# Auto-detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Binary files
+*.efi binary
+*.img binary
+*.bin binary
+*.gz binary
+
+# EFI binaries
+*.efi filter=lfs diff=lfs merge=lfs -text
+
+# Memtest x86 image
+tftpboot/tools/memtest86/*.img filter=lfs diff=lfs merge=lfs -text
+
+# Memtest x86+ binaries
+tftpboot/tools/mt86plus/* filter=lfs diff=lfs merge=lfs -text
+
+# Memdisk symlink
+tftpboot/syslinux/memdisk text symlink=auto
+

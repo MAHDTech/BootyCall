@@ -1,0 +1,103 @@
+#!ipxe
+
+echo Loaded loader.ipxe
+
+##################################################
+# Configurations
+##################################################
+
+#########################
+# Nutanix Community Edition
+#########################
+
+# - NTNX-CE-01-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:93:71 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-02-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:8b:d9 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-03-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:8c:15 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-04-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:95:29 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-05-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:90:19 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-06-AHV (Minisforum MS-A2)
+iseq ${net0/mac} 38:05:25:33:90:51 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-07-AHV (Micro-ATX custom PC)
+iseq ${net0/mac} 9c:6b:00:55:ef:2e && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-08-AHV (Micro-ATX custom PC)
+iseq ${net0/mac} 70:85:c2:45:8b:c6 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-09-AHV (Micro-ATX custom PC)
+iseq ${net0/mac} 70:85:c2:45:90:58 && goto load_iso_nutanix_community_edition ||
+
+# - NTNX-CE-10-AHV (Micro-ATX custom PC)
+iseq ${net0/mac} 70:85:c2:71:63:65 && goto load_iso_nutanix_community_edition ||
+
+#########################
+# OrangePI
+#########################
+
+#iseq ${net0/mac} xx:xx:xx:xx:xx:xx && goto load_iso_ubuntu_2510_arm64 ||
+
+#########################
+# Default
+#########################
+
+goto load_chain_default || goto failed
+
+##################################################
+# Loaders
+##################################################
+
+#########################
+# Default
+#########################
+
+:load_chain_default
+
+chain http://bootycall.saltlabs.cloud/ipxe/menu.ipxe || goto failed
+
+#########################
+# Threefold
+#########################
+
+:load_chain_threefold
+
+chain http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
+
+#########################
+# Ubuntu
+#########################
+
+:load_iso_ubuntu_2510_arm64
+
+sanboot http://bootycall.saltlabs.cloud/iso/ubuntu-25.10-arm64.iso || goto failed
+
+#########################
+# Nutanix Community Edition
+#########################
+
+:load_iso_nutanix_community_edition
+
+kernel http://bootycall.saltlabs.cloud/memdisk harddisk raw
+#kernel http://bootycall.saltlabs.cloud/memdisk harddisk raw keeppxe
+#kernel http://bootycall.saltlabs.cloud/memdisk iso raw
+initrd http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso
+boot || goto failed
+
+#########################
+# Failed
+#########################
+
+:failed
+
+echo Loader has failed, exiting to iPXE shell
+exit
+

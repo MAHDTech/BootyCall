@@ -1,0 +1,4 @@
+#!ipxe
+
+echo Loaded autoexec.ipxe
+

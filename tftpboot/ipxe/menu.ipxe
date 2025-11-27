@@ -1,0 +1,146 @@
+#!ipxe
+
+#########################
+# Colours
+#########################
+
+cpair --foreground 11 --background 4 heading        # cyan heading on blue
+cpair --foreground 15 --background 1 item--selected # white on bright blue
+cpair --foreground 0 --background 7 item            # black on light gray
+cpair --foreground 3 --background 0 item--hotkey    # yellow hotkey on black
+
+colour --rgb 0x00ff00 prompt                        # green prompt
+colour --rgb 0xff5555 error                         # red error text
+
+console --picture http://bootycall.saltlabs.cloud/images/logo.png --left 100 --right -100
+
+#########################
+:start
+#########################
+
+menu BootyCall iPXE Menu
+
+item --gap              BootyCall iPXE Server
+item
+item netboot            Netboot (default)
+item mt86plus           Memtest86+
+item mt86passmark       MemTest86 PassMark
+item threefold          Threefold Cloud
+item nce                Nutanix Community Edition (Memdisk)
+item nce_uefi           Nutanix Community Edition (UEFI)
+item
+item shell              iPXE shell
+item reboot             Reboot
+item exit               Exit to BIOS/UEFI
+
+choose --default netboot --timeout 15000 selected || goto cancel
+
+goto ${selected}
+
+#########################
+:hotkeys
+#########################
+
+item --key n netboot        [N] Netboot.xyz
+item --key m mt86plus       [M] Memtest86+
+item --key p mt86passmark   [P] PassMark MemTest86
+item --key t threefold      [T] Threefold Cloud
+item --key u nce            [U] Nutanix Community Edition
+item --key s shell          [S] iPXE shell
+item --key r reboot         [R] Reboot computer
+item --key x exit           [X] Exit to BIOS/UEFI
+
+#########################
+:netboot
+#########################
+
+echo Loading Netboot menu ...
+
+chain http://bootycall.saltlabs.cloud/ipxe/netboot.ipxe || goto failed
+
+#########################
+:mt86plus
+#########################
+
+echo Loading Memtest86+ ...
+
+kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 || 
+kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_i586 || goto failed
+boot || goto failed
+
+#########################
+:mt86passmark
+#########################
+
+echo Loading PassMark MemTest86 ...
+
+sanboot http://bootycall.saltlabs.cloud/tools/memtest86/memtest86-usb.img || goto failed
+
+#########################
+:threefold
+#########################
+
+echo Loading Threefold Cloud ZeroOS ...
+
+chain http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
+
+#########################
+:nce
+#########################
+
+echo Loading Nutanix Community Edition (Phoenix ISO) ...
+
+kernel http://bootycall.saltlabs.cloud/syslinux/memdisk iso raw keeppxe || goto failed
+initrd http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso || goto failed
+boot || goto failed
+
+#########################
+:nce_uefi
+#########################
+
+sanboot --no-describe --drive 0x80 http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso || goto failed
+
+#########################
+:failed
+#########################
+
+echo Boot failed - returning to menu in 10 seconds ...
+
+sleep 10
+goto start
+
+#########################
+:cancel
+#########################
+
+echo Boot cancelled.
+
+sleep 3
+exit
+
+#########################
+:shell
+#########################
+
+echo Loading iPXE shell
+
+shell
+goto start
+
+#########################
+:reboot
+#########################
+
+echo Rebooting...
+
+sleep 3
+reboot
+
+#########################
+:exit
+#########################
+
+echo Exit
+
+exit
+

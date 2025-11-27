@@ -6,7 +6,7 @@
 
 echo Loading netboot.xyz...
 
-chain --autofree https://boot.netboot.xyz ||
+chain --autofree http://boot.netboot.xyz ||
 goto failed
 
 goto done

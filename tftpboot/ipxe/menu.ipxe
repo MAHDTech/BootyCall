@@ -81,9 +81,13 @@ goto start
 
 echo Loading Memtest86+ ...
 
-kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 ||
-kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_i586 || goto failed
-boot || goto failed
+#kernel http://bootycall.saltlabs.cloud/tools/mt86plus/mt86p_800_x86_64 ||
+#goto failed
+#boot || goto failed
+
+sanboot --no-describe --drive 0x80 http://bootycall.saltlabs.cloud/iso/memtest86.iso || goto failed
+
+goto start
 
 #########################
 :mt86passmark

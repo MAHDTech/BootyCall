@@ -2,7 +2,9 @@
 
 Notes on building custom ipxe files.
 
-## Steps
+## Part 0: Preparation
+
+Prepare to build iPXE.
 
 - Clone the repo
 
@@ -16,72 +18,28 @@ git clone https://github.com/ipxe/ipxe.git --depth 1 --branch master
 cd ipxe/src
 ```
 
-- Create a nix shell config
+- Patch the Makefiles for NixOS compatibility
 
 ```bash
-cat > shell.nix <<'EOF'
-let
-  pkgs = import <nixpkgs> { };
-
-  # Cross toolchain for aarch64
-  crossPkgs = pkgs.pkgsCross.aarch64-multiplatform;
-
-  # Include the required perl dependencies
-  perlDeps = with pkgs.perlPackages; [
-    ExtUtilsMakeMaker
-    IOCompress DigestSHA ArchiveZip
-    CryptOpenSSLRSA CryptX509 CryptOpenSSLX509
-  ];
-
-in pkgs.mkShell {
-
-  # Native build tools
-  nativeBuildInputs = with pkgs; [
-    git
-    gnumake
-    gcc
-    binutils-unwrapped
-    perl
-    xz
-    zlib
-    mtools
-    cdrtools
-    syslinux
-    gawk
-    bison
-    flex
-    libusb1
-    openssl
-    bc
-    cdrkit
-    python3
-  ] ++ perlDeps;
-
-  # Cross-compiling build tools
-  buildInputs = with crossPkgs; [
-    stdenv.cc
-    binutils
-  ];
-
-  shellHook = ''
-    export PERL5LIB="${pkgs.perl.makePerlPath perlDeps}"
-    export CROSS="aarch64-linux-gnu-"
-    export PATH="${crossPkgs.stdenv.cc}/bin:${crossPkgs.binutils}/bin:$PATH"
-    
-    echo "≈ iPXE build environment ready ≈"
-    echo "Native arch: $(uname -m)"
-    echo "gcc → $(which gcc)"
-    echo "aarch64-linux-gnu-gcc → $(which aarch64-linux-gnu-gcc || echo MISSING)"
-    echo "CROSS = $CROSS"
-  '';
-}
-EOF
+sed -i 's|/bin/echo|echo|g' Makefile Makefile.housekeeping
+sed -i 's|-mlittle-endian||g' arch/arm64/Makefile
 ```
 
-- Launch the nix shell
+- Enable options for additional feature support;
 
 ```bash
-nix-shell
+# Enable CONSOLE_CMD for console, colour, and cpair support
+sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_CMD|#define CONSOLE_CMD|' config/general.h
+
+# Enable reboot and poweroff support
+sed -i 's|//[[:space:]]*#define[[:space:]]\+REBOOT_CMD|#define REBOOT_CMD|' config/general.h
+sed -i 's|//[[:space:]]*#define[[:space:]]\+POWEROFF_CMD|#define POWEROFF_CMD|' config/general.h
+
+# Enable HTTPS downloads
+sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_HTTPS|#define DOWNLOAD_PROTO_HTTPS|' config/general.h
+
+# Enable ping command in the iPXE shell.
+sed -i 's|//[[:space:]]*#define[[:space:]]\+PING_CMD|#define PING_CMD|' config/general.h
 ```
 
 - Make the embed script
@@ -102,33 +60,232 @@ reboot
 EOF
 ```
 
-- Run the build for different architectures
+## Part 1: Native AMD64 Builds
+
+Build the x86_64 EFI and legacy BIOS iPXE images using native tools.
+
+- Create a nix shell config for native builds
 
 ```bash
-# UEFI
+cat > shell.nix <<'EOF'
+let
+  pkgs = import <nixpkgs> { };
+
+  # Include the required perl dependencies
+  perlEnv = with pkgs.perlPackages; perl.withPackages (ps: with ps; [
+    ExtUtilsMakeMaker
+    IOCompress DigestSHA ArchiveZip
+    CryptOpenSSLRSA CryptX509 CryptOpenSSLX509
+  ]);
+
+in pkgs.mkShell {
+
+  # Native build tools
+  nativeBuildInputs = with pkgs; [
+    git
+    gnumake
+    gcc
+    binutils-unwrapped
+    xz
+    zlib
+    mtools
+    cdrtools
+    syslinux
+    gawk
+    bison
+    flex
+    libusb1
+    openssl
+    bc
+    cdrkit
+    python3
+    perlEnv
+  ];
+
+  shellHook = ''
+    echo "≈≈≈≈≈ iPXE native build environment ready ≈≈≈≈≈"
+    echo "Native arch: $(uname -m)"
+    echo "gcc → $(which gcc)"
+  '';
+}
+EOF
+```
+
+- Launch the nix shell for native builds
+
+```bash
+nix-shell
+```
+
+- Build the native images
+
+```bash
+# x86_64 UEFI
 make -j$(nproc) bin-x86_64-efi/ipxe.efi \
     EMBED=embed.ipxe \
     CONFIG=cloud \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
-    CONFIG=usb
+    CONFIG=usb \
+    VERSION_MAJOR=1 \
+    VERSION_MINOR=0 \
+    VERSION_PATCH=0
 
 # Legacy BIOS
 make -j$(nproc) bin/undionly.kpxe \
     EMBED=embed.ipxe \
     CONFIG=cloud \
     CONFIG=console \
-    CONFIG=image
+    CONFIG=image \
+    CONFIG=pci \
+    CONFIG=usb \
+    VERSION_MAJOR=1 \
+    VERSION_MINOR=0 \
+    VERSION_PATCH=0
+```
 
-# ARM64 UEFI
+- Exit the shell
+
+```bash
+exit
+```
+
+## Part 2: Cross-compiled ARM64 Builds
+
+Build the ARM64 UEFI iPXE image using cross-compilation tools.
+
+- Create a nix shell config for cross-compilation
+
+```bash
+cat > shell.nix <<'EOF'
+let
+
+  pkgs = import <nixpkgs> { };
+  # Cross toolchain for aarch64
+
+  crossPkgs = pkgs.pkgsCross.aarch64-multiplatform;
+  # Include the required perl dependencies
+
+  perlEnv = with pkgs.perlPackages; perl.withPackages (ps: with ps; [
+    ExtUtilsMakeMaker
+    IOCompress DigestSHA ArchiveZip
+    CryptOpenSSLRSA CryptX509 CryptOpenSSLX509
+  ]);
+
+in pkgs.mkShell {
+
+  # Native build tools
+  nativeBuildInputs = with pkgs; [
+    git
+    gnumake
+    xz
+    zlib
+    gawk
+    bison
+    flex
+    libusb1
+    bc
+    python3
+    perlEnv
+  ];
+
+  # Cross-compiling build tools
+  buildInputs = with crossPkgs; [
+    stdenv.cc
+    binutils
+  ];
+
+  shellHook = ''
+    # Create a temporary bin directory for symlinks
+    IPXE_BIN="/tmp/ipxe-bin"
+    mkdir -p "$IPXE_BIN"
+    TOOLS=(
+      gcc
+      g++
+      as
+      ld
+      objcopy
+      objdump
+      ar
+      strip
+      ranlib
+    )
+
+    # Add native build tools to temp bin
+    for tool in ''${TOOLS[@]};
+    do
+      if command -v "$tool" >/dev/null 2>&1;
+      then
+        ln -sf "$(which "$tool")" "$IPXE_BIN/$tool"
+      fi
+    done
+
+    # Symlink unprefixed cross tools to prefixed versions (Nix uses 'unknown')
+    for tool in ''${TOOLS[@]};
+    do
+      full_prefixed="aarch64-unknown-linux-gnu-$tool"
+      if command -v "$full_prefixed" >/dev/null 2>&1;
+      then
+        ln -sf "$(which "$full_prefixed")" "$IPXE_BIN/$tool"
+      fi
+    done
+
+    # Also create symlinks for the shorter prefix expected by iPXE
+    for tool in ''${TOOLS[@]};
+    do
+      prefixed="aarch64-linux-gnu-$tool"
+      full_prefixed="aarch64-unknown-linux-gnu-$tool"
+      if command -v "$full_prefixed" >/dev/null 2>&1;
+      then
+        ln -sf "$(which "$full_prefixed")" "$IPXE_BIN/$prefixed"
+      fi
+    done
+
+    export PATH="$IPXE_BIN:$PATH:${crossPkgs.stdenv.cc}/bin:${crossPkgs.binutils}/bin"
+    # Use the shorter prefix for iPXE compatibility
+    export CROSS="aarch64-linux-gnu-"
+
+    echo "≈≈≈≈≈ iPXE cross-compilation build environment ready ≈≈≈≈≈"
+    echo "Native arch: $(uname -m)"
+    echo "aarch64-linux-gnu-gcc → $(which aarch64-linux-gnu-gcc || echo MISSING)"
+    echo "aarch64-unknown-linux-gnu-gcc → $(which aarch64-unknown-linux-gnu-gcc || echo MISSING)"
+    echo "as → $(which as)"
+    echo "CROSS = $CROSS"
+  '';
+}
+EOF
+```
+
+- Launch the nix shell for cross-compilation
+
+```bash
+nix-shell
+```
+
+- Build the ARM64 image
+
+```bash
 make -j$(nproc) bin-arm64-efi/ipxe.efi \
     EMBED=embed.ipxe \
     CROSS=aarch64-linux-gnu- \
     CONFIG=cloud \
     CONFIG=console \
-    CONFIG=image
+    CONFIG=image \
+    CONFIG=pci \
+    CONFIG=usb \
+    VERSION_MAJOR=1 \
+    VERSION_MINOR=0 \
+    VERSION_PATCH=0
 ```
+
+- Exit the shell
+
+```bash
+exit
+```
+
+## Part 3: Transfer the files
 
 - Transfer the files to the iPXE server
 
@@ -148,4 +305,3 @@ scp bin-arm64-efi/ipxe.efi root@bootycall.saltlabs.cloud:/mnt/hdd/tftpboot/boot/
 ```bash
 chown -R tftp:tftp /mnt/hdd/tftpboot
 ```
-

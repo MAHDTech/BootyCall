@@ -2,7 +2,9 @@
 
 # Ignore ISO files
 *.iso
+tftpboot/iso-extracted/*
 !tftpboot/iso/.gitkeep
+!tftpboot/iso-extracted/.gitkeep
 
 # Ignore IMG files
 *.img

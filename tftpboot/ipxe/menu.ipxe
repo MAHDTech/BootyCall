@@ -1,49 +1,88 @@
 #!ipxe
 
 #########################
-# Colours
+# Global Variables
 #########################
 
-# Define custom colours
-colour --rgb 0x00ffff 6                     # Neon cyan
-colour --rgb 0xff00ff 5                     # Magenta/purple glow
-colour --rgb 0xffd700 3                     # Bright gold accents
-colour --rgb 0x9400d3 4                     # Dark violet BG
-colour --rgb 0xff69b4 1                     # Hot pink
-
-# Define custom UI Pairs
-cpair --foreground 6 --background 0 0       # Neon cyan prompt on black (pair 0)
-cpair --foreground 7 --background 15 1      # White text on transparent (pair 1: normal items; crisp on dark BG)
-cpair --foreground 1 --background 0 2       # Pink hotkeys on black (pair 2)
-cpair --foreground 3 --background 4 3       # Bright gold heading on dark violet (pair 3: separators; pops vividly)
-cpair --foreground 3 --background 5 5       # Gold errors on magenta (pair 5; warm alert)
-cpair --foreground 7 --background 1 7       # White selection on hot pink (pair 7: highlighted; brighter text for clarity)
+set server_proto http
+set server_name bootycall.saltlabs.cloud
+set server_ip 10.10.1.1
 
 #########################
-# Wallpaper
+# Colour Palette
 #########################
 
-chain --autofree http://bootycall.saltlabs.cloud/dynamic/wallpaper.ipxe
+# 0=Black, 1=Blue, 2=Green, 3=Cyan, 4=Red, 5=Magenta, 6=Yellow, 7=White
+
+# Color Pair 0: The Screen Background
+#   Foreground: Transparent
+#   Background: Transparent
+cpair 0
+
+# Color Pair 1: Normal Text
+#   Foreground: Cyan (3)
+#   Background: Transparent
+cpair --foreground 3 1
+
+# Color Pair 2: Selection
+#   Foreground: Black (0)
+#   Background: Magenta (5)
+cpair --foreground 0 --background 5 2
+
+# Color Pair 3: Headers
+#   Foreground: Yellow (6)
+#   Background: Transparent
+cpair --foreground 6 3
 
 #########################
 :start
 #########################
 
-menu BootyCall iPXE Menu
+set hd_video true           # Default to HD Video.
 
-item --gap              Always answers the call (to boot your server)
-item
-item netboot            Netboot (default)
-item mt86plus           Memtest86+
-item mt86passmark       MemTest86 PassMark
-item threefold          Threefold ZeroOS
-item nce                Nutanix Community Edition
-item
-item shell              iPXE shell
-item reboot             Reboot
-item exit               Exit to BIOS/UEFI
+# Check for VM manufacturers.
+iseq ${manufacturer} QEMU && echo "Running in QEMU, lowering resolution" && set hd_video false ||
+iseq ${manufacturer} KVM && echo "Running in KVM, lowering resolution" && set hd_video false ||
+iseq ${manufacturer} VirtualBox && echo "Running in VirtualBox, lowering resolution" && set hd_video false ||
+iseq ${manufacturer} VMware && echo "Running in VMware, lowering resolution" && set hd_video false ||
 
-choose --default netboot --timeout 15000 selected || goto cancel
+# Set the wallpaper
+chain ${server_proto}://${server_name}/dynamic/wallpaper.ipxe?hd_video=${hd_video}
+
+#########################
+:menu
+#########################
+
+menu BootyCall System Interface
+
+item --gap -- ----------------------------------------------------
+item --gap --             BOOTYCALL MAIN TERMINAL
+item --gap -- ----------------------------------------------------
+item --gap --
+item --gap --   :: OPERATING ENVIRONMENTS ::
+item --gap --
+item netboot        > Netboot (Default)
+item iventoy        > iVentoy
+item threefold      > Threefold ZeroOS
+item nce_iso        > Nutanix CE (ISO)
+item nce_hdd        > Nutanix CE (HDD)
+item nce_ext        > Nutanix CE (Extracted)
+item --gap --
+item --gap --   :: DIAGNOSTICS & TOOLS ::
+item --gap --
+item mt86plus     > Memtest86+
+item mt86passmark > MemTest86 PassMark
+item shell        > iPXE Shell
+item --gap --
+item --gap --   :: POWER CONTROL ::
+item --gap --
+item reboot       [ SYSTEM REBOOT ]
+item exit         [ EXIT TO BIOS  ]
+item --gap --
+item --gap -- ----------------------------------------------------
+
+# Choose with a timeout of 60 seconds
+choose --default netboot --timeout 60000 selected || goto cancel
 
 goto ${selected}
 
@@ -66,7 +105,27 @@ item --key x exit           [X] Exit to BIOS/UEFI
 
 echo Loading Netboot menu ...
 
-chain --autofree http://bootycall.saltlabs.cloud/ipxe/netboot.ipxe || goto failed
+chain --autofree ${server_proto}://${server_name}/ipxe/netboot.ipxe || goto failed
+
+goto start
+
+#########################
+:iventoy
+#########################
+
+echo Loading iVentoy ...
+
+set iventoy-proto tftp
+set iventoy-server 0.0.0.0
+set iventoy-port 16000
+
+# iVentoy in Internal or External mode (snooping)
+#chain ${iventoy-proto}://${iventoy-server}/iventoy_loader_16000 || goto failed
+
+# iVentoy in ExternalNet mode.
+iseq ${platform} efi && chain --autofree ${iventoy-proto}://${iventoy-server}/iventoy_loader_16000_uefi ||
+iseq ${platform} pcbios && chain --autofree ${iventoy-proto}://${iventoy-server}/iventoy_loader_16000_bios ||
+echo "No iVentoy loader available for this platform ${platform}." && goto failed
 
 goto start
 
@@ -76,7 +135,7 @@ goto start
 
 echo Loading Memtest86+ ...
 
-chain http://bootycall.saltlabs.cloud/tools/mt86plus/memtest86plus.efi || goto failed
+chain ${server_proto}://${server_name}/tools/mt86plus/memtest86plus.efi || goto failed
 
 goto start
 
@@ -87,10 +146,10 @@ goto start
 echo Loading PassMark MemTest86 ...
 
 # NOTE: Only site version works with chain.
-#chain http://bootycall.saltlabs.cloud/tools/memtest86/memtest86.efi || goto failed
+#chain ${server_proto}://${server_name}/tools/memtest86/memtest86.efi || goto failed
 
 # NOTE: Free version seems to work with sanboot.
-sanboot http://bootycall.saltlabs.cloud/tools/memtest86/memtest86-usb.img || goto failed
+sanboot ${server_proto}://${server_name}/tools/memtest86/memtest86-usb.img || goto failed
 
 goto start
 
@@ -100,18 +159,73 @@ goto start
 
 echo Loading Threefold ZeroOS ...
 
-chain --autofree http://bootycall.saltlabs.cloud/ipxe/threefold.ipxe || goto failed
+chain --autofree ${server_proto}://${server_name}/ipxe/threefold.ipxe || goto failed
 
 goto start
 
 #########################
-:nce
+:nce_iso
 #########################
 
-echo Loading Nutanix Community Edition (Phoenix ISO) ...
+# NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.
 
-kernel http://bootycall.saltlabs.cloud/iso-extracted/phoenix/boot/kernel root=live:/dev/ram0 rd.live.image rd.live.dir=/ boot=LABEL=PHOENIX init=/installer intel_iommu=on iommu=pt quiet console=ttyS0,115200n8 console=tty0 net.ifnames=0
-initrd http://bootycall.saltlabs.cloud/iso-extracted/phoenix/boot/initrd
+echo Loading Nutanix Community Edition (ISO) ...
+
+# The location of the ISO file.
+set phoenix_iso ${server_proto}://${server_name}/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso
+
+# Sanboot using EL Torito emulation.
+sanboot --drive 0xe0 --no-describe ${phoenix_iso} || goto failed
+
+goto start
+
+#########################
+:nce_hdd
+#########################
+
+# NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.
+
+echo Loading Nutanix Community Edition (ISO) ...
+
+# The location of the ISO file.
+set phoenix_iso ${server_proto}://${server_name}/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso
+
+# Sanboot using block device
+sanboot --drive 0x80 ${phoenix_iso} --no-describe || goto failed
+
+goto start
+
+#########################
+:nce_ext
+#########################
+
+# NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.
+
+echo Loading Nutanix Community Edition (Extracted ISO) ...
+
+# The base URL for the extracted ISO files
+set phoenix_base ${server_proto}://${server_name}/iso-extracted/phoenix
+
+# The location of the squashfs.img file.
+set LIVEFS_URL ${phoenix_base}/squashfs.img
+
+# Load the kernel
+kernel --name kernel ${phoenix_base}/boot/kernel || goto failed
+
+# Load the initrd
+initrd --name initrd ${phoenix_base}/boot/initrd || goto failed
+
+# Define boot arguments (default)
+set bootargs_default init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0
+
+# Define boot arguments (custom)
+set bootargs_custom initrd=initrd rd.neednet=1 ip=dhcp rd.debug rd.live.squashimg=/root/squashfs.img LIVEFS_URL=${LIVEFS_URL} PHOENIX_BASE=${PHOENIX_BASE} PHOENIX_ISO=${PHOENIX_ISO} debug || goto failed
+
+# Define boot arguments (final)
+set bootargs ${bootargs_default} ${bootargs_custom}
+
+echo "Booting Nutanix Community Edition with arguments ${bootargs}"
+
 boot || goto failed
 
 goto start
@@ -156,6 +270,6 @@ reboot
 :exit
 #########################
 
-echo Exit
+echo Exiting ...
 
 exit

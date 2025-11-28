@@ -14,3 +14,6 @@ tftpboot/iso-extracted/*
 *.tar.gz
 *.zip
 
+# iVentoy
+tftpboot/tools/iventoy/log/log.txt
+

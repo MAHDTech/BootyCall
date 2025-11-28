@@ -19,10 +19,10 @@ rw
 apt update
 ```
 
-- Install the TFTP server package
+- Install the TFTP server package and additional dependencies
 
 ```bash
-apt install tftpd-hpa
+apt install tftpd-hpa nfs-kernel-server
 ```
 
 - Configure the TFTP server by editing the default configuration file
@@ -113,7 +113,7 @@ cat <<-EOF > /etc/caddy/Caddyfile
     }
 
     @binaries {
-        path *.efi *.kpxe *.ipxe
+        path *.efi *.kpxe *.ipxe */kernel */initrd */initrd-*
     }
 
     header @binaries {
@@ -148,6 +148,28 @@ sudo systemctl enable --now caddy
 sudo systemctl status caddy
 ```
 
+- Configure NFS to serve the same directory structure as HTTP.
+
+```bash
+cat <<-EOF > /etc/exports
+# Permit all clients access to the TFTP boot directory over NFS
+/mnt/hdd/tftpboot *(ro,sync,no_subtree_check,no_root_squash)
+EOF
+```
+
+- Apply the NFS configuration changes.
+
+```bash
+exportfs -ra
+systemctl restart nfs-kernel-server
+```
+
+- Show the NFS mount status
+
+```bash
+showmount -e localhost
+```
+
 ## Preparing for iPXE Chaining
 
 - Prepare [iPXE](./IPXE.md]
@@ -155,6 +177,5 @@ sudo systemctl status caddy
 - Create your iPXE script and name it `config.ipxe`
 
 - Configure your DHCP server (e.g., UniFi UDM Pro)
-  - Set TFTP Server to your device's IP.
-  - Set Network Boot to the filename (e.g., `boot/x64/ipxe.efi`).
-
+    - Set TFTP Server to your device's IP.
+    - Set Network Boot to the filename (e.g., `boot/x64/ipxe.efi`).

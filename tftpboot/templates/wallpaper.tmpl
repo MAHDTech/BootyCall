@@ -4,19 +4,33 @@ Logic
 ============================================
 */ -}}
 
+{{- /* Get the 'hd_video' Param from URL */ -}}
+{{- $is_hd := .Req.URL.Query.Get "hd_video" -}}
+
+{{- /* Define the default resolution */ -}}
+{{- $res_x := "1024" -}}
+{{- $res_y := "768" -}}
+
+{{- /* Define the HD resolution */ -}}
+{{- if eq $is_hd "true" -}}
+    {{- $res_x = "1920" -}}
+    {{- $res_y = "1080" -}}
+{{- end -}}
+
 {{- $imageDir := "/images/wallpapers" -}}
-{{- $allFiles := listFiles $imageDir -}}
 {{- $validImages := list -}}
 
-{{- /* Filter for PNGs */ -}}
-{{- range $file := $allFiles -}}
-    {{- if (hasSuffix ".png" $file) -}}
-        {{- $validImages = append $validImages $file -}}
+{{- if fileExists $imageDir -}}
+    {{- $allFiles := listFiles $imageDir -}}
+    {{- range $file := $allFiles -}}
+        {{- if (hasSuffix ".png" $file) -}}
+            {{- $validImages = append $validImages $file -}}
+        {{- end -}}
     {{- end -}}
 {{- end -}}
 
-{{- /* Select Image (Default or Random) */ -}}
-{{- $selected := "background.png" -}}
+{{- /* Select Image (Random) */ -}}
+{{- $selected := "" -}}
 {{- $count := len $validImages -}}
 
 {{- if gt $count 0 -}}
@@ -32,12 +46,19 @@ Output
 
 #!ipxe
 
-# Selected Wallpaper: {{ $selected }}
+# Mode: {{ if eq $is_hd "true" }}HD (Physical){{ else }}SD (VM){{ end }}
+# Res:  {{ $res_x }}x{{ $res_y }}
+# File: {{ if $selected }}{{ $selected }}{{ else }}None{{ end }}
 # Total candidates: {{ $count }}
 
-console --x 1024 --y 768 --picture http://{{.Host}}{{$imageDir}}/{{$selected}} --depth 32 --keep || goto failed
+{{- if gt $count 0 }}
+console --x {{ $res_x }} --y {{ $res_y }} --picture http://{{.Host}}{{$imageDir}}/{{$selected}} --depth 32 --keep || goto failed
+{{- else }}
+console --x {{ $res_x }} --y {{ $res_y }} || goto failed
+{{- end }}
 exit
 
 :failed
-echo ERROR: Failed to load wallpaper ({{ $selected }})
-sleep 5
+echo ERROR: Failed to load wallpaper, loading safe mode
+console --x 1024 --y 768 || sleep 5
+exit

@@ -61,6 +61,20 @@ EOF
 nix-shell shell-amd64.nix
 ```
 
+### Copy the original ISO to the iPXE server
+
+```bash
+NCE_ISO=${HOME}/Downloads/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso
+
+rsync \
+	-avz \
+	--progress \
+	--partial \
+	--inplace \
+	${NCE_ISO} \
+	bootycall:/mnt/hdd/tftpboot/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga.iso
+```
+
 ## Extract the ISO
 
 ```bash
@@ -104,12 +118,17 @@ menuentry 'CEInstaller' {
 }
 
 menuentry 'CEInstaller iPXE' {
-	linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs LIVEFS_URL=http://bootycall.saltlabs.cloud/iso-extracted/phoenix/squashfs.img PHOENIX_BASE=http://bootycall.saltlabs.cloud/iso-extracted/phoenix PHOENIX_ISO=http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.debug
+	linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs mpt3sas.prot_mask=1 LIVEFS_URL=http://bootycall.saltlabs.cloud/iso-extracted/phoenix/squashfs.img PHOENIX_BASE=http://bootycall.saltlabs.cloud/iso-extracted/phoenix PHOENIX_ISO=http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.debug CE_IPXE=1
 	initrdefi /boot/initrd
 }
 
-menuentry 'Rescue Shell' {
-	linuxefi /boot/kernel rdinit=/bin/sh intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 LIVEFS_URL=http://bootycall.saltlabs.cloud/iso-extracted/phoenix/squashfs.img PHOENIX_BASE=http://bootycall.saltlabs.cloud/iso-extracted/phoenix PHOENIX_ISO=http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.shell=1 rd.break=pre-mount rd.debug
+menuentry 'Rescue Shell Stage 1 (initramfs)' {
+	linuxefi /boot/kernel intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 LIVEFS_URL=http://bootycall.saltlabs.cloud/iso-extracted/phoenix/squashfs.img PHOENIX_BASE=http://bootycall.saltlabs.cloud/iso-extracted/phoenix PHOENIX_ISO=http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.shell=1 rd.break=pre-mount rd.debug
+	initrdefi /boot/initrd
+}
+
+menuentry 'Rescue Shell Stage 2 (squashfs)' {
+	linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs mpt3sas.prot_mask=1 LIVEFS_URL=http://bootycall.saltlabs.cloud/iso-extracted/phoenix/squashfs.img PHOENIX_BASE=http://bootycall.saltlabs.cloud/iso-extracted/phoenix PHOENIX_ISO=http://bootycall.saltlabs.cloud/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.shell=1 rd.break=mount rd.debug
 	initrdefi /boot/initrd
 }
 EOF
@@ -164,11 +183,11 @@ SCRIPTS_DEST="${NCE_TEMP}/initrd-extracted"
 echo "Copying modified livecd.sh script..."
 cp -f "${SCRIPTS_SOURCE}/livecd.sh" "${SCRIPTS_DEST}/livecd.sh"
 
-echo "Copying modified do_ce_installer.sh script..."
-cp -f "${SCRIPTS_SOURCE}/do_ce_installer.sh" "${SCRIPTS_DEST}/do_ce_installer.sh"
+#echo "Copying modified do_ce_installer.sh script..."
+#cp -f "${SCRIPTS_SOURCE}/do_ce_installer.sh" "${SCRIPTS_DEST}/do_ce_installer.sh"
 
-echo "Copying new ce_functions.sh script..."
-cp -f "${SCRIPTS_SOURCE}/ce_functions.sh" "${SCRIPTS_DEST}/ce_functions.sh"
+#echo "Copying new ce_functions.sh script..."
+#cp -f "${SCRIPTS_SOURCE}/ce_functions.sh" "${SCRIPTS_DEST}/ce_functions.sh"
 ```
 
 ### Create a dracut loop module for the initrd
@@ -202,17 +221,16 @@ installkernel() {
 
 install() {
     # Install pre-udev hook to create /dev/loop* nodes
-    inst_hook pre-udev 90 "$moddir/loop.sh"
-
+    # shellcheck disable=SC2154
+    inst_hook pre-udev 90 "${moddir}/loop.sh"
     # Install helper binary
-    inst_simple "$moddir/loopdev" /bin/loopdev
-
+    # shellcheck disable=SC2154
+    inst_simple "${moddir}/loopdev" /bin/loopdev
     # Copy losetup if missing (from host/CVM; ensures availability)
-    if [ ! -e "$initdir/sbin/losetup" ]; then
+    # shellcheck disable=SC2154
+    if [ ! -e "${initdir}/sbin/losetup" ]; then
         dracut_inst_exec /sbin/losetup /sbin/losetup
     fi
-
-    # Optional: Udev rules for persistent loop (if 60-persistent-storage.rules exists)
     dracut_inst_rules 60-persistent-storage.rules 2>/dev/null || true
 }
 EOF
@@ -224,8 +242,9 @@ cat > usr/lib/dracut/modules.d/05loop/loop.sh << 'EOF'
 # (Matches kernel CONFIG_BLK_DEV_LOOP_MIN_COUNT=8)
 
 [ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237
+
 for i in $(seq 0 7); do
-    [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
+    [ -e "/dev/loop${i}" ] || mknod "/dev/loop${i}" b 7 "${i}"  # Quote $i
 done
 EOF
 chmod +x usr/lib/dracut/modules.d/05loop/loop.sh
@@ -271,11 +290,13 @@ rm -rf ${NCE_TEMP}/temp-losetup
 ```bash
 cd ${NCE_TEMP}/initrd-extracted
 
-# Update the squashfs checksum.
+# REMINDER: If you have modified the squashfs, you need to update the checksum.
 SQUASHFS_MD5=$(md5sum ${NCE_TEMP}/iso-extracted/squashfs.img | awk '{print $1}')
 sed -i "s/^\([[:space:]]*\)SQUASHFS_MD5=.*/\1SQUASHFS_MD5=${SQUASHFS_MD5}/" ${NCE_TEMP}/initrd-extracted/ce_functions.sh
+sed -i "s/^SQUASHFS_DIGEST_x86_64=.*/SQUASHFS_DIGEST_x86_64=${SQUASHFS_MD5}/" ${NCE_TEMP}/initrd-extracted/livecd.sh
 
 grep "SQUASHFS_MD5=" ${NCE_TEMP}/initrd-extracted/ce_functions.sh
+grep "SQUASHFS_DIGEST_x86_64=" ${NCE_TEMP}/initrd-extracted/livecd.sh
 
 # Repack the initrd
 find . -print0 | cpio --null -o --format=newc | gzip -9 | sudo tee ${NCE_TEMP}/iso-extracted/boot/initrd > /dev/null
@@ -287,11 +308,11 @@ find . -print0 | cpio --null -o --format=newc | gzip -9 | sudo tee ${NCE_TEMP}/i
 cd ${NCE_TEMP}/iso-extracted
 
 # Delete any old ISO.
-rm -f ../nutanix_custom.iso || true
+rm -f ../nutanix_ipxe.iso || true
 
 # Run the ISO script to create the new ISO in the current directory
 sudo chmod +x make_iso.sh
-sudo ./make_iso.sh nutanix_custom
+sudo ./make_iso.sh nutanix_ipxe
 ```
 
 ## Transfer the ISO
@@ -299,7 +320,15 @@ sudo ./make_iso.sh nutanix_custom
 ```bash
 cd ${NCE_TEMP}
 
-scp nutanix_custom.iso bootycall:/mnt/hdd/tftpboot/iso//phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso
+file nutanix_ipxe.iso
+
+rsync \
+	-avz \
+	--progress \
+	--partial \
+	--inplace \
+	nutanix_ipxe.iso \
+	bootycall:/mnt/hdd/tftpboot/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso
 ```
 
 ## Cleanup
@@ -318,7 +347,7 @@ SSH to the iPXE server and extract the ISO to the correct location.
 
 ```bash
 # Define variables
-ISO_SOURCE="/mnt/hdd/tftpboot/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_custom.iso"
+ISO_SOURCE="/mnt/hdd/tftpboot/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso"
 EXTRACT_DEST="/mnt/hdd/tftpboot/iso-extracted/phoenix"
 MOUNT_POINT="/mnt/iso"
 
@@ -339,5 +368,6 @@ echo "Unmounting ISO..."
 sudo umount ${MOUNT_POINT}
 
 echo "Changing file ownership..."
+sudo chown -R tftp:tftp ${ISO_SOURCE}
 sudo chown -R tftp:tftp ${EXTRACT_DEST}
 ```

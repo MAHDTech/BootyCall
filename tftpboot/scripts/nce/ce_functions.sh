@@ -18,6 +18,48 @@ logger() {
 }
 logger "Loading Nutanix Community Edition shell functions..."
 
+# Auto-detect stage: initrd (pre-overlay) vs full root (post-squashfs)
+drop_to_shell_auto() {
+	is_initrd=true
+
+	if [ -f /etc/redhat-release ] || grep -q overlay /proc/mounts || [ -d /overlay ]; then
+		is_initrd=false
+	fi
+
+	if [ "$is_initrd" = true ]; then
+		echo "Detected INITRD stage - using safe drop_to_shell_initrd"
+		drop_to_shell_initrd
+	else
+		echo "Detected FULL ROOT stage - using standard drop_to_shell"
+		drop_to_shell
+	fi
+}
+
+drop_to_shell_initrd() {
+	echo "=== INITRD DEBUG SHELL ==="
+	echo "Context: $(cat /proc/cmdline)"
+	echo "Mounts: $(mount | cat)"
+	echo "Available: busybox ls cat mount umount wget md5sum blkid losetup"
+	echo "Resume: exec /init (or exit)"
+	echo "=========================="
+
+	# Temp tmpfs for symlinks/tools
+	mkdir -p /debug
+	mount -t tmpfs -o size=256M tmpfs /debug || echo "Tmpfs failed; using /tmp"
+	cp /bin/busybox /debug/bin/ 2>/dev/null || true
+
+	# Busybox applets as standalone
+	for cmd in ls cat mount umount wget md5sum blkid losetup find wc; do
+		ln -sf /bin/busybox /debug/bin/$cmd 2>/dev/null
+	done
+
+	export PATH="/debug/bin:$PATH"
+	export PS1="INITRD: "
+
+	# Exec sh in current namespace
+	exec /bin/sh -c 'export PS1="INITRD: "; echo "Shell ready."; exec /bin/sh'
+}
+
 extract_boot_param() {
 	PARAM_NAME="$1"
 	VALUE=$(grep -oE "$PARAM_NAME=\S*" /proc/cmdline | head -n 1 | sed "s/^$PARAM_NAME=//")
@@ -111,7 +153,8 @@ download_squashfs_into_ce() {
 	logger INFO "Squashfs MD5 verified OK."
 
 	cp "${IMG_FILE}" /root/squashfs.img
-	logger INFO "Staged squashfs to /root/squashfs.img."
+	export IMG_FILE=/root/squashfs.img
+	logger INFO "Staged squashfs to /root/squashfs.img and updated IMG_FILE variable."
 	return 0
 }
 
@@ -215,7 +258,7 @@ mount_iso_for_ce() {
 	# Attempt 3: If probing failed, try probing /dev/sr* and /dev/loop* devices.
 	if [ -z "$ISO_DEV" ]; then
 		logger INFO "Attempt 3: Probing /dev/sr* and /dev/loop* devices..."
-		for dev in /dev/sr* /dev/loop*; do
+		for dev in /dev/sr* /dev/loop* /dev/sd?; do
 			[ -b "$dev" ] || continue
 			if mount -t iso9660 -o ro "$dev" /mnt/iso >/dev/null 2>&1; then
 				logger INFO "ISO mount successful, testing for make_iso.sh"

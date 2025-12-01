@@ -64,19 +64,19 @@ item --gap --
 item netboot        > Netboot (Default)
 item iventoy        > iVentoy
 item threefold      > Threefold ZeroOS
-item nce_iso        > Nutanix CE (ISO)
+item nce_dvd        > Nutanix CE (DVD)
 item nce_hdd        > Nutanix CE (HDD)
 item --gap --
 item --gap --   :: DIAGNOSTICS & TOOLS ::
 item --gap --
-item mt86plus     > Memtest86+
-item mt86passmark > MemTest86 PassMark
-item shell        > iPXE Shell
+item mt86plus       > Memtest86+
+item mt86passmark   > MemTest86 PassMark
+item shell          > iPXE Shell
 item --gap --
 item --gap --   :: POWER CONTROL ::
 item --gap --
-item reboot       [ SYSTEM REBOOT ]
-item exit         [ EXIT TO BIOS  ]
+item reboot         [ SYSTEM REBOOT ]
+item exit           [ EXIT TO BIOS  ]
 item --gap --
 item --gap -- ----------------------------------------------------
 
@@ -90,10 +90,10 @@ goto ${selected}
 #########################
 
 item --key n netboot        [N] Netboot.xyz
+item --key h nce_hdd        [H] Nutanix Community Edition HDD
+item --key i nce_iso        [I] Nutanix Community Edition DVD
 item --key m mt86plus       [M] Memtest86+
 item --key p mt86passmark   [P] PassMark MemTest86
-item --key t threefold      [T] Threefold Cloud
-item --key u nce            [U] Nutanix Community Edition
 item --key s shell          [S] iPXE shell
 item --key r reboot         [R] Reboot computer
 item --key x exit           [X] Exit to BIOS/UEFI
@@ -163,7 +163,7 @@ chain --autofree ${server_proto}://${server_name}/ipxe/threefold.ipxe || goto fa
 goto start
 
 #########################
-:nce_iso
+:nce_dvd
 #########################
 
 # NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.

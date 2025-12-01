@@ -6,4 +6,3 @@ Always answers the call (to boot your servers)
 
 - [Setup](./docs/setup.md)
 - [iPXE](./docs/iPXE.md)
-

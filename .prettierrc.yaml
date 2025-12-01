@@ -1,0 +1,99 @@
+---
+##################################################
+# Name: .prettierrc.yaml
+# Description: Prettier config
+##################################################
+
+#########################
+# Plugins
+#########################
+
+plugins: []
+
+#########################
+# Global settings
+#########################
+
+trailingComma: "es5"
+tabWidth: 4
+semi: false
+singleQuote: false
+
+overrides:
+  #########################
+  # Global
+  #########################
+  - files:
+      - "*.*"
+    options:
+      bracketSpacing: false
+
+  #########################
+  # Markdown
+  #########################
+  - files:
+      - "*.md"
+    options:
+      tabWidth: 2
+      useTabs: false
+      proseWrap: preserve
+      printWidth: 80
+      singleQuote: false
+      trailingComma: none
+
+  #########################
+  # HTML
+  #########################
+  - files:
+      - "*.html"
+    options:
+      tabWidth: 4
+      useTabs: false
+
+  #########################
+  # Javascript and Typescript
+  #########################
+  - files:
+      - "*.js"
+      - "*.jsx"
+      - "*.ts"
+      - "*.tsx"
+    options:
+      tabWidth: 4
+      useTabs: false
+
+  #########################
+  # JSON
+  #########################
+  - files:
+      - "*.json"
+    options:
+      tabWidth: 4
+      useTabs: false
+
+  #########################
+  # Python
+  #########################
+  - files:
+      - "*.py"
+    options:
+      tabWidth: 4
+      useTabs: false
+
+  #########################
+  # YAML
+  #########################
+  - files:
+      - "*.yaml"
+      - "*.yml"
+    options:
+      tabWidth: 2
+      useTabs: false
+
+  #########################
+  # Astro
+  #########################
+  - files:
+      - "*.astro"
+    options:
+      parser: "astro"

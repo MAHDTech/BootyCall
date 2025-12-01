@@ -1,0 +1,70 @@
+[default]
+
+# https://github.com/crate-ci/typos/issues/915
+locale = "en-au"
+
+extend-ignore-re = [
+    '^[ \t]*-----BEGIN PGP PUBLIC KEY BLOCK-----.*^[ \t]*-----END PGP PUBLIC KEY BLOCK-----',
+    '^[ \t]*initialHashedPassword[ \t]*=[ \t]*.*$',
+    "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$"
+]
+
+[default.extend-words]
+
+# HACK: Regex is busted.
+"Pn" = "Pn"
+
+CAF = "CAF"
+NCE = "NCE"
+analyze = "analyze"
+analyzer = "analyzer"
+authorize = "authorize"
+authorized = "authorized"
+authorization = "authorization"
+capitalize = "capitalize"
+center = "center"
+centered = "centered"
+cros = "cros"
+customization = "customization"
+customizations = "customizations"
+guage = "guage"
+hashi = "hashi"
+hashicorp = "hashicorp"
+hda = "hda"
+humanize = "humanize"
+humanized = "humanized"
+initialize = "initialize"
+initializing = "initializing"
+maximize = "maximize"
+maximized = "maximized"
+minimize = "minimize"
+minimized = "minimized"
+normalization = "normalization"
+optimization = "optimization"
+optimizations = "optimizations"
+optimize = "optimize"
+optimized = "optimized"
+organized = "organized"
+organization = "organization"
+organizations = "organizations"
+organize = "organize"
+prioritize = "prioritize"
+randomize = "randomize"
+randomized = "randomized"
+recognize = "recognize"
+specializing = "specializing"
+synchronized = "synchronized"
+utilize = "utilize"
+
+[files]
+
+ignore-vcs = true
+
+extend-exclude = [
+  "*.drawio",
+  ".devenv",
+  ".direnv",
+  ".git",
+  "secrets",
+  "vendor"
+]

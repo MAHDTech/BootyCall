@@ -66,16 +66,25 @@ extract_boot_param() {
 	PARAM_NAME="$1"
 	VALUE=$(grep -oE "$PARAM_NAME=\S*" /proc/cmdline | head -n 1 | sed "s/^$PARAM_NAME=//")
 	VALUE_TRIMMED=$(echo "$VALUE" | sed "s/^'//" | sed "s/'$//")
-	echo "$VALUE_TRIMMED"
+	echo "${VALUE_TRIMMED:-}"
 }
 
 download_path_into_ce() {
-	SOURCE="$1"      # e.g. http://192.168.1.100/iso/
-	DEST="$2"        # local directory, must already exist
+	SOURCE="$1" # e.g. http://192.168.1.100/iso/
+	DEST="$2"   # local directory, must already exist
 
-	[ -z "$SOURCE" ] && { logger ERROR "download_path_into_ce: SOURCE URL missing"; return 1; }
-	[ -z "$DEST" ]   && { logger ERROR "download_path_into_ce: DEST directory missing"; return 1; }
-	[ -d "$DEST" ]   || { logger ERROR "download_path_into_ce: DEST $DEST does not exist"; return 1; }
+	[ -z "$SOURCE" ] && {
+		logger ERROR "download_path_into_ce: SOURCE URL missing"
+		return 1
+	}
+	[ -z "$DEST" ] && {
+		logger ERROR "download_path_into_ce: DEST directory missing"
+		return 1
+	}
+	[ -d "$DEST" ] || {
+		logger ERROR "download_path_into_ce: DEST $DEST does not exist"
+		return 1
+	}
 
 	TRY=1
 	TOTAL_TRIES=10
@@ -109,13 +118,11 @@ download_path_into_ce() {
 			--tries=${TOTAL_TRIES_PER_FILE} \
 			--user-agent="Mozilla/5.0 (compatible; wget)" \
 			--waitretry=${TIME_BETWEEN} \
-			"${SOURCE}/" 2>&1 | tee /tmp/wget-recursive.log;
-		then
+			"${SOURCE}/" 2>&1 | tee /tmp/wget-recursive.log; then
 			logger INFO "Recursive download completed successfully"
 			return 0
 		else
-			WGET_EXIT=${PIPESTATUS[0]}
-			logger WARN "wget recursive failed (exit $WGET_EXIT) - attempt $TRY/$TOTAL_TRIES"
+			logger WARN "wget recursive failed attempt $TRY/$TOTAL_TRIES"
 			if [ "$TRY" -lt "$TOTAL_TRIES" ]; then
 				logger WARN "Retrying in $TIME_BETWEEN seconds..."
 				# Nuke all files between partial retries.
@@ -127,7 +134,7 @@ download_path_into_ce() {
 	done
 
 	logger ERROR "Failed to recursively download $SOURCE after $TOTAL_TRIES attempts"
-	cat /tmp/wget-recursive.log >> ${NCE_HACKS_LOG} 2>/dev/null || true
+	cat /tmp/wget-recursive.log >>${NCE_HACKS_LOG} 2>/dev/null || true
 	return 1
 }
 
@@ -156,8 +163,7 @@ download_file_into_ce() {
 			--quiet \
 			--timeout="$TIMEOUT" \
 			--tries=$TOTAL_TRIES_PER_FILE \
-			--output-document=- "$SOURCE" >"$DEST";
-		then
+			--output-document=- "$SOURCE" >"$DEST"; then
 			if [ -s "$DEST" ]; then
 				logger INFO "Successfully downloaded ${SOURCE} to ${DEST}"
 				return 0
@@ -176,38 +182,4 @@ download_file_into_ce() {
 	logger ERROR "Failed to download ${SOURCE} after ${TOTAL_TRIES} attempts"
 	rm -f "$DEST"
 	return 1
-}
-
-download_squashfs_into_ce() {
-	SQUASHFS_MD5=UPDATE_ME_PLZ
-
-	if [ -z "${LIVEFS_URL}" ]; then
-		logger ERROR "The variable LIVEFS_URL is not set!"
-		return 1
-	fi
-
-	if [ -z "${IMG_FILE}" ]; then
-		logger ERROR "The variable IMG_FILE is not set!"
-		return 1
-	fi
-
-	logger INFO "Downloading squashfs.img from LIVEFS_URL: ${LIVEFS_URL}"
-
-	if ! download_file_into_ce "${LIVEFS_URL}" "${IMG_FILE}"; then
-		logger ERROR "Failed to download squashfs.img"
-		rm -f "${IMG_FILE}"
-		return 1
-	fi
-
-	if ! echo "${SQUASHFS_MD5}  ${IMG_FILE}" | md5sum -c >/dev/null 2>&1; then
-		logger ERROR "Squashfs MD5 mismatch—corrupt download!"
-		rm -f "${IMG_FILE}"
-		return 1
-	fi
-	logger INFO "Squashfs MD5 verified OK."
-
-	cp "${IMG_FILE}" /root/squashfs.img
-	export IMG_FILE=/root/squashfs.img
-	logger INFO "Staged squashfs to /root/squashfs.img and updated IMG_FILE variable."
-	return 0
 }

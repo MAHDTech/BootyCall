@@ -32,6 +32,11 @@ if [ "$(extract_boot_param CE_IPXE)" = "1" ]; then
 	PHOENIX_BASE="$(extract_boot_param PHOENIX_BASE)"
 	ISO_DEST="/mnt/iso"
 
+	if [ -z "$PHOENIX_BASE" ]; then
+		logger ERROR "Unable to download ISO contents: PHOENIX_BASE parameter was not found"
+		exit 1
+	fi
+
 	logger INFO "CE iPXE: Downloading ISO contents from $PHOENIX_BASE to $ISO_DEST"
 	logger WARN "CE iPXE: This part takes a while..."
 

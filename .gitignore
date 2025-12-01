@@ -17,3 +17,16 @@ tftpboot/iso-extracted/*
 # iVentoy
 tftpboot/tools/iventoy/log/log.txt
 
+# dotenv
+.env
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml

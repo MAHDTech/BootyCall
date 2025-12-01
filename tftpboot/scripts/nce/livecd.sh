@@ -22,6 +22,13 @@ else
 fi
 
 . "$HOME/common_utils.sh"
+
+# shellcheck disable=SC1091
+. "${HOME}/ce_functions.sh" || {
+	echo "Failed to source critical NCE functions!"
+	exit 1
+}
+
 redirect_logs_to_file $log_file
 
 # ENG-197802
@@ -508,6 +515,37 @@ setup_nw() {
 	return 0
 }
 
+download_squashfs_from_livefs_url() {
+	# Allow destination to be specified
+	DESTINATION=$1
+
+	echo "Downloading squashfs.img from $LIVEFS_URL to $DESTINATION"
+	# In the case of VLAN environments, ping works but wget
+	# takes a while to "stabilize". Try for a few times.
+	total_tries=5
+	for i in $(seq $total_tries); do
+		wget "$LIVEFS_URL" -t1 -T30 -O- >$DESTINATION
+		# verify md5sum of squashfs, delete the IMG_FILE if md5sum does not
+		# match, so that we can retry or check for backup on cvm.
+		md5sum $DESTINATION | grep $IMG_MD5SUM
+		if [ $? -ne 0 ]; then
+			echo "md5 checksum does not match"
+			rm $DESTINATION
+		fi
+		if [ -e $DESTINATION ]; then
+			break
+		else
+			echo "[$i/$total_tries] wget failed, sleeping for 5 seconds before trying again"
+			sleep 5
+		fi
+	done
+	# if wget fails, try to mount CVM and look for squashfs.img in it.
+	if [ ! -e $DESTINATION ]; then
+		echo "Failed to download squashfs.img via wget"
+		find_squashfs_in_disks
+	fi
+}
+
 ## Main course starts here
 
 # Identifying the OS type
@@ -542,22 +580,10 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 	setup_nw
 	setup_nw_result=$?
 	if [ $ce -ne 0 ]; then
-		# HACK: Add iPXE support to CE installer.
 		if [ -n "$(get_boot_param CE_IPXE)" ]; then
 			echo "CE iPXE mode enabled"
-			setup_network || drop_to_shell
-			echo "Downloading squashfs.img"
-			for i in $(seq 5); do
-				wget --continue "${LIVEFS_URL}" -t1 -T30 -O ${IMG_FILE}.tmp || {
-					echo "wget failed, retrying..."
-				}
-				md5sum $IMG_FILE.tmp | grep $IMG_MD5SUM && mv $IMG_FILE.tmp $IMG_FILE || {
-					echo "md5sum failed, retrying..."
-				}
-				echo "squashfs.img downloaded and md5sum checked"
-				break
-			done
-			[ -f "$IMG_FILE" ] || drop_to_shell
+			download_squashfs_from_livefs_url /root/squashfs.img
+			[ -f /root/squashfs.img ] || drop_to_shell
 		else
 			echo "CE USB mode enabled"
 			find_squashfs_in_iso_ce
@@ -566,31 +592,8 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 		if [ $setup_nw_result -ne 0 ]; then
 			find_squashfs_in_disks
 		else
-			echo "Downloading squashfs.img"
-			# In the case of VLAN environments, ping works but wget
-			# takes a while to "stabilize". Try for a few times.
-			total_tries=5
-			for i in $(seq $total_tries); do
-				wget "$LIVEFS_URL" -t1 -T30 -O- >$IMG_FILE
-				# verify md5sum of squashfs, delete the IMG_FILE if md5sum does not
-				# match, so that we can retry or check for backup on cvm.
-				md5sum $IMG_FILE | grep $IMG_MD5SUM
-				if [ $? -ne 0 ]; then
-					echo "md5 checksum does not match"
-					rm $IMG_FILE
-				fi
-				if [ -e $IMG_FILE ]; then
-					break
-				else
-					echo "[$i/$total_tries] wget failed, sleeping for 5 seconds before trying again"
-					sleep 5
-				fi
-			done
-			# if wget fails, try to mount CVM and look for squashfs.img in it.
-			if [ ! -e $IMG_FILE ]; then
-				echo "Failed to download squashfs.img via wget"
-				find_squashfs_in_disks
-			fi
+			download_squashfs_from_livefs_url $IMG_FILE
+			[ -f "$IMG_FILE" ] || drop_to_shell
 		fi
 	elif [ "$PEM_WORKFLOW" = "TRUE" ]; then
 		if [ "$COMPUTE_ONLY" = "TRUE" ]; then

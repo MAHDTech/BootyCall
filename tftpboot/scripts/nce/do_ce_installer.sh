@@ -27,12 +27,37 @@ fi
 	exit 1
 }
 
-# Download the required images into the overlayfs before running the installer.
-download_images_into_ce || {
-	logger ERROR "Failed to download required images"
-	exit 1
-}
-echo "Required images have been downloaded successfully"
+# If loaded over iPXE,download the ISO contents into /mnt/iso
+if [ "$(extract_boot_param CE_IPXE)" = "1" ]; then
+	PHOENIX_BASE="$(extract_boot_param PHOENIX_BASE)"
+	ISO_DEST="/mnt/iso"
+
+	logger INFO "CE iPXE: Downloading ISO contents from $PHOENIX_BASE to $ISO_DEST"
+	logger WARN "CE iPXE: This part takes a while..."
+
+	mkdir -p "$ISO_DEST" || {
+		logger ERROR "Failed to create $ISO_DEST directory"
+		exit 1
+	}
+
+	download_path_into_ce "${PHOENIX_BASE}" "$ISO_DEST" || {
+		logger ERROR "Failed to download ISO contents"
+		exit 1
+	}
+
+	# Create the required flags
+	FLAG_FILES="$ISO_DEST/.prepared /tmp/phoenix_iso_marker"
+
+	for flag in $FLAG_FILES; do
+		touch "$flag" || {
+			logger ERROR "Failed to create the required prepared file flag at $flag"
+			exit 1
+		}
+	done
+
+	logger INFO "${ISO_DEST} is now ready: ($(du -sh ${ISO_DEST}))"
+
+fi
 
 rm -f /mnt/stage/root/.ce_install_success
 sh /root/do_installer.sh

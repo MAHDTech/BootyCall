@@ -132,8 +132,8 @@ wipe_disk() {
 	# For NVMe disks, use secure erase if requested
 	local nvme_sanitize_args="--sanact=start-block-erase --ause"
 	if [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; then
-		log INFO "Performing NVMe secure erase on $disk using \"nvme sanitize ${nvme_sanitize_args}\""
-		if ! nvme sanitize "${nvme_sanitize_args}" "$disk" >/dev/null 2>&1; then
+		log INFO "Performing NVMe secure erase on $disk using ${nvme_sanitize_args}"
+		if ! nvme sanitize "$disk" "${nvme_sanitize_args}" >/dev/null 2>&1; then
 			log ERR "✗ Failed to perform NVMe secure erase on $disk"
 			return 1
 		fi

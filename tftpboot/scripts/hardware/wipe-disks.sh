@@ -124,16 +124,19 @@ wipe_disk() {
 
 	# Wipe filesystem signatures first
 	if ! wipefs -af "$disk" >/dev/null 2>&1; then
+		log ERR "✗ Failed to wipe filesystem signatures on $disk"
 		return 1
 	fi
+	log INFO "✓ Successfully wiped filesystem signatures on $disk"
 
 	# For NVMe disks, use secure erase if requested
 	if [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; then
 		log INFO "Performing NVMe secure erase on $disk using 'nvme sanitize --sanitize revert'"
 		if ! nvme sanitize --sanitize revert "$disk" >/dev/null 2>&1; then
-			log ERR "Failed to perform NVMe secure erase on $disk"
+			log ERR "✗ Failed to perform NVMe secure erase on $disk"
 			return 1
 		fi
+		log INFO "✓ Successfully performed NVMe secure erase on $disk"
 		return 0
 	fi
 
@@ -142,17 +145,19 @@ wipe_disk() {
 	if [ "$random" = true ]; then
 		log INFO "Filling $disk with random data using dd and /dev/urandom"
 		if ! dd if=/dev/urandom of="$disk" bs=1M status=progress; then
-			log ERR "Failed to fill $disk with random data"
+			log ERR "✗ Failed to fill $disk with random data"
 			return 1
 		fi
+		log INFO "✓ Successfully filled $disk with random data"
 	fi
 
 	if [ "$zero" = true ]; then
 		log INFO "Zeroing $disk using dd and /dev/zero"
 		if ! dd if=/dev/zero of="$disk" bs=1M status=progress; then
-			log ERR "Failed to zero $disk"
+			log ERR "✗ Failed to zero $disk"
 			return 1
 		fi
+		log INFO "✓ Successfully zeroed $disk"
 	fi
 
 	return 0

@@ -58,8 +58,8 @@ detect_os() {
 install_deps() {
 	log INFO "Updating package list"
 	if ! apt update -qq >/dev/null 2>&1; then
-		log ERR "apt update failed."
-		exit 1
+		# Non-fatal error, attempt package install anyway.
+		log WARN "apt update failed, attempting package install"
 	fi
 	log INFO "Installing required packages: util-linux, nvme-cli"
 	if ! apt install -y -qq util-linux nvme-cli >/dev/null 2>&1; then

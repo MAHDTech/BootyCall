@@ -13,7 +13,7 @@
 # WARNING: This operation permanently erases all data on the targeted disks.
 # There is no way to recover data after running this script.
 #
-# Ensure the system is running as root (sudo) for disk operations.
+# This script uses sudo for privileged disk operations.
 # Review the detected disks before confirming.
 #
 # Use at your own risk!
@@ -57,12 +57,12 @@ detect_os() {
 # Install dependencies
 install_deps() {
 	log INFO "Updating package list"
-	if ! apt update -qq >/dev/null 2>&1; then
+	if ! sudo apt update -qq >/dev/null 2>&1; then
 		# Non-fatal error, attempt package install anyway.
 		log WARN "apt update failed, attempting package install"
 	fi
 	log INFO "Installing required packages: util-linux, nvme-cli"
-	if ! apt install -y -qq util-linux nvme-cli >/dev/null 2>&1; then
+	if ! sudo apt install -y -qq util-linux nvme-cli >/dev/null 2>&1; then
 		log ERR "apt install failed."
 		exit 1
 	fi
@@ -112,7 +112,7 @@ get_disks() {
 		elif [ "$type" = "rom" ] || [ "$tran" = "usb" ]; then
 			ignored_disks+=("/dev/$name")
 		fi
-	done < <(lsblk -dno NAME,TYPE,TRAN)
+	done < <(sudo lsblk -dno NAME,TYPE,TRAN)
 }
 
 ##################################################
@@ -123,7 +123,7 @@ wipe_disk() {
 	local disk=$1
 
 	# Wipe filesystem signatures first
-	if ! wipefs -af "$disk" >/dev/null 2>&1; then
+	if ! sudo wipefs -af "$disk" >/dev/null 2>&1; then
 		log ERR "✗ Failed to wipe filesystem signatures on $disk"
 		return 1
 	fi
@@ -133,7 +133,7 @@ wipe_disk() {
 	local nvme_sanitize_args=(--sanact=start-block-erase --ause)
 	if [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; then
 		log INFO "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
-		if ! nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
+		if ! sudo nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
 			log ERR "✗ Failed to perform NVMe secure erase on $disk"
 			return 1
 		fi
@@ -145,7 +145,7 @@ wipe_disk() {
 	# Random first, then zero
 	if [ "$random" = true ]; then
 		log INFO "Filling $disk with random data using dd and /dev/urandom"
-		if ! dd if=/dev/urandom of="$disk" bs=1M status=progress; then
+		if ! sudo dd if=/dev/urandom of="$disk" bs=1M status=progress; then
 			log ERR "✗ Failed to fill $disk with random data"
 			return 1
 		fi
@@ -154,7 +154,7 @@ wipe_disk() {
 
 	if [ "$zero" = true ]; then
 		log INFO "Zeroing $disk using dd and /dev/zero"
-		if ! dd if=/dev/zero of="$disk" bs=1M status=progress; then
+		if ! sudo dd if=/dev/zero of="$disk" bs=1M status=progress; then
 			log ERR "✗ Failed to zero $disk"
 			return 1
 		fi
@@ -279,11 +279,6 @@ main() {
 			;;
 		esac
 	done
-
-	if [ "$EUID" -ne 0 ]; then
-		log ERR "This script must be run as root (sudo)."
-		exit 1
-	fi
 
 	detect_os
 	install_deps

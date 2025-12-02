@@ -30,28 +30,37 @@ fi
 # If loaded over iPXE,download the ISO contents into /mnt/iso
 if [ "$(extract_boot_param CE_IPXE)" = "1" ]; then
 	PHOENIX_BASE="$(extract_boot_param PHOENIX_BASE)"
-	ISO_DEST="/mnt/iso"
+
+	# The default ISO mount location.
+	ISO_MOUNT="/mnt/local"
+	# Community Edition has different logic.
+	ISO_MOUNT_CE="/mnt/iso"
 
 	if [ -z "$PHOENIX_BASE" ]; then
 		logger ERROR "Unable to download ISO contents: PHOENIX_BASE parameter was not found"
 		exit 1
 	fi
 
-	logger INFO "CE iPXE: Downloading ISO contents from $PHOENIX_BASE to $ISO_DEST"
+	logger INFO "CE iPXE: Downloading ISO contents from $PHOENIX_BASE to $ISO_MOUNT_CE"
 	logger WARN "CE iPXE: This part takes a while..."
 
-	mkdir -p "$ISO_DEST" || {
-		logger ERROR "Failed to create $ISO_DEST directory"
+	mkdir -p "$ISO_MOUNT" || {
+		logger ERROR "Failed to create $ISO_MOUNT directory"
 		exit 1
 	}
 
-	download_path_into_ce "${PHOENIX_BASE}" "$ISO_DEST" || {
+	mkdir -p "$ISO_MOUNT_CE" || {
+		logger ERROR "Failed to create $ISO_MOUNT_CE directory"
+		exit 1
+	}
+
+	download_path_into_ce "${PHOENIX_BASE}" "$ISO_MOUNT_CE" || {
 		logger ERROR "Failed to download ISO contents"
 		exit 1
 	}
 
-	# Create the required flags
-	FLAG_FILES="$ISO_DEST/.prepared /tmp/phoenix_iso_marker"
+	# Create the required flag files in all locations.
+	FLAG_FILES="$ISO_MOUNT/.prepared $ISO_MOUNT_CE/.prepared /tmp/phoenix_iso_marker"
 
 	for flag in $FLAG_FILES; do
 		touch "$flag" || {
@@ -60,7 +69,8 @@ if [ "$(extract_boot_param CE_IPXE)" = "1" ]; then
 		}
 	done
 
-	logger INFO "${ISO_DEST} is now ready: ($(du -sh ${ISO_DEST}))"
+	logger INFO "Directory ${ISO_MOUNT} size: ($(du -sh ${ISO_MOUNT}))"
+	logger INFO "Directory ${ISO_MOUNT_CE} size: ($(du -sh ${ISO_MOUNT_CE}))"
 
 fi
 

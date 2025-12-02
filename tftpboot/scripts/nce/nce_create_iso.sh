@@ -15,8 +15,6 @@ set -euo pipefail
 ##################################################
 
 SCRIPT_NAME=${0##*/}
-SCRIPT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/../../../.env"
 
 function usage() {
 	cat <<-EOF
@@ -58,17 +56,6 @@ function usage() {
 		    ${SCRIPT_NAME}
 	EOF
 }
-
-if [[ -f ${ENV_FILE} ]]; then
-	# shellcheck disable=SC1090
-	. "${ENV_FILE}" || {
-		echo "ERROR sourcing ${ENV_FILE}, please check the file syntax"
-		exit 1
-	}
-else
-	usage
-	exit 1
-fi
 
 #########################
 # Variable validation
@@ -347,26 +334,23 @@ function unpack_initrd() {
 }
 
 function copy_scripts() {
-	local CUSTOM_SCRIPTS
+	local INITRD_SCRIPTS="${SCRIPTS_DIR}/initrd"
 
-	logger INFO "Copying custom scripts to initrd..."
-	CUSTOM_SCRIPTS=(
-		livecd.sh
-		do_ce_installer.sh
-		ce_functions.sh
-	)
+	logger INFO "Syncing custom scripts from ${INITRD_SCRIPTS} to ${NCE_TEMP}/${TEMP_INITRD_EXTRACTED}"
 
-	for SCRIPT in "${CUSTOM_SCRIPTS[@]}"; do
-		[[ -f "${SCRIPTS_DIR}/${SCRIPT}" ]] || {
-			logger ERROR "Missing script: ${NCE_SCRIPTS_DIR}/${SCRIPT}"
-			return 1
-		}
-		cp -fv "${SCRIPTS_DIR}/${SCRIPT}" "${NCE_TEMP}/${TEMP_INITRD_EXTRACTED}/${SCRIPT}" || {
-			logger ERROR "Failed to copy script: ${SCRIPT}"
-			return 1
-		}
-	done
-	logger DEBUG "Custom scripts copied"
+	# Ensure the source directory exists
+	[[ -d ${INITRD_SCRIPTS} ]] || {
+		logger ERROR "Missing source directory: ${INITRD_SCRIPTS}"
+		return 1
+	}
+
+	# Use rsync to copy/overwrite structure without deleting missing dest files
+	rsync -a "${INITRD_SCRIPTS}/" "${NCE_TEMP}/${TEMP_INITRD_EXTRACTED}/" || {
+		logger ERROR "Failed to sync scripts with rsync"
+		return 1
+	}
+
+	logger DEBUG "Custom scripts synced"
 }
 
 function repack_initrd() {
@@ -518,6 +502,35 @@ copy_scripts || {
 	logger ERROR "Failed to copy scripts"
 	exit 8
 }
+
+# PAUSE for user modifications.
+cat <<EOF
+
+##################################################
+
+The ISO has been extracted and the required changes have been made for iPXE booting.
+
+If you need to make any additional changes, you can do so now in the directory: ${NCE_TEMP}/${TEMP_ISO_EXTRACTED}
+
+Enter 'y' to continue bundling the changes into a new ISO, or 'n' to cancel.
+
+##################################################
+
+EOF
+read -r RESPONSE
+case "${RESPONSE}" in
+y | Y | yes | Yes)
+	logger INFO "User answered YES to continue with ISO rebuild."
+	;;
+n | N | no | No)
+	logger WARN "User answered NO to continue with ISO rebuild"
+	exit 0
+	;;
+*)
+	logger ERROR "User answered an invalid response of: ${RESPONSE}"
+	exit 1
+	;;
+esac
 
 repack_initrd || {
 	logger ERROR "Failed to repack initrd"

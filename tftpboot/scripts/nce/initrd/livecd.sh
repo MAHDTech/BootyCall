@@ -1,4 +1,6 @@
 #!/bin/sh
+
+##################################################
 #
 # Copyright (c) 2012 Nutanix, Inc.  All Rights Reserved.
 #
@@ -9,6 +11,15 @@
 # a different script that does the imaging.
 
 # Log all output to file and console for debugging purpose.
+##################################################
+
+##################################################
+# Hacked on by MAHDTech@saltlabs.cloud to add iPXE support.
+##################################################
+
+##################################################
+# Variables
+##################################################
 
 log_file="/tmp/phoenix.log"
 
@@ -21,6 +32,7 @@ else
 	HOME="/"
 fi
 
+# shellcheck disable=SC1091
 . "$HOME/common_utils.sh"
 
 # shellcheck disable=SC1091
@@ -29,14 +41,17 @@ fi
 	exit 1
 }
 
-redirect_logs_to_file $log_file
-
 # ENG-197802
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export TERM=linux
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-RESET='\033[0m'
+
+# More colours
+export RED='\033[0;31m'
+export GREEN='\033[0;32m'
+export YELLOW='\033[0;33m'
+export BLUE='\033[0;34m'
+export PURPLE='\033[0;35m'
+export RESET='\033[0m'
 
 # Setting core dump file name pattern
 # %e is the filename
@@ -44,17 +59,26 @@ RESET='\033[0m'
 # %t is the time the dump occurred
 sysctl -w kernel.core_pattern=/tmp/core-%e-%s-%t
 # Setting core dump file size to unlimited
+# shellcheck disable=SC3045
 ulimit -S -c unlimited
 
 ce=0
-if [ "${0##*/}" == "ce_installer" ]; then
+if [ "${0##*/}" = "ce_installer" ]; then
 	ce=1
 fi
 
-####  FUNCTIONS  ####
+##################################################
+# Functions
+##################################################
+
+redirect_logs_to_file $log_file
+# TODO: rewrite a unified logging function.
+#logger() {
+#
+#}
 
 wait_for_devices() {
-	if [[ "$PEM_WORKFLOW" = "TRUE" || "$USE_CVM_CFG" = "true" ]]; then
+	if [ "$PEM_WORKFLOW" = "TRUE" ] || [ "$USE_CVM_CFG" = "true" ]; then
 		# Devices can take longer to initialize post firmware upgrade,
 		# add one minute delay since PEM/IVU workflows mount disks early.
 		for try in $(seq 1 6); do
@@ -70,42 +94,38 @@ find_squashfs_in_disks() {
 	[ -d $CVM_HOME_MNT ] || mkdir -p $CVM_HOME_MNT
 	parts="/dev/md* /dev/sd* /dev/nvme*"
 	if ! [ "$COMPUTE_ONLY" = "TRUE" ]; then
-		assemble_raid
-		if [ $? -ne 0 ]; then
+		if ! assemble_raid; then
 			# Fail early if CVM boot disk is raided.
-			[ -n "$CVM_HOME_RAID_PART_UUID" ] && drop_to_shell
+			[ -n "$CVM_HOME_RAID_PART_UUID" ] && drop_to_shell_auto
 		fi
-		find_cvm_home_raid_part_by_uuid
-		if [ $? -eq 0 ]; then
-			cvm_part=$(cat $CVM_HOME_PART_INFO_PATH)
+		if find_cvm_home_raid_part_by_uuid; then
+			cvm_part=$(cat "$CVM_HOME_PART_INFO_PATH")
 			parts="$cvm_part $parts"
 		fi
 	fi
 	for part in $parts; do
 		[ -e "$part" ] || continue
-		mount $part $CVM_HOME_MNT
-		if [ $? -eq 0 ]; then
+		if mount "$part" "$CVM_HOME_MNT"; then
 			for path in $paths; do
 				livecd=$CVM_HOME_MNT/$path/squashfs.img
-				if [ -f $livecd ]; then
+				if [ -f "$livecd" ]; then
 					echo "squashfs.img found in $part"
-					md5sum $livecd | grep $IMG_MD5SUM
-					if [ $? -eq 0 ]; then
-						cp $livecd /mnt/local
+					if md5sum "$livecd" | grep -q "$IMG_MD5SUM"; then
+						cp "$livecd" /mnt/local
 					else
 						echo "squashfs.img found in $part at $path but md5sum didn't match"
 						continue
 					fi
 
 					updates_dir_path=$CVM_HOME_MNT/$path/updates
-					if [ -d $updates_dir_path ]; then
+					if [ -d "$updates_dir_path" ]; then
 						[ -d /root/updates ] || mkdir -p /root/updates
-						cp -rf $updates_dir_path/* /root/updates
+						cp -rf "$updates_dir_path"/* /root/updates
 					fi
 
-					if [[ -d $CVM_HOME_MARKER1 || -d $CVM_HOME_MARKER2 ]]; then
+					if [ -d "$CVM_HOME_MARKER1" ] || [ -d "$CVM_HOME_MARKER2" ]; then
 						echo "Storing CVM home partition info in $CVM_HOME_PART_INFO_PATH"
-						echo $part >$CVM_HOME_PART_INFO_PATH
+						echo "$part" >"$CVM_HOME_PART_INFO_PATH"
 					fi
 					umount $CVM_HOME_MNT
 					return 0
@@ -115,8 +135,7 @@ find_squashfs_in_disks() {
 		umount $CVM_HOME_MNT
 	done
 
-	echo -e "Phoenix ${RED}failed${RESET} to load squashfs.img" \
-		"from both the network and the existing CVM filesystem of this node"
+	printf "Phoenix %sfailed%s to load squashfs.img\nfrom both the network and the existing CVM filesystem of this node\n" "$RED" "$RESET"
 	if [ "$IPV6" != "true" ]; then
 		if [ -n "$PHOENIX_IP" ]; then
 			echo "The network parameters provided to Phoenix were:"
@@ -126,7 +145,7 @@ find_squashfs_in_disks() {
 		echo "The network parameters provided to Phoenix in IPv6 mode were:"
 		echo " > VLAN: $VLAN"
 	fi
-	drop_to_shell
+	drop_to_shell_auto
 	return 1
 }
 
@@ -139,8 +158,7 @@ find_squashfs_in_iso() {
 			[ -e "$i" ] || continue
 			# Copy squashfs in RAM. Otherwise, once iso is removed, livecd environment
 			# will crash. Same for USB devices below.
-			mount -t udf,iso9660 -o ro $i /mnt/local
-			if [ $? -eq 0 -a -f /mnt/local/make_iso.sh ]; then
+			if mount -t udf,iso9660 -o ro "$i" /mnt/local && [ -f /mnt/local/make_iso.sh ]; then
 				if [ -f /mnt/local/squashfs.img ]; then
 					# Node is booted in Centos phoenix, not Gentoo phoenix
 					echo "squashfs.img found in ${i}. Copying to /root/"
@@ -159,7 +177,7 @@ find_squashfs_in_iso() {
 		echo "[$try/15] Searching for a USB device containing squashfs.img"
 		for part in /dev/sd*[1-2] /dev/nvme*p[1-2]; do
 			[ -e "$part" ] || continue
-			mount $part /mnt/local 1>&2 2>/dev/null
+			mount "$part" /mnt/local 1>&2 2>/dev/null
 			if [ -f /mnt/local/.prepared ]; then
 				echo "squashfs.img found in ${part}"
 				if [ -f /mnt/local/squashfs.img ]; then
@@ -175,7 +193,7 @@ find_squashfs_in_iso() {
 	done
 
 	echo "Could not find a CDROM or a USB device containing squashfs.img"
-	drop_to_shell
+	drop_to_shell_auto
 }
 
 copy_contents() {
@@ -185,16 +203,15 @@ copy_contents() {
 		for i in /dev/sr*; do
 			[ -e "$i" ] || continue
 			echo "Mounting $i"
-			mount -t udf,iso9660 -o ro $i /mnt/iso
-			if [ $? -eq 0 -a -f /mnt/iso/make_iso.sh ]; then
-				if [ -d /mnt/iso/$1 ]; then
+			if mount -t udf,iso9660 -o ro "$i" /mnt/iso && [ -f /mnt/iso/make_iso.sh ]; then
+				if [ -d "/mnt/iso/$1" ]; then
 					echo "Copying $1 from $i"
-					cp -r /mnt/iso/$1 /root/$1
+					cp -r "/mnt/iso/$1" /root/"$1"
 					umount /mnt/iso
 					return 0
-				elif [ -f /mnt/iso/$1 ]; then
+				elif [ -f "/mnt/iso/$1" ]; then
 					echo "Copying $1 from $i"
-					cp /mnt/iso/$1 /root/
+					cp "/mnt/iso/$1" /root/
 					umount /mnt/iso
 					return 0
 				else
@@ -220,11 +237,10 @@ find_squashfs_in_iso_ce() {
 	for retry in $(seq 1 15); do
 		PHX_DEV=$(blkid | grep 'LABEL="PHOENIX"' | cut -d: -f1)
 		ret=$?
-		if [ $ret -eq 0 -a "$PHX_DEV" != "" ]; then
-			mount $PHX_DEV /mnt/iso
-			if [ $? -eq 0 ]; then
+		if [ "$ret" -eq 0 ] && [ "$PHX_DEV" != "" ]; then
+			if mount "$PHX_DEV" /mnt/iso; then
 				if [ -f /mnt/iso/squashfs.img ]; then
-					echo -e "\nCopying squashfs.img from Phoenix ISO on $PHX_DEV"
+					printf "\nCopying squashfs.img from Phoenix ISO on %s\n" "$PHX_DEV"
 					cp -rf /mnt/iso/squashfs.img /root/
 					return 0
 				else
@@ -232,7 +248,7 @@ find_squashfs_in_iso_ce() {
 				fi
 			fi
 		fi
-		echo -en "\r [$retry/15] Waiting for Phoenix ISO to be available ..."
+		printf "\r [%s/15] Waiting for Phoenix ISO to be available ..." "$retry"
 		sleep 2
 	done
 
@@ -244,6 +260,10 @@ find_squashfs_in_iso_ce() {
 echo 5000000 >/proc/sys/dev/raid/speed_limit_max
 # min raid rebuild speed set to 500M/sec
 echo 500000 >/proc/sys/dev/raid/speed_limit_min
+
+##################################################
+# Constants
+##################################################
 
 # constants and boot_params
 RAMDISK_SZ=${RAMDISK_SZ:-"64G"}
@@ -257,14 +277,16 @@ FOUND_IP="$(get_boot_param FOUND_IP)"
 GATEWAY="$(get_boot_param GATEWAY)"
 VLAN="$(get_boot_param VLAN)"
 NAMESERVER="$(get_boot_param NAMESERVER)"
-# Accepts multiple NTP servers in comma seperated format.
+# Accepts multiple NTP servers in comma separated format.
 NTP_SERVERS="$(get_boot_param NTP_SERVERS)"
 # Parameters for setting up bonding.
+# shellcheck disable=SC2034
 BOND_MODE="$(get_boot_param BOND_MODE)"
+# shellcheck disable=SC2034
 BOND_UPLINKS="$(get_boot_param BOND_UPLINKS)"
+# shellcheck disable=SC2034
 BOND_LACP_RATE="$(get_boot_param BOND_LACP_RATE)"
 # This parameter tells us about boot in centos or gentoo
-IMG="$(get_boot_param IMG)"
 INIT_CMD="$(get_boot_param init)"
 # Parameter to enable network configuration using config in CVM partition.
 USE_CVM_CFG="$(get_boot_param USE_CVM_CFG)"
@@ -282,7 +304,7 @@ CVM_HOME_RAID_PART_UUID="$(get_boot_param CVM_HOME_RAID_PART_UUID)"
 DISCOVERY_OS="$(get_boot_param DISCOVERY_OS)"
 # Because hypervisors generally call untagged traffic "0", treat it that way
 # here too.
-if [ "$VLAN" = 'None' -o "$VLAN" = 0 ]; then
+if [ "$VLAN" = 'None' ] || [ "$VLAN" = 0 ]; then
 	VLAN=""
 fi
 PXEBOOT="$(get_boot_param PXEBOOT)"
@@ -296,7 +318,7 @@ else
 	IMG_MD5SUM="$SQUASHFS_DIGEST_ppc64le"
 fi
 
-ipv6_first_hexa=$(echo $FOUND_IP | cut -f 1 -d ":")
+ipv6_first_hexa=$(echo "$FOUND_IP" | cut -f 1 -d ":")
 IPV6=false
 if [ "$ipv6_first_hexa" != "$FOUND_IP" ]; then
 	IPV6=true
@@ -307,6 +329,10 @@ IS_CISCO="false"
 CISCO_IPMITOOL="/opt/cisco/ipmitool"
 INTERSIGHT_CONFIG="/tmp/cisco_intersight_fc_metadata.json"
 INTERSIGHT_CONFIG_SRC="host-init.json"
+
+##################################################
+# Functions
+##################################################
 
 # ENG-389037: stop abusing overlayfs or other
 # unnecessary stuff, the overlayfs layer has been removed to avoid
@@ -321,15 +347,13 @@ setup_overlayfs() {
 		# get detached.e.g "HUA-32".
 		IMG_FILE=/root/squashfs.img
 	fi
-	mount -t squashfs $IMG_FILE /mnt/squashfs
-	if [ $? -eq 0 ]; then
+	if mount -t squashfs "$IMG_FILE" /mnt/squashfs; then
 		# Setting up default size of the ramdisk
 		mkdir -p /overlay
-		mount -t tmpfs -o size=$RAMDISK_SZ tmpfs /overlay
+		mount -t tmpfs -o size="$RAMDISK_SZ" tmpfs /overlay
 		cp -af /mnt/squashfs/. /overlay/
 		cp /bin/busybox /overlay/bin/
-		umount /mnt/squashfs
-		if [ $? -eq 0 ]; then
+		if umount /mnt/squashfs; then
 			echo "preparing new rootfs"
 			cp -rf /lib/* /overlay/lib/
 			cp -rf /root/.local /overlay/root
@@ -340,12 +364,12 @@ setup_overlayfs() {
 			fi
 			# TODO: dell package maybe missing, if needed we can copy for /dell.
 			for file in /*; do
-				if [ -d $file ]; then
-					if [ "${file##*/}" == "phoenix" ]; then
-						cp -rf $file /overlay/root/
+				if [ -d "$file" ]; then
+					if [ "${file##*/}" = "phoenix" ]; then
+						cp -rf "$file" /overlay/root/
 					fi
 				else
-					cp -rf $file /overlay/root/
+					cp -rf "$file" /overlay/root/
 				fi
 			done
 
@@ -362,6 +386,9 @@ setup_overlayfs() {
 			exec switch_root -c /dev/console /overlay /sbin/init
 			echo "switch root failed."
 			return 1
+		else
+			echo "Failed to unmount squashfs ${IMG_FILE}"
+			drop_to_shell_auto
 		fi
 		return 0
 	else
@@ -371,23 +398,20 @@ setup_overlayfs() {
 }
 
 configure_networking_from_cvm() {
-	assemble_raid
-	if [ $? -ne 0 ]; then
+	if ! assemble_raid; then
 		# Fail early if CVM boot disk is raided.
-		[ -n "$CVM_HOME_RAID_PART_UUID" ] && drop_to_shell
+		[ -n "$CVM_HOME_RAID_PART_UUID" ] && drop_to_shell_auto
 	fi
 	[ -d $CVM_HOME_MNT ] || mkdir -p $CVM_HOME_MNT
 	parts="/dev/md* /dev/sd* /dev/nvme*"
-	find_cvm_home_raid_part_by_uuid
-	if [ $? -eq 0 ]; then
+	if find_cvm_home_raid_part_by_uuid; then
 		cvm_part=$(cat $CVM_HOME_PART_INFO_PATH)
 		parts="$cvm_part $parts"
 	fi
 	for part in $parts; do
 		[ -e "$part" ] || continue
 		echo "Looking for Phoenix networking configuration in $part"
-		mount $part $CVM_HOME_MNT
-		if [ $? -eq 0 ]; then
+		if mount "$part" $CVM_HOME_MNT; then
 			echo "$part mounted successfully"
 			cvm_phx=$CVM_HOME_MNT/nutanix/tmp/phoenix/svm_cfg.json
 			# Sample configuration file:
@@ -401,7 +425,7 @@ configure_networking_from_cvm() {
 			if [ -f $cvm_phx ]; then
 				echo "cvm network configuration found on $part"
 				DHCP=$(grep -i '^ *"BOOTPROTO":' -m 1 "${cvm_phx}" 2>/dev/null | cut -d':' -f2- | tr -d '[:space:]",')
-				if [ "$DHCP" == "none" ]; then
+				if [ "$DHCP" = "none" ]; then
 					PHOENIX_IP=$(grep -i '^ *"IPADDR":' -m 1 "${cvm_phx}" 2>/dev/null | cut -d':' -f2- | tr -d '[:space:]",')
 					MASK=$(grep -i '^ *"NETMASK":' -m 1 "${cvm_phx}" 2>/dev/null | cut -d':' -f2- | tr -d '[:space:]",')
 					GATEWAY=$(grep -i '^ *"GATEWAY":' -m 1 "${cvm_phx}" 2>/dev/null | cut -d':' -f2- | tr -d '[:space:]",')
@@ -419,7 +443,7 @@ configure_networking_from_cvm() {
 					echo "FOUND_IP [$FOUND_IP]"
 					configure_uplink_to_foundation
 					echo "Storing CVM home partition info in $CVM_HOME_PART_INFO_PATH"
-					echo $part >$CVM_HOME_PART_INFO_PATH
+					echo "$part" >"$CVM_HOME_PART_INFO_PATH"
 					umount $CVM_HOME_MNT
 					return 0
 				fi
@@ -439,41 +463,41 @@ configure_networking_from_cvm() {
 }
 
 setup_nw() {
-	if [[ "$IPV6" = "true" || -n "$PHOENIX_IP" ]]; then
-		if [ "$IPV6" != "true" -a -n "$NAMESERVER" ]; then
+	if [ "$IPV6" = "true" ] || [ -n "$PHOENIX_IP" ]; then
+		if [ "$IPV6" != "true" ] && [ -n "$NAMESERVER" ]; then
 			echo "Setting $NAMESERVER as DNS server"
 			rm -f /etc/resolv.conf
-			for x in $(echo $NAMESERVER | sed "s/,/ /g"); do
-				echo nameserver $x >>/etc/resolv.conf
+			for x in $(echo "$NAMESERVER" | sed "s/,/ /g"); do
+				echo "nameserver $x" >>/etc/resolv.conf
 			done
 		fi
-		if [ "$IPV6" != "true" -a -n "$NTP_SERVERS" -a "$OS_TYPE" == "Centos" ]; then
+		if [ "$IPV6" != "true" ] && [ -n "$NTP_SERVERS" ] && [ "$OS_TYPE" = "Centos" ]; then
 			echo "Setting $NTP_SERVERS as NTP server(s)"
-			for x in $(echo $NTP_SERVERS | sed "s/,/ /g"); do
-				echo server $x >>/etc/chrony.conf
+			for x in $(echo "$NTP_SERVERS" | sed "s/,/ /g"); do
+				echo "server $x" >>/etc/chrony.conf
 			done
 			systemctl restart chronyd
 		fi
 		configure_uplink_to_foundation
-		if [ $? -eq 0 ]; then
+		if setup_network_static "$NETWORK" "$PREFIX_LEN" "$GW" "$IFACE" "$VLAN"; then
 			return 0
 		fi
 		echo "Could not establish a connection to Foundation"
 		return 1
 	elif [ "$IS_INTERSIGHT" = "true" ]; then
 		setup_nw_for_intersight_node
-		if [ $? -ne 0 ]; then
-			drop_to_shell
+		if ! configure_ipv6_only "$IFACE" "$VLAN" "$DHCP"; then
+			drop_to_shell_auto
 		fi
 	else
 		if [ "$USE_CVM_CFG" = "true" ]; then
 			configure_networking_from_cvm
-			if [ $? -eq 0 ]; then
+			if true; then
 				echo "Found valid network configuration on cvm"
 				return 0
 			fi
 		fi
-		if [ "$OS_TYPE" == "Gentoo" -a "$IS_CISCO" == "true" ]; then
+		if [ "$OS_TYPE" = "Gentoo" ] && [ "$IS_CISCO" = "true" ]; then
 			# Skip DHCP setup for cisco nodes when in gentoo and setup once squashfs
 			# is loaded. This is needed for intersight nodes to avoid
 			# unconfiguring the DHCP ip once in centos and configure again using the
@@ -490,13 +514,13 @@ setup_nw() {
 		for x in /sys/class/net/*; do
 			x=${x##*/}
 			[ "$x" != "lo" ] || continue
-			ifconfig $x up
-			if [ "$OS_TYPE" == "Gentoo" ]; then
+			ifconfig "$x" up
+			if [ "$OS_TYPE" = "Gentoo" ]; then
 				echo "Getting DHCP address for $x..."
-				udhcpc -b -q -i $x -s /dhcp.sh
+				udhcpc -b -q -i "$x" -s /dhcp.sh
 			fi
 		done
-		if [ "$OS_TYPE" == "Gentoo" ]; then
+		if [ "$OS_TYPE" = "Gentoo" ]; then
 			if [ ! -f /.dhcp_lease ]; then
 				echo "Waiting for DHCP lease"
 				sleep 2
@@ -524,15 +548,14 @@ download_squashfs_from_livefs_url() {
 	# takes a while to "stabilize". Try for a few times.
 	total_tries=5
 	for i in $(seq $total_tries); do
-		wget "$LIVEFS_URL" -t1 -T30 -O- >$DESTINATION
+		wget "$LIVEFS_URL" -t1 -T30 -O- >"$DESTINATION"
 		# verify md5sum of squashfs, delete the IMG_FILE if md5sum does not
 		# match, so that we can retry or check for backup on cvm.
-		md5sum $DESTINATION | grep $IMG_MD5SUM
-		if [ $? -ne 0 ]; then
+		if ! md5sum "$DESTINATION" | grep -q "$IMG_MD5SUM"; then
 			echo "md5 checksum does not match"
-			rm $DESTINATION
+			rm "$DESTINATION"
 		fi
-		if [ -e $DESTINATION ]; then
+		if [ -e "$DESTINATION" ]; then
 			break
 		else
 			echo "[$i/$total_tries] wget failed, sleeping for 5 seconds before trying again"
@@ -540,13 +563,15 @@ download_squashfs_from_livefs_url() {
 		fi
 	done
 	# if wget fails, try to mount CVM and look for squashfs.img in it.
-	if [ ! -e $DESTINATION ]; then
+	if [ ! -e "$DESTINATION" ]; then
 		echo "Failed to download squashfs.img via wget"
 		find_squashfs_in_disks
 	fi
 }
 
-## Main course starts here
+##################################################
+# Main
+##################################################
 
 # Identifying the OS type
 if [ -e '/etc/redhat-release' ]; then
@@ -564,16 +589,18 @@ mkdir -p /mnt/local /mnt/squashfs /mnt/disk /mnt/data /mnt/usb /mnt/tmp \
 
 echo "Loading drivers"
 
+# shellcheck disable=SC1091
 . "$HOME/modules.sh"
 
+# shellcheck disable=SC1091
 . "$HOME/net_utils.sh"
 
+# shellcheck disable=SC1091
 . "$HOME/raid_utils.sh"
 
 # check for livecd only in case of Gentoo
-if [ "$OS_TYPE" == "Gentoo" ]; then
-	dmesg | grep -i "dmi: cisco" >/dev/null
-	if [ $? -eq 0 ]; then
+if [ "$OS_TYPE" = "Gentoo" ]; then
+	if dmesg | grep -q -i "dmi: cisco"; then
 		IS_CISCO=true
 	fi
 	wait_for_devices
@@ -582,8 +609,10 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 	if [ $ce -ne 0 ]; then
 		if [ -n "$(get_boot_param CE_IPXE)" ]; then
 			echo "CE iPXE mode enabled"
+			echo "Waiting for network..."
+			sleep 15
 			download_squashfs_from_livefs_url /root/squashfs.img
-			[ -f /root/squashfs.img ] || drop_to_shell
+			[ -f /root/squashfs.img ] || drop_to_shell_auto
 		else
 			echo "CE USB mode enabled"
 			find_squashfs_in_iso_ce
@@ -593,7 +622,7 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 			find_squashfs_in_disks
 		else
 			download_squashfs_from_livefs_url $IMG_FILE
-			[ -f "$IMG_FILE" ] || drop_to_shell
+			[ -f "$IMG_FILE" ] || drop_to_shell_auto
 		fi
 	elif [ "$PEM_WORKFLOW" = "TRUE" ]; then
 		if [ "$COMPUTE_ONLY" = "TRUE" ]; then
@@ -608,7 +637,7 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 		echo "Boot parameter LIVEFS_URL was not provided." \
 			"We will not try to download squashfs.img from network"
 		retry=1
-		if [[ "$DISCOVERY_OS" = "true" || "$DISCOVERY_OS" = "TRUE" ]]; then
+		if [ "$DISCOVERY_OS" = "true" ] || [ "$DISCOVERY_OS" = "TRUE" ]; then
 			find_squashfs_in_disks disc_os
 			retry=$?
 		fi
@@ -618,22 +647,21 @@ if [ "$OS_TYPE" == "Gentoo" ]; then
 	fi
 else
 	# in case of installer mode, we need to mount iso to get nos and hypervisor
-	if [ $(basename $INIT_CMD) = "installer" ]; then
-		echo "Since the boot parameter INIT_CMD is \"installer\"," \
+	if [ "$(basename "$INIT_CMD")" = "installer" ]; then
+		echo 'Since the boot parameter INIT_CMD is "installer",' \
 			"we need to search CDROMs and USB devices for AOS and hypervisor files"
 		find_squashfs_in_iso # Note: This drops to shell if squashfs.img isn't found
 	fi
 fi
 
-if [ -z "$PXEBOOT" -a $ce -eq 0 ]; then
+if [ -z "$PXEBOOT" ] && [ "$ce" -eq 0 ]; then
 	echo "Checking if any CDROM contains injections into Phoenix"
 	# Copy contents used by phoenix from cdrom iso image.
 	# This makes it easier to debug as the following actions
 	# don't rely on the cdrom being available.
 	# The updates are for injected content like layout file and HCL
 	# updates. Later they could be used for installation hooks.
-	copy_contents "updates"
-	if [ $? -eq 0 ]; then
+	if copy_contents "updates"; then
 		# Components include tartarus, aurora, updater, etc
 		# which needs to be installed in phoenix for flex
 		copy_contents "components"
@@ -646,19 +674,17 @@ if [ -n "$FC_CONFIG_URL" ]; then
 fi
 
 # TODO: copy_contents need not execute both in gentoo and centos,
-# fix in other places whereever it's done.
-if [ "$OS_TYPE" == "Centos" ]; then
+# fix in other places where ever it's done.
+if [ "$OS_TYPE" = "Centos" ]; then
 	# For cisco nodes, try to fetch the intersight config from cimc,
 	# if it succeeds, fetch the drivers from phoenix for imaging via FC.
-	dmidecode -t 1 | grep -i cisco
-	if [ $? -eq 0 ]; then
+	if dmidecode -t 1 | grep -q -i cisco; then
 		IS_CISCO="true"
 	fi
 	# TODO: Make use of phoenix/intersight_options.py
-	if [ "$IS_CISCO" == "true" -a -f $CISCO_IPMITOOL ]; then
-		for del in $(seq 3); do
-			$CISCO_IPMITOOL read_file $INTERSIGHT_CONFIG_SRC $INTERSIGHT_CONFIG
-			if [ $? -eq 0 -a -f $INTERSIGHT_CONFIG ]; then
+	if [ "$IS_CISCO" = "true" ] && [ -f "$CISCO_IPMITOOL" ]; then
+		for _ in $(seq 3); do
+			if $CISCO_IPMITOOL read_file "$INTERSIGHT_CONFIG_SRC" "$INTERSIGHT_CONFIG" && [ -f "$INTERSIGHT_CONFIG" ]; then
 				IS_INTERSIGHT="true"
 				copy_contents "images"
 				break
@@ -673,15 +699,15 @@ fi
 cp /proc/mounts /etc/mtab 1>/dev/null 2>&1
 # Bifurcation for both OS_TYPES
 # Gentoo is more of initrd for centos
-if [ "$OS_TYPE" == "Gentoo" ]; then
-	if [ ! -e $IMG_FILE -a ! -e /root/squashfs.img ]; then
+if [ "$OS_TYPE" = "Gentoo" ]; then
+	if [ ! -e "$IMG_FILE" ] && [ ! -e /root/squashfs.img ]; then
 		echo "livecd files not found."
-		drop_to_shell
+		drop_to_shell_auto
 	fi
 
 	if [ ! -f /.overlayfs_setup_done ]; then
 		setup_overlayfs
-		if [ $? -ne 0 ]; then
+		if ! setup_overlayfs; then
 			echo "Unable to create overlayfs"
 		fi
 		touch /.overlayfs_setup_done
@@ -703,23 +729,24 @@ EOF
 	# Imaging will unpack NOS and hypervisor iso to ramfs, 16G is not quite enough
 	# for a 5.9G Hyperv and 2.9G NOS. Increase this number to 64G to provide
 	# larger installer images.
-	mount -o remount,size=$RAMDISK_SZ /
+	mount -o remount,size="$RAMDISK_SZ" /
 
 	script=${0##*/}
 
 else
 	# centos
 	setup_nw
-	if [ $? -ne 0 ]; then
+	if ! setup_nw; then
 		echo "Unable to setup networking"
 	fi
 	echo "Running $INIT_CMD"
-	script=$(basename $INIT_CMD)
+	script=$(basename "$INIT_CMD")
 fi
 
 if [ -e "$HOME/do_${script}.sh" ]; then
+	# shellcheck disable=SC1090
 	. "$HOME/do_${script}.sh"
 else
 	echo "ERROR: $HOME/do_${script}.sh not found."
-	drop_to_shell
+	drop_to_shell_auto
 fi

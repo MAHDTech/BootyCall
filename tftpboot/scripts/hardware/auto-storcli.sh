@@ -67,7 +67,7 @@ declare -r NC='\033[0m' # No Color
 
 # Function to cleanup temporary working directory on exit.
 function cleanup() {
-	if [[ -n "${WORK_DIR:-}" && -d "$WORK_DIR" ]]; then
+	if [[ -n ${WORK_DIR:-} && -d $WORK_DIR ]]; then
 		read -rp "Press any key to cleanup temporary working directory or Ctrl+C to cancel..." </dev/tty
 		log info "Cleaning up temporary working directory..."
 		rm -rf "$WORK_DIR" || {

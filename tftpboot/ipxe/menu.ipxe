@@ -90,8 +90,7 @@ goto ${selected}
 
 item --key b boot_hdd
 item --key n netboot        [N] Netboot.xyz
-item --key h nce_hdd        [H] Nutanix Community Edition HDD
-item --key i nce_iso        [I] Nutanix Community Edition DVD
+item --key i nce            [C] Nutanix Community Edition
 item --key m mt86plus       [M] Memtest86+
 item --key p mt86passmark   [P] PassMark MemTest86
 item --key s shell          [S] iPXE shell
@@ -172,23 +171,7 @@ chain --autofree ${server_proto}://${server_name}/ipxe/threefold.ipxe || goto fa
 goto start
 
 #########################
-:nce_dvd
-#########################
-
-# NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.
-
-echo Loading Nutanix Community Edition (DVD) ...
-
-# The location of the ISO file.
-set phoenix_iso ${server_proto}://${server_name}/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso
-
-# Sanboot using EL Torito emulation.
-sanboot --drive 0xe0 --no-describe ${phoenix_iso} || goto failed
-
-goto start
-
-#########################
-:nce_hdd
+:nce
 #########################
 
 # NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.

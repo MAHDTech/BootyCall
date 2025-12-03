@@ -61,11 +61,10 @@ item --gap -- ----------------------------------------------------
 item --gap --
 item --gap --   :: OPERATING ENVIRONMENTS ::
 item --gap --
-item netboot        > Netboot (Default)
-item iventoy        > iVentoy
+item boot_hdd       > Boot from HDD (Default)
+item netboot        > Netboot
+item nce            > Nutanix CE
 item threefold      > Threefold ZeroOS
-item nce_dvd        > Nutanix CE (DVD)
-item nce_hdd        > Nutanix CE (HDD)
 item --gap --
 item --gap --   :: DIAGNOSTICS & TOOLS ::
 item --gap --
@@ -80,8 +79,8 @@ item exit           [ EXIT TO BIOS  ]
 item --gap --
 item --gap -- ----------------------------------------------------
 
-# Choose with a timeout of 60 seconds
-choose --default netboot --timeout 60000 selected || goto cancel
+# Choose with a timeout of 30 seconds
+choose --default boot_hdd --timeout 30000 selected || goto cancel
 
 goto ${selected}
 
@@ -89,6 +88,7 @@ goto ${selected}
 :hotkeys
 #########################
 
+item --key b boot_hdd
 item --key n netboot        [N] Netboot.xyz
 item --key h nce_hdd        [H] Nutanix Community Edition HDD
 item --key i nce_iso        [I] Nutanix Community Edition DVD
@@ -97,6 +97,15 @@ item --key p mt86passmark   [P] PassMark MemTest86
 item --key s shell          [S] iPXE shell
 item --key r reboot         [R] Reboot computer
 item --key x exit           [X] Exit to BIOS/UEFI
+
+#########################
+:boot_hdd
+#########################
+
+echo "Booting from local HDD..."
+
+# Exit PXE for the next BIOS boot item.
+exit
 
 #########################
 :netboot

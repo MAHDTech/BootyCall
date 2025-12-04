@@ -176,7 +176,7 @@ goto start
 
 # NOTE: This uses a custom ISO with modified initrd and squashfs to work with iPXE.
 
-echo Loading Nutanix Community Edition (HDD) ...
+echo Loading Nutanix Community Edition ...
 
 # The location of the ISO file.
 set phoenix_iso ${server_proto}://${server_name}/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso

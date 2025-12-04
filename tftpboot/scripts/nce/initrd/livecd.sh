@@ -569,6 +569,23 @@ download_squashfs_from_livefs_url() {
 	fi
 }
 
+wait_for_dns() {
+	TIMEOUT=60
+	ELAPSED=0
+	DOMAIN=$(echo "$LIVEFS_URL" | sed -e 's|https\?://||' -e 's|/.*||')
+
+	echo "Waiting for DNS resolution to be ready..."
+	while ! host "${DOMAIN}" >/dev/null 2>&1; do
+		if [ $ELAPSED -ge $TIMEOUT ]; then
+			echo "DNS timeout after ${TIMEOUT}s"
+			return 1
+		fi
+		sleep 1
+		ELAPSED=$((ELAPSED + 1))
+	done
+	echo "DNS ready"
+}
+
 ##################################################
 # Main
 ##################################################
@@ -611,6 +628,9 @@ if [ "$OS_TYPE" = "Gentoo" ]; then
 			echo "CE iPXE mode enabled"
 			echo "Waiting for network..."
 			sleep 15
+			wait_for_dns || {
+				echo "Warning, DNS resolution has failed, attempting to continue with download"
+			}
 			download_squashfs_from_livefs_url /root/squashfs.img
 			[ -f /root/squashfs.img ] || drop_to_shell_auto
 		else

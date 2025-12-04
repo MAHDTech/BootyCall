@@ -101,8 +101,11 @@ item --key x exit           [X] Exit to BIOS/UEFI
 :boot_hdd
 #########################
 
-echo "Booting from local HDD..."
-exit 1
+echo "Booting from local UEFI (AMD64) ..."
+
+sanboot --drive 0x81 --no-describe ${server_proto}://${server_name}/iso/refind.img || goto failed
+
+goto start
 
 #########################
 :netboot
@@ -154,7 +157,7 @@ echo Loading PassMark MemTest86 ...
 #chain ${server_proto}://${server_name}/tools/memtest86/memtest86.efi || goto failed
 
 # NOTE: Free version seems to work with sanboot.
-sanboot ${server_proto}://${server_name}/tools/memtest86/memtest86-usb.img || goto failed
+sanboot --drive 0x81 --no-describe ${server_proto}://${server_name}/tools/memtest86/memtest86-usb.img || goto failed
 
 goto start
 
@@ -179,8 +182,7 @@ echo Loading Nutanix Community Edition ...
 # The location of the ISO file.
 set phoenix_iso ${server_proto}://${server_name}/iso/phoenix.x86_64-fnd_5.6.1_patch-aos_6.8.1_ga_ipxe.iso
 
-# Sanboot using block device
-sanboot --drive 0x80 ${phoenix_iso} --no-describe || goto failed
+sanboot --drive 0x81 --no-describe ${phoenix_iso} || goto failed
 
 goto start
 
@@ -188,10 +190,10 @@ goto start
 :failed
 #########################
 
-echo Boot failed - returning to menu in 10 seconds ...
+echo Boot failed - self-destructing in 60 seconds ...
 
-sleep 10
-goto start
+sleep 60
+reboot
 
 #########################
 :cancel

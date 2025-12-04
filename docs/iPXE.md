@@ -46,6 +46,13 @@ sed -i 's|//[[:space:]]*#define[[:space:]]\+PING_CMD|#define PING_CMD|' config/g
 
 # Enable NTP
 sed -i 's|//[[:space:]]*#define[[:space:]]\+NTP_CMD|#define NTP_CMD|' config/general.h
+
+# Enable NSLOOKUP command
+sed -i 's|//[[:space:]]*#define[[:space:]]\+NSLOOKUP_CMD|#define NSLOOKUP_CMD|' config/general.h
+
+# Enable download protocols
+sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_TFTP|#define DOWNLOAD_PROTO_TFTP|' config/general.h
+sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_HTTP|#define DOWNLOAD_PROTO_HTTP|' config/general.h
 ```
 
 - Make the embed script (amd64)
@@ -59,53 +66,17 @@ cat > embed-amd64.ipxe <<'EOF'
 #########################
 
 set timeout 10000
-ifopen net0 || goto snponly
-dhcp net0 || goto snponly
-goto ipxe
+ifopen || goto fail
+dhcp || goto fail
+
+goto config
 
 #########################
-:ipxe
+:config
 #########################
 
-echo Loading iPXE configuration (ipxe.efi) ...
+echo Loading iPXE configuration ...
 sleep 1
-
-goto config_ipxe
-
-#########################
-:snponly
-#########################
-
-echo Failed to configure network using ipxe.efi, falling back to snponly.efi ...
-sleep 1
-
-chain --autofree tftp://${next-server}/boot/x64/snponly.efi ||
-chain --autofree http://${next-server}/boot/x64/snponly.efi ||
-chain --autofree http://${next-server}:8080/boot/x64/snponly.efi ||
-goto fail
-
-goto config_snponly
-
-#########################
-:config_ipxe
-#########################
-
-echo Loading iPXE configuration (ipxe.efi) ...
-sleep 1
-
-chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
-goto fail
-
-#########################
-:config_snponly
-#########################
-
-echo Loading iPXE configuration (snmponly.efi) ...
-sleep 1
-
-# TODO: Create a non-menu failback for snponly.
 
 chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
 chain --autofree http://${next-server}/ipxe/config.ipxe ||

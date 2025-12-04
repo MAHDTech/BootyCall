@@ -280,6 +280,7 @@ function extract_iso() {
 
 function modify_grub_cfg() {
 	local GRUB_CFG_PATH="${NCE_TEMP}/${TEMP_ISO_EXTRACTED}/${GRUB_CFG}"
+
 	logger INFO "Modifying grub.cfg..."
 	cat <<-EOF | sudo tee "${GRUB_CFG_PATH}" >/dev/null
 		set default="CEInstaller iPXE"
@@ -292,25 +293,37 @@ function modify_grub_cfg() {
 		search --no-floppy --set=root -l 'PHOENIX'
 
 		menuentry 'CEInstaller' {
-		    linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs
+		    linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 IMG=squashfs
 		    initrdefi /boot/initrd
 		}
 
 		menuentry 'CEInstaller iPXE' {
-		    linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs mpt3sas.prot_mask=1 LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ UPDATES_CONFIG_URL=http://__HOST__/iso-extracted/__SUBDIR__/updates_config.json rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.debug CE_IPXE=1
+		    linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 IMG=squashfs \\
+		        LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img \\
+		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
+		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
+		        UPDATES_CONFIG_URL=http://__HOST__/iso-extracted/__SUBDIR__/updates_config.json \\
+		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.debug CE_IPXE=1
 		    initrdefi /boot/initrd
 		}
 
-		menuentry 'Debug Shell for Stage 1 (initramfs)' {
-		    linuxefi /boot/kernel intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.shell=1 rd.break=pre-mount rd.debug
+		menuentry 'Debug Shell – Stage 1 (initramfs)' {
+		    linuxefi /boot/kernel intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 \\
+		        LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img \\
+		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
+		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
+		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.shell=1 rd.break=pre-mount rd.debug
 		    initrdefi /boot/initrd
 		}
 
-		menuentry 'Debug Shell for Stage 2 (squashfs)' {
-		    linuxefi /boot/kernel init=/usr/bin/bash intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 IMG=squashfs mpt3sas.prot_mask=1 LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=1 rd.shell=1 rd.break=mount rd.debug
+		menuentry 'Debug Shell – Stage 2 (squashfs)' {
+		    linuxefi /boot/kernel init=/ce_installer intel_iommu=on iommu=pt kvm-intel.nested=1 kvm.ignore_msrs=1 kvm-intel.ept=1 vga=791 net.ifnames=0 mpt3sas.prot_mask=1 IMG=squashfs \\
+		        LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img \\
+		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
+		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
+		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.shell=1 rd.break=mount rd.debug
 		    initrdefi /boot/initrd
 		}
-
 	EOF
 
 	# The iPXE hostname.
@@ -323,7 +336,6 @@ function modify_grub_cfg() {
 	sudo sed -i "s/__BASENAME__/${NCE_ISO_NAME_IPXE}/g" "${GRUB_CFG_PATH}"
 
 	logger DEBUG "grub.cfg modified"
-
 }
 
 function unpack_initrd() {

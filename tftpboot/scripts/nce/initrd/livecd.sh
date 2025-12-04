@@ -575,7 +575,7 @@ wait_for_dns() {
 	DOMAIN=$(echo "$LIVEFS_URL" | sed -e 's|https\?://||' -e 's|/.*||')
 
 	echo "Waiting for DNS resolution to be ready..."
-	while ! host "${DOMAIN}" >/dev/null 2>&1; do
+	while ! nslookup "${DOMAIN}" >/dev/null 2>&1; do
 		if [ $ELAPSED -ge $TIMEOUT ]; then
 			echo "DNS timeout after ${TIMEOUT}s"
 			return 1

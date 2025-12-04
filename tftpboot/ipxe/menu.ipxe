@@ -102,9 +102,7 @@ item --key x exit           [X] Exit to BIOS/UEFI
 #########################
 
 echo "Booting from local HDD..."
-
-# Exit PXE for the next BIOS boot item.
-exit
+exit 1
 
 #########################
 :netboot

@@ -48,19 +48,76 @@ sed -i 's|//[[:space:]]*#define[[:space:]]\+PING_CMD|#define PING_CMD|' config/g
 sed -i 's|//[[:space:]]*#define[[:space:]]\+NTP_CMD|#define NTP_CMD|' config/general.h
 ```
 
-- Make the embed script
+- Make the embed script (amd64)
 
 ```bash
-cat > embed.ipxe <<'EOF'
+cat > embed-amd64.ipxe <<'EOF'
 #!ipxe
 
-dhcp || exit
+#########################
+# Initialisation
+#########################
+
+set timeout 10000
+ifopen net0 || goto snponly
+dhcp net0 || goto snponly
+goto ipxe
+
+#########################
+:ipxe
+#########################
+
+echo Loading iPXE configuration (ipxe.efi) ...
+sleep 1
+
+goto config_ipxe
+
+#########################
+:snponly
+#########################
+
+echo Failed to configure network using ipxe.efi, falling back to snponly.efi ...
+sleep 1
+
+chain --autofree tftp://${next-server}/boot/x64/snponly.efi ||
+chain --autofree http://${next-server}/boot/x64/snponly.efi ||
+chain --autofree http://${next-server}:8080/boot/x64/snponly.efi ||
+goto fail
+
+goto config_snponly
+
+#########################
+:config_ipxe
+#########################
+
+echo Loading iPXE configuration (ipxe.efi) ...
+sleep 1
 
 chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
 chain --autofree http://${next-server}/ipxe/config.ipxe ||
 chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
+goto fail
 
-echo Could not contact server, dropping to shell ...
+#########################
+:config_snponly
+#########################
+
+echo Loading iPXE configuration (snmponly.efi) ...
+sleep 1
+
+# TODO: Create a non-menu failback for snponly.
+
+chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
+goto fail
+
+#########################
+# Fail
+#########################
+:fail
+
+echo iPXE boot has failed, dropping to shell...
 shell
 reboot
 EOF
@@ -128,7 +185,7 @@ nix-shell shell-amd64.nix
 ```bash
 # x86_64 UEFI
 make -j$(nproc) bin-x86_64-efi/ipxe.efi \
-    EMBED=embed.ipxe \
+    EMBED=embed-amd64.ipxe \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
@@ -139,7 +196,18 @@ make -j$(nproc) bin-x86_64-efi/ipxe.efi \
 
 # Legacy BIOS
 make -j$(nproc) bin/undionly.kpxe \
-    EMBED=embed.ipxe \
+    EMBED=embed-amd64.ipxe \
+    CONFIG=console \
+    CONFIG=image \
+    CONFIG=pci \
+    CONFIG=usb \
+    VERSION_MAJOR=1 \
+    VERSION_MINOR=0 \
+    VERSION_PATCH=0
+
+# SNPOnly version
+make bin-x86_64-efi/snponly.efi \
+    EMBED=embed-amd64.ipxe \
     CONFIG=console \
     CONFIG=image \
     CONFIG=pci \
@@ -267,11 +335,86 @@ EOF
 nix-shell shell-arm64.nix
 ```
 
+- Make the embed script (arm64)
+
+```bash
+cat > embed-arm64.ipxe <<'EOF'
+#!ipxe
+
+#########################
+# Initialisation
+#########################
+
+set timeout 10000
+ifopen net0 || goto snponly
+dhcp net0 || goto snponly
+goto ipxe
+
+#########################
+:ipxe
+#########################
+
+echo Loading iPXE configuration (ipxe.efi) ...
+sleep 1
+
+goto config_ipxe
+
+#########################
+:snponly
+#########################
+
+echo Failed to configure network using ipxe.efi, falling back to snponly.efi ...
+sleep 1
+
+chain --autofree tftp://${next-server}/boot/x64/snponly.efi ||
+chain --autofree http://${next-server}/boot/x64/snponly.efi ||
+chain --autofree http://${next-server}:8080/boot/x64/snponly.efi ||
+goto fail
+
+goto config_snponly
+
+#########################
+:config_ipxe
+#########################
+
+echo Loading iPXE configuration (ipxe.efi) ...
+sleep 1
+
+chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
+goto fail
+
+#########################
+:config_snponly
+#########################
+
+echo Loading iPXE configuration (snmponly.efi) ...
+sleep 1
+
+# TODO: Create a non-menu failback for snponly.
+
+chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}/ipxe/config.ipxe ||
+chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
+goto fail
+
+#########################
+# Fail
+#########################
+:fail
+
+echo iPXE boot has failed, dropping to shell...
+shell
+reboot
+EOF
+```
+
 - Build the ARM64 image
 
 ```bash
 make -j$(nproc) bin-arm64-efi/ipxe.efi \
-    EMBED=embed.ipxe \
+    EMBED=embed-arm64.ipxe \
     CROSS=aarch64-linux-gnu- \
     CONFIG=console \
     CONFIG=image \
@@ -293,14 +436,20 @@ exit
 - Transfer the files to the iPXE server
 
 ```bash
-# Legacy BIOS must be in root.
-scp bin/undionly.kpxe root@bootycall.saltlabs.cloud:/mnt/hdd/tftpboot/undionly.kpxe
+# BootyCall project
+BOOTYCALL_HOME="${HOME}/Projects/syncthing/GitHub/MAHDTech/BootyCall"
 
-# AMD64 UEFI
-scp bin-x86_64-efi/ipxe.efi root@bootycall.saltlabs.cloud:/mnt/hdd/tftpboot/boot/x64/ipxe.efi
+# Legacy BIOS must be in root.
+cp -f bin/undionly.kpxe "${BOOTYCALL_HOME}/tftpboot/undionly.kpxe"
+
+# AMD64 UEFI ipxe.efi
+cp -f bin-x86_64-efi/ipxe.efi "${BOOTYCALL_HOME}/tftpboot/boot/x64/ipxe.efi"
+
+# AMD64 UEFI snponly.efi
+cp -f bin-x86_64-efi/snponly.efi "${BOOTYCALL_HOME}/tftpboot/boot/x64/snponly.efi"
 
 # ARM64
-scp bin-arm64-efi/ipxe.efi root@bootycall.saltlabs.cloud:/mnt/hdd/tftpboot/boot/arm64/ipxe.efi
+cp -f bin-arm64-efi/ipxe.efi "${BOOTYCALL_HOME}/tftpboot/boot/arm64/ipxe.efi"
 ```
 
 - Don't forget to change the permissions on the iPXE server!

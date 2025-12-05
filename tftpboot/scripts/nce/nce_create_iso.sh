@@ -303,7 +303,13 @@ function modify_grub_cfg() {
 		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
 		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
 		        UPDATES_CONFIG_URL=http://__HOST__/iso-extracted/__SUBDIR__/updates_config.json \\
-		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.debug CE_IPXE=1
+		        rd.live.squashimg=/root/squashfs.img \\
+		        ip=dhcp \\
+		        rd.md=0 \\
+		        rd.neednet=1 \\
+		        rd.net.timeout.carrier=60 \\
+		        rd.debug \\
+		        CE_IPXE=1
 		    initrdefi /boot/initrd
 		}
 
@@ -312,7 +318,14 @@ function modify_grub_cfg() {
 		        LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img \\
 		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
 		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
-		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.shell=1 rd.break=pre-mount rd.debug
+		        rd.live.squashimg=/root/squashfs.img \\
+		        ip=dhcp \\
+		        rd.md=0 \\
+		        rd.neednet=1 \\
+		        rd.net.timeout.carrier=60 \\
+		        rd.debug \\
+		        rd.shell=1 \\
+		        rd.break=pre-mount
 		    initrdefi /boot/initrd
 		}
 
@@ -321,7 +334,14 @@ function modify_grub_cfg() {
 		        LIVEFS_URL=http://__HOST__/iso-extracted/__SUBDIR__/squashfs.img \\
 		        PHOENIX_BASE=http://__HOST__/iso-extracted/__SUBDIR__ \\
 		        PHOENIX_ISO=http://__HOST__/iso/__BASENAME__ \\
-		        rd.live.squashimg=/root/squashfs.img ip=dhcp rd.neednet=0 rd.shell=1 rd.break=mount rd.debug
+		        rd.live.squashimg=/root/squashfs.img \\
+		        ip=dhcp \\
+		        rd.md=0 \\
+		        rd.neednet=1 \\
+		        rd.net.timeout.carrier=60 \\
+		        rd.debug \\
+		        rd.shell=1 \\
+		        rd.break=mount
 		    initrdefi /boot/initrd
 		}
 	EOF

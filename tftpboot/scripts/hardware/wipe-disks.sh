@@ -33,10 +33,127 @@
 
 set -euo pipefail
 
-# Default flags
-zero=false
-random=false
-nvme_secure=false
+##################################################
+# Global Variables
+##################################################
+
+# Script name is used in log file.
+SCRIPT_NAME="${BASH_SOURCE[0]##*/}"
+SCRIPT_NAME="${SCRIPT_NAME%.*}"
+LOG_FILE="${SCRIPT_NAME}.log"
+
+# Global flags
+declare ZERO_FILL="false"
+declare RANDOM_FILL="false"
+declare NVME_SECURE="false"
+
+# Logging configuration
+declare LOG_LEVEL="INFO"
+declare LOG_FILE_LEVEL="DEBUG"
+
+# Log level hierarchy (lower number = higher priority)
+declare -A LOG_LEVELS=(
+	[DEBUG]=0
+	[INFO]=1
+	[WARN]=2
+	[ERR]=3
+)
+
+# Global arrays
+declare -a DISKS_TO_WIPE=()
+declare -a IGNORED_DISKS=()
+declare -a WIPED=()
+declare -a FAILED=()
+declare -a ACTIVE_PIDS=()
+
+# ANSI color codes (global constants)
+RESET='\e[0m'
+BLUE='\e[34m'   # DEBUG
+GREEN='\e[32m'  # INFO
+YELLOW='\e[33m' # WARN
+RED='\e[31m'    # ERR
+
+##################################################
+# Functions
+##################################################
+
+# Logging function with level filtering and file output
+log() {
+	local level=$1
+	local msg=$2
+	local color
+	local timestamp
+	timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+	# Determine color based on level
+	case $level in
+	DEBUG) color=$BLUE ;;
+	INFO) color=$GREEN ;;
+	WARN) color=$YELLOW ;;
+	ERR) color=$RED ;;
+	*) color=$RESET ;;
+	esac
+
+	# Log to file if level meets file threshold
+	if [ "${LOG_LEVELS[$level]}" -ge "${LOG_LEVELS[$LOG_FILE_LEVEL]}" ]; then
+		echo "[$timestamp] [$level] $msg" >>"$LOG_FILE"
+	fi
+
+	# Log to stdout if level meets stdout threshold
+	if [ "${LOG_LEVELS[$level]}" -ge "${LOG_LEVELS[$LOG_LEVEL]}" ]; then
+		echo -e "${color}[$level]${RESET} $msg"
+	fi
+}
+
+# Print a colored header/separator
+print_header() {
+	local msg=$1
+	local color=${2:-$BLUE}
+
+	# Only print to stdout, not to log file
+	echo -e "\n${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+	log INFO "$msg"
+	echo -e "${color}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+}
+
+cleanup() {
+	local exit_code=$?
+
+	# Show cursor in case it was hidden
+	tput cnorm 2>/dev/null || true
+
+	# If there are active background processes, kill them
+	if [ ${#ACTIVE_PIDS[@]} -gt 0 ]; then
+		echo -e "\n"
+		log WARN "Interrupt received! Cleaning up..."
+		log WARN "Terminating ${#ACTIVE_PIDS[@]} active dd process(es)..."
+
+		for pid in "${ACTIVE_PIDS[@]}"; do
+			if kill -0 "$pid" 2>/dev/null; then
+				# Try graceful termination first
+				kill -TERM "$pid" 2>/dev/null || true
+			fi
+		done
+
+		# Wait a moment for graceful termination
+		sleep 1
+
+		# Force kill any remaining processes
+		for pid in "${ACTIVE_PIDS[@]}"; do
+			if kill -0 "$pid" 2>/dev/null; then
+				kill -KILL "$pid" 2>/dev/null || true
+			fi
+		done
+
+		log INFO "Cleanup complete. All processes terminated."
+	fi
+
+	# Exit with the original exit code
+	exit "$exit_code"
+}
+
+# Trap Ctrl+C (SIGINT) and other termination signals
+trap cleanup SIGINT SIGTERM EXIT
 
 # Detect OS
 detect_os() {
@@ -47,47 +164,96 @@ detect_os() {
 			log INFO "OS detected: $PRETTY_NAME"
 		else
 			log ERR "Unsupported OS: $PRETTY_NAME. This script only supports Ubuntu/Debian."
-			exit 1
+			return 1
 		fi
 	else
 		log ERR "Cannot determine OS. /etc/os-release not found."
-		exit 1
+		return 1
 	fi
 }
 
 # Install dependencies
 install_deps() {
+	local -a PACKAGE_NAMES=(util-linux nvme-cli)
+
 	log INFO "Updating package list"
 	if ! sudo apt update -qq >/dev/null 2>&1; then
 		# Non-fatal error, attempt package install anyway.
 		log WARN "apt update failed, attempting package install"
 	fi
-	log INFO "Installing required packages: util-linux, nvme-cli"
-	if ! sudo apt install -y -qq util-linux nvme-cli >/dev/null 2>&1; then
+	log INFO "Installing required packages: ${PACKAGE_NAMES[*]}"
+	if ! sudo apt install -y -qq "${PACKAGE_NAMES[@]}" >/dev/null 2>&1; then
 		log ERR "apt install failed."
-		exit 1
+		return 1
 	fi
 	log INFO "Dependencies installed successfully."
 }
 
-# ANSI color codes for logging
-reset='\033[0m'
-blue='\033[34m'   # DEBUG
-green='\033[32m'  # INFO
-yellow='\033[33m' # WARN
-red='\033[31m'    # ERR
+# Spinner animation for long-running operations
+spinner() {
+	local pid=$1
+	local message=$2
+	local color=$3
+	local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+	local i=0
 
-log() {
-	local level=$1
-	local msg=$2
-	case $level in
-	DEBUG) color=$blue ;;
-	INFO) color=$green ;;
-	WARN) color=$yellow ;;
-	ERR) color=$red ;;
-	*) color=$reset ;;
-	esac
-	echo -e "${color}[$level]${reset} $msg"
+	# Hide cursor
+	tput civis
+
+	while kill -0 "$pid" 2>/dev/null; do
+		i=$(((i + 1) % 10))
+		printf "\r%s%s %s%s" "$color" "${spin:i:1}" "$message" "$RESET"
+		sleep 0.1
+	done
+
+	# Show cursor
+	tput cnorm
+	printf "\r"
+}
+
+# Wait for multiple PIDs with a spinner
+wait_with_spinner() {
+	local message=$1
+	local color=$2
+	shift 2
+	local pids=("$@")
+
+	if [ ${#pids[@]} -eq 0 ]; then
+		return 0
+	fi
+
+	local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+	local i=0
+
+	# Hide cursor
+	tput civis
+
+	# Display initial message with flush
+	echo -ne "${color}${spin:0:1} ${message}${RESET}"
+
+	# Wait for all processes
+	local all_done=false
+	while [ "$all_done" = false ]; do
+		all_done=true
+		for pid in "${pids[@]}"; do
+			if kill -0 "$pid" 2>/dev/null; then
+				all_done=false
+				break
+			fi
+		done
+
+		if [ "$all_done" = false ]; then
+			i=$(((i + 1) % 10))
+			echo -ne "\r${color}${spin:i:1} ${message}${RESET}"
+			sleep 0.1
+		fi
+	done
+
+	# Clear the line and show completion
+	echo -e "\r${GREEN}✓${RESET} ${message%...} complete"
+
+	# Show cursor
+	tput cnorm
 }
 
 ##################################################
@@ -95,7 +261,25 @@ log() {
 ##################################################
 
 get_confirmation() {
-	log WARN "This will wipe every fixed disk it finds. Are you sure about this? [y/N]"
+	clear
+	echo -e "\n"
+	# Warning box (not logged to file, visual only)
+	echo -e "\n${RED}╔══════════════════════════════════════════════════════════════════════╗${RESET}"
+	echo -e "${RED}║${RESET}${YELLOW}                           ⚠️  WARNING  ⚠️                              ${RESET}${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${RED}                                                                      ${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${RED}            🔥 THIS OPERATION WILL PERMANENTLY ERASE DATA! 🔥         ${RESET}${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${RED}                                                                      ${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${YELLOW}    This script will wipe every fixed disk it finds on your system.   ${RESET}${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${YELLOW}                                                                      ${RESET}${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${YELLOW}    There is NO WAY to recover the data after running this script!    ${RESET}${RED}║${RESET}"
+	echo -e "${RED}║${RESET}${RED}                                                                      ${RED}║${RESET}"
+	echo -e "${RED}╚══════════════════════════════════════════════════════════════════════╝${RESET}"
+	echo -e "\n"
+
+	# Log the warning to file
+	log WARN "User confirmation prompt displayed"
+	log WARN "${YELLOW}Are you absolutely sure you want to continue? Type 'yes' to proceed:${RESET} [y/N]"
+	local response
 	read -rp "Response: " response
 	[[ ${response:-} == [yY] ]]
 }
@@ -105,15 +289,21 @@ get_confirmation() {
 ##################################################
 
 get_disks() {
-	disks_to_wipe=()
-	ignored_disks=()
+	local name type tran
+
 	while read -r name type tran; do
 		if [ "$type" = "disk" ] && [ "$tran" != "usb" ]; then
-			disks_to_wipe+=("/dev/$name")
+			DISKS_TO_WIPE+=("/dev/$name")
 		elif [ "$type" = "rom" ] || [ "$tran" = "usb" ]; then
-			ignored_disks+=("/dev/$name")
+			IGNORED_DISKS+=("/dev/$name")
 		fi
-	done < <(sudo lsblk -dno NAME,TYPE,TRAN)
+	done < <(sudo lsblk -dno NAME,TYPE,TRAN || true)
+
+	# If DISKS_TO_WIPE is empty, return 1
+	if [ ${#DISKS_TO_WIPE[@]} -eq 0 ]; then
+		log ERR "No disks found to wipe."
+		return 1
+	fi
 }
 
 ##################################################
@@ -121,24 +311,41 @@ get_disks() {
 ##################################################
 
 wipe_all_disks() {
-	wiped=()
-	failed=()
-	declare -A disk_status
+	local disk
 	local nvme_sanitize_args=(--sanact=start-block-erase --ause)
-	for disk in "${disks_to_wipe[@]}"; do
+	declare -A disk_status
+	local pids
+	local pid_to_disk
+	local index
+	local pid
+	local i
+	local dd_disks
+	local zero_disks
+	local dd_exit
+
+	# Handle empty array case for set -u compatibility
+	if [ ${#DISKS_TO_WIPE[@]} -eq 0 ]; then
+		log ERR "No disks found to wipe."
+		return 1
+	fi
+
+	for disk in "${DISKS_TO_WIPE[@]}"; do
 		disk_status["$disk"]="success"
 	done
 
 	# Phase 1: Wipe filesystem signatures in parallel
-	log INFO "Starting filesystem signature wipe on all disks"
+	print_header "Phase 1: Wiping filesystem signatures on all disks" "$GREEN"
+	log DEBUG "Starting wipefs on ${#DISKS_TO_WIPE[@]} disk(s)"
 	pids=()
 	pid_to_disk=()
 	index=0
-	for disk in "${disks_to_wipe[@]}"; do
+	for disk in "${DISKS_TO_WIPE[@]}"; do
 		(
-			log INFO "Wiping filesystem signatures on $disk"
+			# Disable errexit in subshell to handle errors explicitly
+			set +e
+			log DEBUG "Wiping filesystem signatures on $disk"
 			if sudo wipefs -af "$disk" >/dev/null 2>&1; then
-				log INFO "✓ Successfully wiped filesystem signatures on $disk"
+				log DEBUG "✓ Successfully wiped filesystem signatures on $disk"
 				exit 0
 			else
 				log ERR "✗ Failed to wipe filesystem signatures on $disk"
@@ -149,26 +356,32 @@ wipe_all_disks() {
 		pid_to_disk["$index"]="$disk"
 		((index++))
 	done
-	for i in "${!pids[@]}"; do
-		pid=${pids[$i]}
-		disk=${pid_to_disk[$i]}
-		if ! wait "$pid"; then
-			disk_status["$disk"]="failed"
-		fi
-	done
+
+	# Wait for all wipefs operations to complete
+	if [ ${#pids[@]} -gt 0 ]; then
+		for i in "${!pids[@]}"; do
+			pid=${pids[$i]}
+			disk=${pid_to_disk[$i]}
+			if ! wait "$pid"; then
+				disk_status["$disk"]="failed"
+			fi
+		done
+	fi
 
 	# Phase 2: NVMe secure erase (if enabled) in parallel for eligible disks
-	if [ "$nvme_secure" = true ]; then
-		log INFO "Starting NVMe secure erase on eligible disks"
+	if [ "$NVME_SECURE" = "true" ]; then
+		print_header "Phase 2: NVMe secure erase on eligible disks" "$BLUE"
+		log DEBUG "Starting NVMe secure erase"
 		pids=()
 		pid_to_disk=()
 		index=0
-		for disk in "${disks_to_wipe[@]}"; do
+		for disk in "${DISKS_TO_WIPE[@]}"; do
 			if [[ $disk =~ ^/dev/nvme ]] && [ "${disk_status[$disk]}" = "success" ]; then
 				(
-					log INFO "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
+					set +e
+					log DEBUG "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
 					if sudo nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
-						log INFO "✓ Successfully performed NVMe secure erase on $disk"
+						log DEBUG "✓ Successfully performed NVMe secure erase on $disk"
 						exit 0
 					else
 						log ERR "✗ Failed to perform NVMe secure erase on $disk"
@@ -180,51 +393,75 @@ wipe_all_disks() {
 				((index++))
 			fi
 		done
-		for i in "${!pids[@]}"; do
-			pid=${pids[$i]}
-			disk=${pid_to_disk[$i]}
-			if ! wait "$pid"; then
-				disk_status["$disk"]="failed"
-			fi
-		done
+
+		# Wait for all NVMe secure erase operations to complete
+		if [ ${#pids[@]} -gt 0 ]; then
+			for i in "${!pids[@]}"; do
+				pid=${pids[$i]}
+				disk=${pid_to_disk[$i]}
+				if ! wait "$pid"; then
+					disk_status["$disk"]="failed"
+				fi
+			done
+		fi
 	fi
 
 	# Collect disks that need dd (non-NVMe or no secure erase, and still successful)
 	dd_disks=()
-	for disk in "${disks_to_wipe[@]}"; do
-		if [ "${disk_status[$disk]}" = "success" ] && ! { [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; }; then
+	for disk in "${DISKS_TO_WIPE[@]}"; do
+		if [ "${disk_status[$disk]}" = "success" ] && ! { [[ $disk =~ ^/dev/nvme ]] && [ "$NVME_SECURE" = true ]; }; then
 			dd_disks+=("$disk")
 		fi
 	done
 
 	# Phase 3: Random fill in parallel (if enabled)
-	if [ "$random" = true ] && [ ${#dd_disks[@]} -gt 0 ]; then
-		log INFO "Starting random data fill on ${#dd_disks[@]} disks"
+	if [ "$RANDOM_FILL" = "true" ] && [ ${#dd_disks[@]} -gt 0 ]; then
+		print_header "Phase 3: Random data fill on ${#dd_disks[@]} disk(s): ${dd_disks[*]}" "$YELLOW"
+		log DEBUG "Starting random fill with dd"
+
 		pids=()
 		pid_to_disk=()
+		ACTIVE_PIDS=()
 		index=0
 		for disk in "${dd_disks[@]}"; do
 			(
-				log INFO "Filling $disk with random data using dd and /dev/urandom"
-				if sudo dd if=/dev/urandom of="$disk" bs=1M status=progress; then
-					log INFO "✓ Successfully filled $disk with random data"
+				set +e
+				log DEBUG "Starting random fill on $disk"
+				# Redirect all dd output to null - we'll show a spinner instead
+				sudo dd if=/dev/urandom of="$disk" bs=1M status=none >/dev/null 2>&1
+				dd_exit=$?
+				# dd exits with 1 when disk is full, which is normal/expected
+				if [ $dd_exit -eq 0 ] || [ $dd_exit -eq 1 ]; then
 					exit 0
 				else
-					log ERR "✗ Failed to fill $disk with random data"
 					exit 1
 				fi
 			) &
 			pids+=($!)
+			ACTIVE_PIDS+=($!)
 			pid_to_disk["$index"]="$disk"
 			((index++))
 		done
-		for i in "${!pids[@]}"; do
-			pid=${pids[$i]}
-			disk=${pid_to_disk[$i]}
-			if ! wait "$pid"; then
-				disk_status["$disk"]="failed"
-			fi
-		done
+
+		# Wait with animated spinner (only on stdout, not in log file)
+		wait_with_spinner "Waiting for random pass to complete..." "$YELLOW" "${pids[@]}"
+
+		# Clear active PIDs after completion
+		ACTIVE_PIDS=()
+
+		# Check results
+		if [ ${#pids[@]} -gt 0 ]; then
+			for i in "${!pids[@]}"; do
+				pid=${pids[$i]}
+				disk=${pid_to_disk[$i]}
+				if ! wait "$pid"; then
+					disk_status["$disk"]="failed"
+					log ERR "Random fill failed on $disk"
+				else
+					log INFO "✓ Random fill completed on $disk"
+				fi
+			done
+		fi
 	fi
 
 	# Recalculate dd_disks for zero phase (exclude any that failed random)
@@ -236,42 +473,62 @@ wipe_all_disks() {
 	done
 
 	# Phase 4: Zero fill in parallel (if enabled)
-	if [ "$zero" = true ] && [ ${#zero_disks[@]} -gt 0 ]; then
-		log INFO "Starting zero fill on ${#zero_disks[@]} disks"
+	if [ "$ZERO_FILL" = "true" ] && [ ${#zero_disks[@]} -gt 0 ]; then
+		print_header "Phase 4: Zero fill on ${#zero_disks[@]} disk(s): ${zero_disks[*]}" "$BLUE"
+		log DEBUG "Starting zero fill with dd"
+
 		pids=()
 		pid_to_disk=()
+		ACTIVE_PIDS=()
 		index=0
 		for disk in "${zero_disks[@]}"; do
 			(
-				log INFO "Zeroing $disk using dd and /dev/zero"
-				if sudo dd if=/dev/zero of="$disk" bs=1M status=progress; then
-					log INFO "✓ Successfully zeroed $disk"
+				set +e
+				log DEBUG "Starting zero fill on $disk"
+				# Redirect all dd output to null - we'll show a spinner instead
+				sudo dd if=/dev/zero of="$disk" bs=1M status=none >/dev/null 2>&1
+				dd_exit=$?
+				# dd exits with 1 when disk is full, which is normal/expected
+				if [ $dd_exit -eq 0 ] || [ $dd_exit -eq 1 ]; then
 					exit 0
 				else
-					log ERR "✗ Failed to zero $disk"
 					exit 1
 				fi
 			) &
 			pids+=($!)
+			ACTIVE_PIDS+=($!)
 			pid_to_disk["$index"]="$disk"
 			((index++))
 		done
-		for i in "${!pids[@]}"; do
-			pid=${pids[$i]}
-			disk=${pid_to_disk[$i]}
-			if ! wait "$pid"; then
-				disk_status["$disk"]="failed"
-			fi
-		done
+
+		# Wait with animated spinner (only on stdout, not in log file)
+		wait_with_spinner "Waiting for zero pass to complete..." "$BLUE" "${pids[@]}"
+
+		# Clear active PIDs after completion
+		ACTIVE_PIDS=()
+
+		# Check results
+		if [ ${#pids[@]} -gt 0 ]; then
+			for i in "${!pids[@]}"; do
+				pid=${pids[$i]}
+				disk=${pid_to_disk[$i]}
+				if ! wait "$pid"; then
+					disk_status["$disk"]="failed"
+					log ERR "Zero fill failed on $disk"
+				else
+					log INFO "✓ Zero fill completed on $disk"
+				fi
+			done
+		fi
 	fi
 
 	# Build wiped/failed lists for summary
-	for disk in "${disks_to_wipe[@]}"; do
+	for disk in "${DISKS_TO_WIPE[@]}"; do
 		if [ "${disk_status[$disk]}" = "success" ]; then
-			wiped+=("$disk")
+			WIPED+=("$disk")
 			log INFO "Successfully wiped $disk"
 		else
-			failed+=("$disk")
+			FAILED+=("$disk")
 			log ERR "Failed to wipe $disk"
 		fi
 	done
@@ -282,47 +539,53 @@ wipe_all_disks() {
 ##################################################
 
 print_summary() {
-	if [ ${#disks_to_wipe[@]} -eq 0 ]; then
+	local d
+
+	if [ ${#DISKS_TO_WIPE[@]} -eq 0 ]; then
 		log INFO "No disks to wipe found."
 		return
 	fi
 
-	echo -e "\n${green}=========================================${reset}"
-	echo -e "${green}         OPERATION SUMMARY${reset}"
-	echo -e "${green}=========================================${reset}"
+	cat <<-EOF
 
-	echo -e "${green}Wiped disks (${#wiped[@]}):${reset}"
-	if [ ${#wiped[@]} -gt 0 ]; then
-		for d in "${wiped[@]}"; do
-			echo -e "${green}  ✓ $d${reset}"
+		${GREEN}=========================================${RESET}
+		${GREEN}         OPERATION SUMMARY${RESET}
+		${GREEN}=========================================${RESET}
+
+		${GREEN}Wiped disks (${#WIPED[@]}):${RESET}
+	EOF
+
+	if [ ${#WIPED[@]} -gt 0 ]; then
+		for d in "${WIPED[@]}"; do
+			echo -e "${GREEN}  ✓ $d${RESET}"
 		done
 	else
-		echo -e "${yellow}  None${reset}"
+		echo -e "${YELLOW}  None${RESET}"
 	fi
 
 	echo
 
-	echo -e "${red}Failed wipes (${#failed[@]}):${reset}"
-	if [ ${#failed[@]} -gt 0 ]; then
-		for d in "${failed[@]}"; do
-			echo -e "${red}  ✗ $d${reset}"
+	echo -e "${RED}Failed wipes (${#FAILED[@]}):${RESET}"
+	if [ ${#FAILED[@]} -gt 0 ]; then
+		for d in "${FAILED[@]}"; do
+			echo -e "${RED}  ✗ $d${RESET}"
 		done
 	else
-		echo -e "${green}  None${reset}"
+		echo -e "${GREEN}  None${RESET}"
 	fi
 
 	echo
 
-	echo -e "${blue}Ignored disks (${#ignored_disks[@]}):${reset}"
-	if [ ${#ignored_disks[@]} -gt 0 ]; then
-		for d in "${ignored_disks[@]}"; do
-			echo -e "${blue}  - $d${reset}"
+	echo -e "${BLUE}Ignored disks (${#IGNORED_DISKS[@]}):${RESET}"
+	if [ ${#IGNORED_DISKS[@]} -gt 0 ]; then
+		for d in "${IGNORED_DISKS[@]}"; do
+			echo -e "${BLUE}  - $d${RESET}"
 		done
 	else
-		echo -e "${yellow}  None${reset}"
+		echo -e "${YELLOW}  None${RESET}"
 	fi
 
-	echo -e "${green}=========================================${reset}"
+	echo -e "${GREEN}=========================================${RESET}"
 }
 
 ##################################################
@@ -330,69 +593,117 @@ print_summary() {
 ##################################################
 
 usage() {
-	echo "Usage: $0 [options]"
-	echo
-	echo "Options:"
-	echo "  --help          Show this help message and exit"
-	echo "  --zero          Zero the drives using dd and /dev/zero"
-	echo "  --random        Fill drives with random data using dd and /dev/urandom"
-	echo "  --nvme-secure   Use NVMe secure erase (sanitize revert) for NVMe disks instead of dd"
-	echo
-	echo "Notes:"
-	echo "  - --random and --zero can be combined; random filling happens first, then zeroing."
-	echo "  - --nvme-secure only applies to NVMe disks and replaces dd operations."
-	echo "  - Without any flags, only filesystem signatures are wiped using wipefs."
-	echo "  - Ensure you have 'nvme-cli' installed for NVMe secure erase."
-	echo "  - For SSDs, secure erase is preferred for speed and endurance."
+	cat <<-EOF
+		Usage: $0 [options]
+
+		Options:
+		  --help              Show this help message and exit
+		  --zero              Zero the drives using dd and /dev/zero
+		  --random            Fill drives with random data using dd and /dev/urandom
+		  --nvme-secure       Use NVMe secure erase (sanitize revert) for NVMe disks instead of dd
+		  --log-level LEVEL   Set stdout log level (DEBUG|INFO|WARN|ERR) [default: INFO]
+		  --log-file-level LEVEL  Set file log level (DEBUG|INFO|WARN|ERR) [default: DEBUG]
+
+		Notes:
+		  - --random and --zero can be combined; random filling happens first, then zeroing.
+		  - --nvme-secure only applies to NVMe disks and replaces dd operations.
+		  - Without any flags, only filesystem signatures are wiped using wipefs.
+		  - Ensure you have 'nvme-cli' installed for NVMe secure erase.
+		  - For SSDs, secure erase is preferred for speed and endurance.
+		  - dd exits with code 1 when the disk is full - this is normal and treated as success.
+		  - Logs are written to: $LOG_FILE
+	EOF
 }
 
 ##################################################
 # Main
 ##################################################
 
-main() {
-	# Parse command-line arguments
-	while [[ $# -gt 0 ]]; do
-		case $1 in
-		--help)
-			usage
-			exit 0
-			;;
-		--zero)
-			zero=true
-			shift
-			;;
-		--random)
-			random=true
-			shift
-			;;
-		--nvme-secure)
-			nvme_secure=true
-			shift
-			;;
-		*)
-			log ERR "Unknown option: $1"
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	--help)
+		usage
+		exit 0
+		;;
+	--zero)
+		ZERO_FILL="true"
+		shift
+		;;
+	--random)
+		RANDOM_FILL="true"
+		shift
+		;;
+	--nvme-secure)
+		NVME_SECURE="true"
+		shift
+		;;
+	--log-level)
+		LOG_LEVEL="${2^^}"
+		if [[ ! ${LOG_LEVELS[$LOG_LEVEL]+isset} ]]; then
+			echo "ERROR: Invalid log level: $2"
 			usage
 			exit 1
-			;;
-		esac
-	done
+		fi
+		shift 2
+		;;
+	--log-file-level)
+		LOG_FILE_LEVEL="${2^^}"
+		if [[ ! ${LOG_LEVELS[$LOG_FILE_LEVEL]+isset} ]]; then
+			echo "ERROR: Invalid log file level: $2"
+			usage
+			exit 1
+		fi
+		shift 2
+		;;
+	*)
+		echo "ERROR: Unknown option: $1"
+		usage
+		exit 1
+		;;
+	esac
+done
 
-	detect_os
-	install_deps
+# Initialize log file
+cat <<-EOF >"$LOG_FILE"
+	========================================
+	Disk Wipe Utility - Log File
+	Started: $(date '+%Y-%m-%d %H:%M:%S')
+	Log Level (stdout): $LOG_LEVEL
+	Log Level (file): $LOG_FILE_LEVEL
+	========================================
+EOF
 
-	log INFO "Starting disk wipe script"
-	if ! get_confirmation; then
-		log INFO "Aborted by user."
-		exit 0
-	fi
-
-	get_disks
-	log INFO "Detected ${#disks_to_wipe[@]} disk(s) to wipe: ${disks_to_wipe[*]:-None}"
-	log INFO "Detected ${#ignored_disks[@]} ignored disk(s): ${ignored_disks[*]:-None}"
-
-	wipe_all_disks
-	print_summary
+detect_os || {
+	log ERR "Failed to detect OS."
+	exit 1
 }
 
-main "$@"
+install_deps || {
+	log ERR "Failed to install dependencies."
+	exit 1
+}
+
+log INFO "Starting disk wipe script"
+if ! get_confirmation; then
+	log INFO "Aborted by user."
+	exit 0
+fi
+
+get_disks || {
+	log ERR "Failed to detect disks."
+	exit 1
+}
+
+log INFO "Detected ${#DISKS_TO_WIPE[@]} disk(s) to wipe: ${DISKS_TO_WIPE[*]+"${DISKS_TO_WIPE[*]}"}"
+log INFO "Detected ${#IGNORED_DISKS[@]} ignored disk(s): ${IGNORED_DISKS[*]+"${IGNORED_DISKS[*]}"}"
+
+wipe_all_disks || {
+	log ERR "Failed to wipe disks."
+	exit 1
+}
+
+print_summary || {
+	log ERR "Failed to print summary."
+	exit 1
+}

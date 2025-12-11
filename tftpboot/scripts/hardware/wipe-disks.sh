@@ -2,6 +2,7 @@
 
 ##################################################
 # Disk Wipe Utility
+##################################################
 #
 # This script wipes all fixed disks (non-USB, non-ROM) detected on the system.
 # It uses the 'wipefs' command to erase filesystem signatures.
@@ -119,57 +120,154 @@ get_disks() {
 # Wipe Operations
 ##################################################
 
-wipe_disk() {
-	local disk=$1
-
-	# Wipe filesystem signatures first
-	if ! sudo wipefs -af "$disk" >/dev/null 2>&1; then
-		log ERR "✗ Failed to wipe filesystem signatures on $disk"
-		return 1
-	fi
-	log INFO "✓ Successfully wiped filesystem signatures on $disk"
-
-	# For NVMe disks, use secure erase if requested
-	local nvme_sanitize_args=(--sanact=start-block-erase --ause)
-	if [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; then
-		log INFO "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
-		if ! sudo nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
-			log ERR "✗ Failed to perform NVMe secure erase on $disk"
-			return 1
-		fi
-		log INFO "✓ Successfully performed NVMe secure erase on $disk"
-		return 0
-	fi
-
-	# Otherwise, use dd for random and/or zero filling if flags are set
-	# Random first, then zero
-	if [ "$random" = true ]; then
-		log INFO "Filling $disk with random data using dd and /dev/urandom"
-		if ! sudo dd if=/dev/urandom of="$disk" bs=1M status=progress; then
-			log ERR "✗ Failed to fill $disk with random data"
-			return 1
-		fi
-		log INFO "✓ Successfully filled $disk with random data"
-	fi
-
-	if [ "$zero" = true ]; then
-		log INFO "Zeroing $disk using dd and /dev/zero"
-		if ! sudo dd if=/dev/zero of="$disk" bs=1M status=progress; then
-			log ERR "✗ Failed to zero $disk"
-			return 1
-		fi
-		log INFO "✓ Successfully zeroed $disk"
-	fi
-
-	return 0
-}
-
 wipe_all_disks() {
 	wiped=()
 	failed=()
+	declare -A disk_status
+	local nvme_sanitize_args=(--sanact=start-block-erase --ause)
 	for disk in "${disks_to_wipe[@]}"; do
-		log INFO "Wiping $disk"
-		if wipe_disk "$disk"; then
+		disk_status["$disk"]="success"
+	done
+
+	# Phase 1: Wipe filesystem signatures in parallel
+	log INFO "Starting filesystem signature wipe on all disks"
+	pids=()
+	pid_to_disk=()
+	index=0
+	for disk in "${disks_to_wipe[@]}"; do
+		(
+			log INFO "Wiping filesystem signatures on $disk"
+			if sudo wipefs -af "$disk" >/dev/null 2>&1; then
+				log INFO "✓ Successfully wiped filesystem signatures on $disk"
+				exit 0
+			else
+				log ERR "✗ Failed to wipe filesystem signatures on $disk"
+				exit 1
+			fi
+		) &
+		pids+=($!)
+		pid_to_disk["$index"]="$disk"
+		((index++))
+	done
+	for i in "${!pids[@]}"; do
+		pid=${pids[$i]}
+		disk=${pid_to_disk[$i]}
+		if ! wait "$pid"; then
+			disk_status["$disk"]="failed"
+		fi
+	done
+
+	# Phase 2: NVMe secure erase (if enabled) in parallel for eligible disks
+	if [ "$nvme_secure" = true ]; then
+		log INFO "Starting NVMe secure erase on eligible disks"
+		pids=()
+		pid_to_disk=()
+		index=0
+		for disk in "${disks_to_wipe[@]}"; do
+			if [[ $disk =~ ^/dev/nvme ]] && [ "${disk_status[$disk]}" = "success" ]; then
+				(
+					log INFO "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
+					if sudo nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
+						log INFO "✓ Successfully performed NVMe secure erase on $disk"
+						exit 0
+					else
+						log ERR "✗ Failed to perform NVMe secure erase on $disk"
+						exit 1
+					fi
+				) &
+				pids+=($!)
+				pid_to_disk["$index"]="$disk"
+				((index++))
+			fi
+		done
+		for i in "${!pids[@]}"; do
+			pid=${pids[$i]}
+			disk=${pid_to_disk[$i]}
+			if ! wait "$pid"; then
+				disk_status["$disk"]="failed"
+			fi
+		done
+	fi
+
+	# Collect disks that need dd (non-NVMe or no secure erase, and still successful)
+	dd_disks=()
+	for disk in "${disks_to_wipe[@]}"; do
+		if [ "${disk_status[$disk]}" = "success" ] && ! { [[ $disk =~ ^/dev/nvme ]] && [ "$nvme_secure" = true ]; }; then
+			dd_disks+=("$disk")
+		fi
+	done
+
+	# Phase 3: Random fill in parallel (if enabled)
+	if [ "$random" = true ] && [ ${#dd_disks[@]} -gt 0 ]; then
+		log INFO "Starting random data fill on ${#dd_disks[@]} disks"
+		pids=()
+		pid_to_disk=()
+		index=0
+		for disk in "${dd_disks[@]}"; do
+			(
+				log INFO "Filling $disk with random data using dd and /dev/urandom"
+				if sudo dd if=/dev/urandom of="$disk" bs=1M status=progress; then
+					log INFO "✓ Successfully filled $disk with random data"
+					exit 0
+				else
+					log ERR "✗ Failed to fill $disk with random data"
+					exit 1
+				fi
+			) &
+			pids+=($!)
+			pid_to_disk["$index"]="$disk"
+			((index++))
+		done
+		for i in "${!pids[@]}"; do
+			pid=${pids[$i]}
+			disk=${pid_to_disk[$i]}
+			if ! wait "$pid"; then
+				disk_status["$disk"]="failed"
+			fi
+		done
+	fi
+
+	# Recalculate dd_disks for zero phase (exclude any that failed random)
+	zero_disks=()
+	for disk in "${dd_disks[@]}"; do
+		if [ "${disk_status[$disk]}" = "success" ]; then
+			zero_disks+=("$disk")
+		fi
+	done
+
+	# Phase 4: Zero fill in parallel (if enabled)
+	if [ "$zero" = true ] && [ ${#zero_disks[@]} -gt 0 ]; then
+		log INFO "Starting zero fill on ${#zero_disks[@]} disks"
+		pids=()
+		pid_to_disk=()
+		index=0
+		for disk in "${zero_disks[@]}"; do
+			(
+				log INFO "Zeroing $disk using dd and /dev/zero"
+				if sudo dd if=/dev/zero of="$disk" bs=1M status=progress; then
+					log INFO "✓ Successfully zeroed $disk"
+					exit 0
+				else
+					log ERR "✗ Failed to zero $disk"
+					exit 1
+				fi
+			) &
+			pids+=($!)
+			pid_to_disk["$index"]="$disk"
+			((index++))
+		done
+		for i in "${!pids[@]}"; do
+			pid=${pids[$i]}
+			disk=${pid_to_disk[$i]}
+			if ! wait "$pid"; then
+				disk_status["$disk"]="failed"
+			fi
+		done
+	fi
+
+	# Build wiped/failed lists for summary
+	for disk in "${disks_to_wipe[@]}"; do
+		if [ "${disk_status[$disk]}" = "success" ]; then
 			wiped+=("$disk")
 			log INFO "Successfully wiped $disk"
 		else

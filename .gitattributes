@@ -16,6 +16,9 @@ tftpboot/tools/memtest86/*.img filter=lfs diff=lfs merge=lfs -text
 # Memtest x86+ binaries
 tftpboot/tools/mt86plus/* filter=lfs diff=lfs merge=lfs -text
 
+# Memdisk as binary
+tftpboot/memdisk binary
+
 # Memdisk symlink
 tftpboot/syslinux/memdisk text symlink=auto
 

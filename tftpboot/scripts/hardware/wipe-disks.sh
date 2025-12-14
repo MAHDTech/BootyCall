@@ -66,6 +66,10 @@ declare -a WIPED=()
 declare -a FAILED=()
 declare -a ACTIVE_PIDS=()
 
+# Global associative arrays for health check
+declare -A DISK_HEALTH_STATUS=()
+declare -A DISK_HEALTH_DETAILS=()
+
 # ANSI color codes (global constants)
 RESET='\e[0m'
 BLUE='\e[34m'   # DEBUG
@@ -174,7 +178,7 @@ detect_os() {
 
 # Install dependencies
 install_deps() {
-	local -a PACKAGE_NAMES=(util-linux nvme-cli)
+	local -a PACKAGE_NAMES=(util-linux nvme-cli smartmontools)
 
 	log INFO "Updating package list"
 	if ! sudo apt update -qq >/dev/null 2>&1; then
@@ -535,6 +539,231 @@ wipe_all_disks() {
 }
 
 ##################################################
+# Health Check
+##################################################
+
+# Check disk health using SMART and NVMe tools
+check_disk_health() {
+	local disk=$1
+	local health_status="UNKNOWN"
+	local health_color=$YELLOW
+	local details=""
+	local temp=""
+	local wear=""
+	local reallocated=""
+	local pending=""
+	local critical_warning=""
+	local available_spare=""
+	local percentage_used=""
+	local power_on_hours=""
+	local error_count=""
+
+	# Check if disk is NVMe
+	if [[ $disk =~ ^/dev/nvme ]]; then
+		# NVMe disk - use nvme-cli
+		if command -v nvme &>/dev/null; then
+			# Get smart-log data
+			local nvme_output
+			if nvme_output=$(sudo nvme smart-log "$disk" 2>/dev/null); then
+				# Parse critical warnings
+				critical_warning=$(echo "$nvme_output" | grep "critical_warning" | awk '{print $NF}')
+
+				# Parse temperature
+				temp=$(echo "$nvme_output" | grep "temperature" | head -1 | awk '{print $NF}')
+
+				# Parse available spare
+				available_spare=$(echo "$nvme_output" | grep "available_spare" | head -1 | awk '{print $NF}')
+
+				# Parse percentage used
+				percentage_used=$(echo "$nvme_output" | grep "percentage_used" | awk '{print $NF}')
+
+				# Parse power on hours
+				power_on_hours=$(echo "$nvme_output" | grep "power_on_hours" | awk '{print $NF}')
+
+				# Parse media errors
+				error_count=$(echo "$nvme_output" | grep "media_errors" | awk '{print $NF}')
+
+				# Determine health status
+				if [ "$critical_warning" != "0" ] && [ -n "$critical_warning" ]; then
+					health_status="CRITICAL"
+					health_color=$RED
+					details="Critical Warning: $critical_warning"
+				elif [ -n "$percentage_used" ] && [ "${percentage_used%\%}" -ge 90 ]; then
+					health_status="WARNING"
+					health_color=$YELLOW
+					details="High wear: ${percentage_used}"
+				elif [ -n "$available_spare" ] && [ "${available_spare%\%}" -lt 10 ]; then
+					health_status="WARNING"
+					health_color=$YELLOW
+					details="Low spare: ${available_spare}"
+				elif [ -n "$error_count" ] && [ "$error_count" -gt 0 ]; then
+					health_status="WARNING"
+					health_color=$YELLOW
+					details="Media errors: $error_count"
+				else
+					health_status="HEALTHY"
+					health_color=$GREEN
+					details="Wear: ${percentage_used:-N/A}, Spare: ${available_spare:-N/A}"
+				fi
+
+				# Add temperature if available
+				if [ -n "$temp" ]; then
+					details="$details, Temp: ${temp}°C"
+				fi
+
+				# Add power on hours if available
+				if [ -n "$power_on_hours" ]; then
+					details="$details, Hours: ${power_on_hours}"
+				fi
+			else
+				health_status="ERROR"
+				health_color=$RED
+				details="Failed to read NVMe SMART data"
+			fi
+		else
+			health_status="NO_TOOL"
+			health_color=$YELLOW
+			details="nvme-cli not installed"
+		fi
+	else
+		# SATA/SAS disk - use smartctl
+		if command -v smartctl &>/dev/null; then
+			local smart_output
+			if smart_output=$(sudo smartctl -H -A "$disk" 2>/dev/null); then
+				# Check overall health status
+				if echo "$smart_output" | grep -q "PASSED"; then
+					health_status="HEALTHY"
+					health_color=$GREEN
+				elif echo "$smart_output" | grep -q "FAILED"; then
+					health_status="FAILED"
+					health_color=$RED
+				fi
+
+				# Parse specific SMART attributes
+				# Reallocated sectors (ID 5)
+				reallocated=$(echo "$smart_output" | grep "^  5" | awk '{print $10}')
+
+				# Pending sectors (ID 197)
+				pending=$(echo "$smart_output" | grep "^197" | awk '{print $10}')
+
+				# Temperature (ID 194)
+				temp=$(echo "$smart_output" | grep "^194" | awk '{print $10}')
+
+				# Wear levelling (ID 177 for SSDs)
+				wear=$(echo "$smart_output" | grep "^177" | awk '{print $10}')
+
+				# Power on hours (ID 9)
+				power_on_hours=$(echo "$smart_output" | grep "^  9" | awk '{print $10}')
+
+				# Build details string
+				local detail_parts=()
+
+				# Check for critical issues
+				if [ -n "$reallocated" ] && [ "$reallocated" -gt 0 ]; then
+					health_status="WARNING"
+					health_color=$YELLOW
+					detail_parts+=("Reallocated: $reallocated")
+				fi
+
+				if [ -n "$pending" ] && [ "$pending" -gt 0 ]; then
+					health_status="WARNING"
+					health_color=$YELLOW
+					detail_parts+=("Pending: $pending")
+				fi
+
+				# Add wear info for SSDs
+				if [ -n "$wear" ]; then
+					detail_parts+=("Wear: $wear")
+					if [ "$wear" -le 10 ]; then
+						health_status="WARNING"
+						health_color=$YELLOW
+					fi
+				fi
+
+				# Add temperature
+				if [ -n "$temp" ]; then
+					detail_parts+=("Temp: ${temp}°C")
+					if [ "$temp" -gt 60 ]; then
+						if [ "$health_status" = "HEALTHY" ]; then
+							health_status="WARNING"
+							health_color=$YELLOW
+						fi
+					fi
+				fi
+
+				# Add power on hours
+				if [ -n "$power_on_hours" ]; then
+					detail_parts+=("Hours: $power_on_hours")
+				fi
+
+				# Combine details
+				if [ ${#detail_parts[@]} -gt 0 ]; then
+					details=$(
+						IFS=", "
+						echo "${detail_parts[*]}"
+					)
+				else
+					details="No issues detected"
+				fi
+			else
+				health_status="ERROR"
+				health_color=$RED
+				details="Failed to read SMART data"
+			fi
+		else
+			health_status="NO_TOOL"
+			health_color=$YELLOW
+			details="smartmontools not installed"
+		fi
+	fi
+
+	# Return status, color, and details as a formatted string
+	echo "${health_color}${health_status}${RESET}|${details}"
+}
+
+# Run health check on all disks
+health_check() {
+	local disk
+	local health_info
+	local status
+	local details
+	declare -A disk_health_status
+	declare -A disk_health_details
+
+	if [ ${#DISKS_TO_WIPE[@]} -eq 0 ]; then
+		log DEBUG "No disks available for health check"
+		return
+	fi
+
+	print_header "Checking disk health" "$BLUE"
+	log INFO "Running health checks on ${#DISKS_TO_WIPE[@]} disk(s)"
+
+	for disk in "${DISKS_TO_WIPE[@]}"; do
+		log DEBUG "Checking health of $disk"
+		health_info=$(check_disk_health "$disk")
+		status=$(echo "$health_info" | cut -d'|' -f1)
+		details=$(echo "$health_info" | cut -d'|' -f2)
+
+		disk_health_status["$disk"]="$status"
+		disk_health_details["$disk"]="$details"
+
+		echo -e "  $disk: $status"
+		if [ -n "$details" ]; then
+			echo -e "    └─ $details"
+		fi
+	done
+
+	echo
+	log INFO "Health check complete"
+
+	# Export to global arrays for summary
+	for disk in "${!disk_health_status[@]}"; do
+		DISK_HEALTH_STATUS["$disk"]="${disk_health_status[$disk]}"
+		DISK_HEALTH_DETAILS["$disk"]="${disk_health_details[$disk]}"
+	done
+}
+
+##################################################
 # Summary
 ##################################################
 
@@ -552,9 +781,24 @@ print_summary() {
 		${GREEN}         OPERATION SUMMARY${RESET}
 		${GREEN}=========================================${RESET}
 
-		${GREEN}Wiped disks (${#WIPED[@]}):${RESET}
 	EOF
 
+	# Disk Health Section
+	if [ ${#DISK_HEALTH_STATUS[@]} -gt 0 ]; then
+		echo -e "${BLUE}Disk Health Status:${RESET}"
+		for d in "${DISKS_TO_WIPE[@]}"; do
+			if [ -n "${DISK_HEALTH_STATUS[$d]}" ]; then
+				echo -e "  $d: ${DISK_HEALTH_STATUS[$d]}"
+				if [ -n "${DISK_HEALTH_DETAILS[$d]}" ]; then
+					echo -e "    └─ ${DISK_HEALTH_DETAILS[$d]}"
+				fi
+			fi
+		done
+		echo
+	fi
+
+	# Wiped disks section
+	echo -e "${GREEN}Wiped disks (${#WIPED[@]}):${RESET}"
 	if [ ${#WIPED[@]} -gt 0 ]; then
 		for d in "${WIPED[@]}"; do
 			echo -e "${GREEN}  ✓ $d${RESET}"
@@ -609,6 +853,7 @@ usage() {
 		  - --nvme-secure only applies to NVMe disks and replaces dd operations.
 		  - Without any flags, only filesystem signatures are wiped using wipefs.
 		  - Ensure you have 'nvme-cli' installed for NVMe secure erase.
+		  - Health checks are performed before wiping using SMART (smartmontools) and NVMe smart-log.
 		  - For SSDs, secure erase is preferred for speed and endurance.
 		  - dd exits with code 1 when the disk is full - this is normal and treated as success.
 		  - Logs are written to: $LOG_FILE
@@ -691,9 +936,12 @@ if ! get_confirmation; then
 fi
 
 get_disks || {
-	log ERR "Failed to detect disks."
+	log ERR "Failed to get disks"
 	exit 1
 }
+
+# Run health check before wiping
+health_check
 
 log INFO "Detected ${#DISKS_TO_WIPE[@]} disk(s) to wipe: ${DISKS_TO_WIPE[*]+"${DISKS_TO_WIPE[*]}"}"
 log INFO "Detected ${#IGNORED_DISKS[@]} ignored disk(s): ${IGNORED_DISKS[*]+"${IGNORED_DISKS[*]}"}"

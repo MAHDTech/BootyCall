@@ -69,6 +69,7 @@ declare -a ACTIVE_PIDS=()
 # Global associative arrays for health check
 declare -A DISK_HEALTH_STATUS=()
 declare -A DISK_HEALTH_DETAILS=()
+declare -A DISK_IDS=()
 
 # ANSI color codes (global constants)
 RESET='\e[0m'
@@ -76,6 +77,9 @@ BLUE='\e[34m'   # DEBUG
 GREEN='\e[32m'  # INFO
 YELLOW='\e[33m' # WARN
 RED='\e[31m'    # ERR
+
+# A rudimentary phase tracker.
+declare PHASE=0
 
 ##################################################
 # Functions
@@ -130,7 +134,7 @@ cleanup() {
 	if [ ${#ACTIVE_PIDS[@]} -gt 0 ]; then
 		echo -e "\n"
 		log WARN "Interrupt received! Cleaning up..."
-		log WARN "Terminating ${#ACTIVE_PIDS[@]} active dd process(es)..."
+		log WARN "Terminating ${#ACTIVE_PIDS[@]} active background process(es)..."
 
 		for pid in "${ACTIVE_PIDS[@]}"; do
 			if kill -0 "$pid" 2>/dev/null; then
@@ -337,11 +341,13 @@ wipe_all_disks() {
 		disk_status["$disk"]="success"
 	done
 
-	# Phase 1: Wipe filesystem signatures in parallel
-	print_header "Phase 1: Wiping filesystem signatures on all disks" "$GREEN"
+	# Wipe filesystem signatures in parallel
+	PHASE=$((PHASE + 1))
+	print_header "Phase ${PHASE}: Wiping filesystem signatures on all disks" "$GREEN"
 	log DEBUG "Starting wipefs on ${#DISKS_TO_WIPE[@]} disk(s)"
 	pids=()
 	pid_to_disk=()
+	ACTIVE_PIDS=()
 	index=0
 	for disk in "${DISKS_TO_WIPE[@]}"; do
 		(
@@ -349,7 +355,7 @@ wipe_all_disks() {
 			set +e
 			log DEBUG "Wiping filesystem signatures on $disk"
 			if sudo wipefs -af "$disk" >/dev/null 2>&1; then
-				log DEBUG "✓ Successfully wiped filesystem signatures on $disk"
+				log INFO "✓ Successfully wiped filesystem signatures on $disk"
 				exit 0
 			else
 				log ERR "✗ Failed to wipe filesystem signatures on $disk"
@@ -357,6 +363,7 @@ wipe_all_disks() {
 			fi
 		) &
 		pids+=($!)
+		ACTIVE_PIDS+=($!)
 		pid_to_disk["$index"]="$disk"
 		((index++))
 	done
@@ -372,12 +379,17 @@ wipe_all_disks() {
 		done
 	fi
 
-	# Phase 2: NVMe secure erase (if enabled) in parallel for eligible disks
+	# Clear active PIDs after completion
+	ACTIVE_PIDS=()
+
+	# NVMe secure erase (if enabled) in parallel for eligible disks
 	if [ "$NVME_SECURE" = "true" ]; then
-		print_header "Phase 2: NVMe secure erase on eligible disks" "$BLUE"
+		PHASE=$((PHASE + 1))
+		print_header "Phase ${PHASE}: NVMe secure erase on eligible disks" "$BLUE"
 		log DEBUG "Starting NVMe secure erase"
 		pids=()
 		pid_to_disk=()
+		ACTIVE_PIDS=()
 		index=0
 		for disk in "${DISKS_TO_WIPE[@]}"; do
 			if [[ $disk =~ ^/dev/nvme ]] && [ "${disk_status[$disk]}" = "success" ]; then
@@ -385,7 +397,7 @@ wipe_all_disks() {
 					set +e
 					log DEBUG "Performing NVMe secure erase on $disk using '${nvme_sanitize_args[*]}'"
 					if sudo nvme sanitize "$disk" "${nvme_sanitize_args[@]}" >/dev/null 2>&1; then
-						log DEBUG "✓ Successfully performed NVMe secure erase on $disk"
+						log INFO "✓ Successfully performed NVMe secure erase on $disk"
 						exit 0
 					else
 						log ERR "✗ Failed to perform NVMe secure erase on $disk"
@@ -393,6 +405,7 @@ wipe_all_disks() {
 					fi
 				) &
 				pids+=($!)
+				ACTIVE_PIDS+=($!)
 				pid_to_disk["$index"]="$disk"
 				((index++))
 			fi
@@ -408,6 +421,9 @@ wipe_all_disks() {
 				fi
 			done
 		fi
+
+		# Clear active PIDs after completion
+		ACTIVE_PIDS=()
 	fi
 
 	# Collect disks that need dd (non-NVMe or no secure erase, and still successful)
@@ -418,9 +434,10 @@ wipe_all_disks() {
 		fi
 	done
 
-	# Phase 3: Random fill in parallel (if enabled)
+	# Random fill in parallel (if enabled)
 	if [ "$RANDOM_FILL" = "true" ] && [ ${#dd_disks[@]} -gt 0 ]; then
-		print_header "Phase 3: Random data fill on ${#dd_disks[@]} disk(s): ${dd_disks[*]}" "$YELLOW"
+		PHASE=$((PHASE + 1))
+		print_header "Phase ${PHASE}: Random data fill on ${#dd_disks[@]} disk(s): ${dd_disks[*]}" "$YELLOW"
 		log DEBUG "Starting random fill with dd"
 
 		pids=()
@@ -476,9 +493,10 @@ wipe_all_disks() {
 		fi
 	done
 
-	# Phase 4: Zero fill in parallel (if enabled)
+	# Zero fill in parallel (if enabled)
 	if [ "$ZERO_FILL" = "true" ] && [ ${#zero_disks[@]} -gt 0 ]; then
-		print_header "Phase 4: Zero fill on ${#zero_disks[@]} disk(s): ${zero_disks[*]}" "$BLUE"
+		PHASE=$((PHASE + 1))
+		print_header "Phase ${PHASE}: Zero fill on ${#zero_disks[@]} disk(s): ${zero_disks[*]}" "$BLUE"
 		log DEBUG "Starting zero fill with dd"
 
 		pids=()
@@ -526,23 +544,146 @@ wipe_all_disks() {
 		fi
 	fi
 
+	print_header "Disks operations complete, displaying status" "$GREEN"
 	# Build wiped/failed lists for summary
 	for disk in "${DISKS_TO_WIPE[@]}"; do
 		if [ "${disk_status[$disk]}" = "success" ]; then
 			WIPED+=("$disk")
-			log INFO "Successfully wiped $disk"
+			log INFO "✓ All operations completed successfully on disk: $disk"
 		else
 			FAILED+=("$disk")
-			log ERR "Failed to wipe $disk"
+			log ERR "✗ Failed to perform all operations on disk: $disk"
 		fi
 	done
 }
 
 ##################################################
-# Health Check
+# Health Check Functions
 ##################################################
 
-# Check disk health using SMART and NVMe tools
+# Helper: Update overall health status (only escalate, never downgrade)
+update_health_status() {
+	local current_status=$1
+	local new_status=$2
+
+	# Priority: CRITICAL > FAILED > WARNING > HEALTHY > UNKNOWN
+	if [ "$new_status" = "CRITICAL" ] || [ "$current_status" = "UNKNOWN" ]; then
+		echo "$new_status"
+	elif [ "$new_status" = "WARNING" ] && [ "$current_status" != "CRITICAL" ] && [ "$current_status" != "FAILED" ]; then
+		echo "$new_status"
+	else
+		echo "$current_status"
+	fi
+}
+
+# Helper: Set health_color based on health_status
+set_health_color() {
+	local status=$1
+
+	case "$status" in
+	"CRITICAL" | "FAILED")
+		echo "$RED"
+		;;
+	"WARNING")
+		echo "$YELLOW"
+		;;
+	"HEALTHY")
+		echo "$GREEN"
+		;;
+	*)
+		echo "$YELLOW"
+		;;
+	esac
+}
+
+# Helper: Add metric with status to detail_parts array
+# Usage: add_metric "Label" "value" "threshold_check_result" "optional_unit"
+add_metric() {
+	local label=$1
+	local value=$2
+	local status=$3
+	local unit=${4:-}
+
+	local display_value="${value}${unit}"
+
+	if [ -z "$value" ] || [ "$value" = "N/A" ]; then
+		detail_parts+=("${label}: N/A ${BLUE}(INFO)${RESET}")
+	else
+		case "$status" in
+		"CRITICAL")
+			detail_parts+=("${label}: ${display_value} ${RED}(CRITICAL)${RESET}")
+			;;
+		"WARNING")
+			detail_parts+=("${label}: ${display_value} ${YELLOW}(WARNING)${RESET}")
+			;;
+		"INFO")
+			detail_parts+=("${label}: ${display_value} ${BLUE}(INFO)${RESET}")
+			;;
+		"HEALTHY" | *)
+			detail_parts+=("${label}: ${display_value} ${GREEN}(HEALTHY)${RESET}")
+			;;
+		esac
+	fi
+}
+
+# Helper: Check error count metric (>0 = WARNING)
+check_error_count() {
+	local value=$1
+	local label=$2
+	local trigger_warning=${3:-true}
+
+	if [ -n "$value" ] && [ "$value" -gt 0 ]; then
+		if [ "$trigger_warning" = "true" ]; then
+			health_status=$(update_health_status "$health_status" "WARNING")
+			add_metric "$label" "$value" "WARNING"
+		else
+			add_metric "$label" "$value" "INFO"
+		fi
+	elif [ -n "$value" ]; then
+		add_metric "$label" "$value" "HEALTHY"
+	else
+		add_metric "$label" "N/A" "INFO"
+	fi
+}
+
+# Helper: Check temperature with thresholds
+check_temperature() {
+	local temp=$1
+
+	if [ -n "$temp" ]; then
+		if [ "$temp" -gt 70 ]; then
+			health_status=$(update_health_status "$health_status" "WARNING")
+			add_metric "Temp" "$temp" "WARNING" "°C"
+		elif [ "$temp" -gt 60 ]; then
+			add_metric "Temp" "$temp" "INFO" "°C"
+		else
+			add_metric "Temp" "$temp" "HEALTHY" "°C"
+		fi
+	else
+		add_metric "Temp" "N/A" "INFO" "°C"
+	fi
+}
+
+# Helper: Parse SMART attribute by ID (RAW value - field 10)
+# Uses flexible whitespace matching to support different vendor formats
+parse_smart_raw() {
+	local smart_output=$1
+	local attr_id=$2
+	# Strip leading/trailing spaces from attr_id and use flexible regex
+	attr_id=$(echo "$attr_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+	echo "$smart_output" | grep -E "^[[:space:]]*${attr_id}[[:space:]]" | awk '{print $10}'
+}
+
+# Helper: Parse SMART attribute by ID (normalized value - field 4)
+# Uses flexible whitespace matching to support different vendor formats
+parse_smart_normalized() {
+	local smart_output=$1
+	local attr_id=$2
+	# Strip leading/trailing spaces from attr_id and use flexible regex
+	attr_id=$(echo "$attr_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+	echo "$smart_output" | grep -E "^[[:space:]]*${attr_id}[[:space:]]" | awk '{print $4}'
+}
+
 check_disk_health() {
 	local disk=$1
 	local health_status="UNKNOWN"
@@ -561,15 +702,16 @@ check_disk_health() {
 	# Check if disk is NVMe
 	if [[ $disk =~ ^/dev/nvme ]]; then
 		# NVMe disk - use nvme-cli
-		if command -v nvme &>/dev/null; then
+		# NOTE: nvme-cli is in /usr/sbin/nvme so needs to be run with sudo
+		if PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v nvme &>/dev/null; then
 			# Get smart-log data
 			local nvme_output
 			if nvme_output=$(sudo nvme smart-log "$disk" 2>/dev/null); then
 				# Parse critical warnings
 				critical_warning=$(echo "$nvme_output" | grep "critical_warning" | awk '{print $NF}')
 
-				# Parse temperature
-				temp=$(echo "$nvme_output" | grep "temperature" | head -1 | awk '{print $NF}')
+				# Parse temperature (get numeric value, not unit)
+				temp=$(echo "$nvme_output" | grep "temperature" | head -1 | awk '{print $(NF-1)}')
 
 				# Parse available spare
 				available_spare=$(echo "$nvme_output" | grep "available_spare" | head -1 | awk '{print $NF}')
@@ -577,123 +719,133 @@ check_disk_health() {
 				# Parse percentage used
 				percentage_used=$(echo "$nvme_output" | grep "percentage_used" | awk '{print $NF}')
 
-				# Parse power on hours
-				power_on_hours=$(echo "$nvme_output" | grep "power_on_hours" | awk '{print $NF}')
+				# Parse power on hours (strip commas to avoid breaking comma-delimited output)
+				power_on_hours=$(echo "$nvme_output" | grep "power_on_hours" | awk '{print $NF}' | tr -d ',')
 
 				# Parse media errors
 				error_count=$(echo "$nvme_output" | grep "media_errors" | awk '{print $NF}')
 
-				# Determine health status
+				# Determine health status and build details with per-metric status
+				# Set baseline to HEALTHY if data parsed successfully
+				health_status="HEALTHY"
+				local detail_parts=()
+
+				# Check critical warning
 				if [ "$critical_warning" != "0" ] && [ -n "$critical_warning" ]; then
-					health_status="CRITICAL"
-					health_color=$RED
-					details="Critical Warning: $critical_warning"
-				elif [ -n "$percentage_used" ] && [ "${percentage_used%\%}" -ge 90 ]; then
-					health_status="WARNING"
-					health_color=$YELLOW
-					details="High wear: ${percentage_used}"
-				elif [ -n "$available_spare" ] && [ "${available_spare%\%}" -lt 10 ]; then
-					health_status="WARNING"
-					health_color=$YELLOW
-					details="Low spare: ${available_spare}"
-				elif [ -n "$error_count" ] && [ "$error_count" -gt 0 ]; then
-					health_status="WARNING"
-					health_color=$YELLOW
-					details="Media errors: $error_count"
+					health_status=$(update_health_status "$health_status" "CRITICAL")
+					add_metric "Critical Warning" "$critical_warning" "CRITICAL"
+				fi
+
+				# Check wear (percentage used)
+				if [ -n "$percentage_used" ] && [ "${percentage_used%\%}" -ge 90 ]; then
+					health_status=$(update_health_status "$health_status" "WARNING")
+					add_metric "Wear" "$percentage_used" "WARNING"
+				elif [ -n "$percentage_used" ]; then
+					add_metric "Wear" "$percentage_used" "HEALTHY"
 				else
-					health_status="HEALTHY"
-					health_color=$GREEN
-					details="Wear: ${percentage_used:-N/A}, Spare: ${available_spare:-N/A}"
+					add_metric "Wear" "N/A" "INFO"
 				fi
 
-				# Add temperature if available
-				if [ -n "$temp" ]; then
-					details="$details, Temp: ${temp}°C"
+				# Check available spare
+				if [ -n "$available_spare" ] && [ "${available_spare%\%}" -lt 10 ]; then
+					health_status=$(update_health_status "$health_status" "WARNING")
+					add_metric "Spare" "$available_spare" "WARNING"
+				elif [ -n "$available_spare" ]; then
+					add_metric "Spare" "$available_spare" "HEALTHY"
+				else
+					add_metric "Spare" "N/A" "INFO"
 				fi
 
-				# Add power on hours if available
-				if [ -n "$power_on_hours" ]; then
-					details="$details, Hours: ${power_on_hours}"
-				fi
+				# Check media errors
+				check_error_count "$error_count" "Errors"
+
+				# Check temperature
+				check_temperature "$temp"
+
+				# Add power on hours
+				add_metric "Hours" "${power_on_hours:-N/A}" "INFO"
+
+				# Combine details
+				details=$(
+					IFS=", "
+					echo "${detail_parts[*]}"
+				)
 			else
 				health_status="ERROR"
-				health_color=$RED
-				details="Failed to read NVMe SMART data"
+				details="Wear: Unknown ${RED}(ERROR)${RESET}, Spare: Unknown ${RED}(ERROR)${RESET}, Temp: Unknown ${RED}(ERROR)${RESET}, Hours: Unknown ${RED}(ERROR)${RESET}"
 			fi
 		else
 			health_status="NO_TOOL"
-			health_color=$YELLOW
-			details="nvme-cli not installed"
+			details="Wear: Unknown ${YELLOW}(NO_TOOL)${RESET}, Spare: Unknown ${YELLOW}(NO_TOOL)${RESET}, Temp: Unknown ${YELLOW}(NO_TOOL)${RESET}, Hours: Unknown ${YELLOW}(NO_TOOL)${RESET}"
 		fi
 	else
 		# SATA/SAS disk - use smartctl
-		if command -v smartctl &>/dev/null; then
+		# NOTE: smartctl is in /usr/sbin/smartctl so needs to be run with sudo
+		if PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v smartctl &>/dev/null; then
 			local smart_output
-			if smart_output=$(sudo smartctl -H -A "$disk" 2>/dev/null); then
+			# Don't check exit code - smartctl returns non-zero even with valid data
+			# (e.g., bit 6=past errors in log, bit 7=self-test errors)
+			smart_output=$(sudo smartctl -H -A "$disk" 2>/dev/null)
+			# Check if we got valid output instead of relying on exit code
+			if echo "$smart_output" | grep -q "SMART Attributes Data Structure"; then
 				# Check overall health status
 				if echo "$smart_output" | grep -q "PASSED"; then
 					health_status="HEALTHY"
-					health_color=$GREEN
 				elif echo "$smart_output" | grep -q "FAILED"; then
 					health_status="FAILED"
-					health_color=$RED
 				fi
 
-				# Parse specific SMART attributes
-				# Reallocated sectors (ID 5)
-				reallocated=$(echo "$smart_output" | grep "^  5" | awk '{print $10}')
+				# Parse specific SMART attributes (ID numbers work with flexible whitespace)
+				reallocated=$(parse_smart_raw "$smart_output" "5")
+				pending=$(parse_smart_raw "$smart_output" "197")
 
-				# Pending sectors (ID 197)
-				pending=$(echo "$smart_output" | grep "^197" | awk '{print $10}')
+				# Uncorrectable errors (ID 187, 188)
+				local uncorrectable
+				uncorrectable=$(parse_smart_raw "$smart_output" "187")
+				[ -z "$uncorrectable" ] && uncorrectable=$(parse_smart_raw "$smart_output" "188")
 
-				# Temperature (ID 194)
-				temp=$(echo "$smart_output" | grep "^194" | awk '{print $10}')
+				local crc_errors
+				crc_errors=$(parse_smart_raw "$smart_output" "199")
 
-				# Wear levelling (ID 177 for SSDs)
-				wear=$(echo "$smart_output" | grep "^177" | awk '{print $10}')
+				temp=$(parse_smart_raw "$smart_output" "194")
+				[ -z "$temp" ] && temp=$(parse_smart_raw "$smart_output" "190")
+				wear=$(parse_smart_normalized "$smart_output" "177")
+				power_on_hours=$(parse_smart_raw "$smart_output" "9")
 
-				# Power on hours (ID 9)
-				power_on_hours=$(echo "$smart_output" | grep "^  9" | awk '{print $10}')
+				local total_bytes_written
+				total_bytes_written=$(parse_smart_raw "$smart_output" "241")
 
-				# Build details string
+				# Build details string with per-metric status
 				local detail_parts=()
 
-				# Check for critical issues
-				if [ -n "$reallocated" ] && [ "$reallocated" -gt 0 ]; then
-					health_status="WARNING"
-					health_color=$YELLOW
-					detail_parts+=("Reallocated: $reallocated")
+				# Check error counts
+				check_error_count "$reallocated" "Reallocated"
+				check_error_count "$pending" "Pending"
+				check_error_count "$uncorrectable" "Uncorrectable"
+				check_error_count "$crc_errors" "CRC Errors" "false"
+
+				# Check wear for SSDs
+				if [ -n "$wear" ] && [ "$wear" -le 10 ]; then
+					health_status=$(update_health_status "$health_status" "WARNING")
+					add_metric "Wear" "$wear" "WARNING"
+				elif [ -n "$wear" ] && [ "$wear" -le 20 ]; then
+					add_metric "Wear" "$wear" "INFO"
+				elif [ -n "$wear" ]; then
+					add_metric "Wear" "$wear" "HEALTHY"
 				fi
 
-				if [ -n "$pending" ] && [ "$pending" -gt 0 ]; then
-					health_status="WARNING"
-					health_color=$YELLOW
-					detail_parts+=("Pending: $pending")
-				fi
-
-				# Add wear info for SSDs
-				if [ -n "$wear" ]; then
-					detail_parts+=("Wear: $wear")
-					if [ "$wear" -le 10 ]; then
-						health_status="WARNING"
-						health_color=$YELLOW
-					fi
-				fi
-
-				# Add temperature
-				if [ -n "$temp" ]; then
-					detail_parts+=("Temp: ${temp}°C")
-					if [ "$temp" -gt 60 ]; then
-						if [ "$health_status" = "HEALTHY" ]; then
-							health_status="WARNING"
-							health_color=$YELLOW
-						fi
-					fi
-				fi
+				# Check temperature
+				check_temperature "$temp"
 
 				# Add power on hours
-				if [ -n "$power_on_hours" ]; then
-					detail_parts+=("Hours: $power_on_hours")
+				add_metric "Hours" "${power_on_hours:-N/A}" "INFO"
+
+				# Add total bytes written for SSDs
+				if [ -n "$total_bytes_written" ] && [ "$total_bytes_written" -gt 1000000 ]; then
+					local tbw_gb=$((total_bytes_written / 1000))
+					add_metric "Written" "${tbw_gb}" "INFO" " GB"
+				elif [ -n "$total_bytes_written" ]; then
+					add_metric "Written" "${total_bytes_written}" "INFO" " LBAs"
 				fi
 
 				# Combine details
@@ -707,15 +859,16 @@ check_disk_health() {
 				fi
 			else
 				health_status="ERROR"
-				health_color=$RED
-				details="Failed to read SMART data"
+				details="Reallocated: Unknown ${RED}(ERROR)${RESET}, Pending: Unknown ${RED}(ERROR)${RESET}, Uncorrectable: Unknown ${RED}(ERROR)${RESET}, Temp: Unknown ${RED}(ERROR)${RESET}, Hours: Unknown ${RED}(ERROR)${RESET}"
 			fi
 		else
 			health_status="NO_TOOL"
-			health_color=$YELLOW
-			details="smartmontools not installed"
+			details="Reallocated: Unknown ${YELLOW}(NO_TOOL)${RESET}, Pending: Unknown ${YELLOW}(NO_TOOL)${RESET}, Uncorrectable: Unknown ${YELLOW}(NO_TOOL)${RESET}, Temp: Unknown ${YELLOW}(NO_TOOL)${RESET}, Hours: Unknown ${YELLOW}(NO_TOOL)${RESET}"
 		fi
 	fi
+
+	# Set color based on final status
+	health_color=$(set_health_color "$health_status")
 
 	# Return status, color, and details as a formatted string
 	echo "${health_color}${health_status}${RESET}|${details}"
@@ -735,7 +888,8 @@ health_check() {
 		return
 	fi
 
-	print_header "Checking disk health" "$BLUE"
+	PHASE=$((PHASE + 1))
+	print_header "Phase ${PHASE}: Gathering disk health data" "$BLUE"
 	log INFO "Running health checks on ${#DISKS_TO_WIPE[@]} disk(s)"
 
 	for disk in "${DISKS_TO_WIPE[@]}"; do
@@ -743,6 +897,10 @@ health_check() {
 		health_info=$(check_disk_health "$disk")
 		status=$(echo "$health_info" | cut -d'|' -f1)
 		details=$(echo "$health_info" | cut -d'|' -f2)
+
+		local disk_id
+		disk_id=$(get_disk_id "$disk")
+		DISK_IDS["$disk"]="$disk_id"
 
 		disk_health_status["$disk"]="$status"
 		disk_health_details["$disk"]="$details"
@@ -763,6 +921,26 @@ health_check() {
 	done
 }
 
+get_disk_id() {
+	local disk=$1
+	local id="N/A"
+
+	if [ -d "/dev/disk/by-id" ]; then
+		for link in /dev/disk/by-id/*; do
+			if [ -L "$link" ] && [[ ! $link =~ -part[0-9]+$ ]]; then
+				local target
+				target=$(readlink "$link")
+				if [[ $target == */$(basename "$disk") ]] || [ "$(basename "$target")" = "$(basename "$disk")" ]; then
+					id=$(basename "$link")
+					break
+				fi
+			fi
+		done
+	fi
+
+	echo "$id"
+}
+
 ##################################################
 # Summary
 ##################################################
@@ -775,23 +953,43 @@ print_summary() {
 		return
 	fi
 
-	cat <<-EOF
-
-		${GREEN}=========================================${RESET}
-		${GREEN}         OPERATION SUMMARY${RESET}
-		${GREEN}=========================================${RESET}
-
-	EOF
+	echo
+	echo -e "${GREEN}==================================================================================${RESET}"
+	echo -e "${GREEN}         DISK OPERATIONS SUMMARY${RESET}"
+	echo -e "${GREEN}==================================================================================${RESET}"
+	echo
 
 	# Disk Health Section
 	if [ ${#DISK_HEALTH_STATUS[@]} -gt 0 ]; then
 		echo -e "${BLUE}Disk Health Status:${RESET}"
 		for d in "${DISKS_TO_WIPE[@]}"; do
 			if [ -n "${DISK_HEALTH_STATUS[$d]}" ]; then
+				# Extract plain status without color codes
+				local plain_status="${DISK_HEALTH_STATUS[$d]}"
+				plain_status="${plain_status//$GREEN/}"
+				plain_status="${plain_status//$RED/}"
+				plain_status="${plain_status//$YELLOW/}"
+				plain_status="${plain_status//$BLUE/}"
+				plain_status="${plain_status//$RESET/}"
+
+				# Display drive with overall status
 				echo -e "  $d: ${DISK_HEALTH_STATUS[$d]}"
+				echo -e "    |_ id: ${DISK_IDS[$d]}"
 				if [ -n "${DISK_HEALTH_DETAILS[$d]}" ]; then
-					echo -e "    └─ ${DISK_HEALTH_DETAILS[$d]}"
+					# Split by ", " as a single delimiter
+					local old_ifs="$IFS"
+					IFS=","
+					read -ra DETAILS <<<"${DISK_HEALTH_DETAILS[$d]}"
+					IFS="$old_ifs"
+					for detail in "${DETAILS[@]}"; do
+						# Trim leading space from each detail
+						detail="${detail# }"
+						echo -e "    |_ $detail"
+					done
+				else
+					echo -e "    |_ No details available"
 				fi
+				echo
 			fi
 		done
 		echo
@@ -829,7 +1027,7 @@ print_summary() {
 		echo -e "${YELLOW}  None${RESET}"
 	fi
 
-	echo -e "${GREEN}=========================================${RESET}"
+	echo -e "${GREEN}==================================================================================${RESET}"
 }
 
 ##################################################

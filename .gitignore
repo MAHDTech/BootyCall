@@ -6,13 +6,20 @@ tftpboot/iso-extracted/*
 !tftpboot/iso/.gitkeep
 !tftpboot/iso-extracted/.gitkeep
 
-# Ignore IMG files
+# Ignore images
 *.img
 !tftpboot/tools/memtest86/memtest86-usb.img
+*.ova
+*.qcow2
+tftpboot/disk/images/
 
 # Ignore archives
 *.tar.gz
 *.zip
+*.tgz
+
+# Ignore darksite storage
+tftpboot/nce-darksite/
 
 # iVentoy
 tftpboot/tools/iventoy/log/log.txt

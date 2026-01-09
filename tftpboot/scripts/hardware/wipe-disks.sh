@@ -626,20 +626,63 @@ add_metric() {
 	fi
 }
 
+# Helper: Validate if a value is a valid integer
+is_integer() {
+	local value=$1
+	[[ $value =~ ^-?[0-9]+$ ]]
+}
+
+# Helper: Safely extract integer from a value (strips non-numeric characters)
+extract_integer() {
+	local value=$1
+	local cleaned=""
+	local has_minus=false
+
+	# Remove non-digit characters (except leading minus)
+	# First, check for exactly one leading minus (not multiple)
+	if [[ $value =~ ^-[^-] ]]; then
+		has_minus=true
+		value="${value#-}"
+	elif [[ $value =~ ^-- ]]; then
+		# Multiple minuses - invalid, return empty
+		echo ""
+		return
+	fi
+
+	# Strip all non-numeric characters
+	cleaned="${value//[^0-9]/}"
+
+	# Add back the minus if there was one
+	if [[ $has_minus == true ]]; then
+		cleaned="-${cleaned}"
+	fi
+
+	# Return the value if it's a valid integer, otherwise return empty
+	if is_integer "$cleaned"; then
+		echo "$cleaned"
+	else
+		echo ""
+	fi
+}
+
 # Helper: Check error count metric (>0 = WARNING)
 check_error_count() {
 	local value=$1
 	local label=$2
 	local trigger_warning=${3:-true}
 
-	if [ -n "$value" ] && [ "$value" -gt 0 ]; then
+	# Extract integer from value
+	local int_value
+	int_value=$(extract_integer "$value")
+
+	if [ -n "$int_value" ] && [ "$int_value" -gt 0 ]; then
 		if [ "$trigger_warning" = "true" ]; then
 			health_status=$(update_health_status "$health_status" "WARNING")
 			add_metric "$label" "$value" "WARNING"
 		else
 			add_metric "$label" "$value" "INFO"
 		fi
-	elif [ -n "$value" ]; then
+	elif [ -n "$int_value" ]; then
 		add_metric "$label" "$value" "HEALTHY"
 	else
 		add_metric "$label" "N/A" "INFO"
@@ -650,14 +693,18 @@ check_error_count() {
 check_temperature() {
 	local temp=$1
 
-	if [ -n "$temp" ]; then
-		if [ "$temp" -gt 70 ]; then
+	# Extract integer from temperature value
+	local int_temp
+	int_temp=$(extract_integer "$temp")
+
+	if [ -n "$int_temp" ]; then
+		if [ "$int_temp" -gt 70 ]; then
 			health_status=$(update_health_status "$health_status" "WARNING")
-			add_metric "Temp" "$temp" "WARNING" "°C"
-		elif [ "$temp" -gt 60 ]; then
-			add_metric "Temp" "$temp" "INFO" "°C"
+			add_metric "Temp" "$int_temp" "WARNING" "°C"
+		elif [ "$int_temp" -gt 60 ]; then
+			add_metric "Temp" "$int_temp" "INFO" "°C"
 		else
-			add_metric "Temp" "$temp" "HEALTHY" "°C"
+			add_metric "Temp" "$int_temp" "HEALTHY" "°C"
 		fi
 	else
 		add_metric "Temp" "N/A" "INFO" "°C"
@@ -737,7 +784,9 @@ check_disk_health() {
 				fi
 
 				# Check wear (percentage used)
-				if [ -n "$percentage_used" ] && [ "${percentage_used%\%}" -ge 90 ]; then
+				local int_percentage_used
+				int_percentage_used=$(extract_integer "$percentage_used")
+				if [ -n "$int_percentage_used" ] && [ "$int_percentage_used" -ge 90 ]; then
 					health_status=$(update_health_status "$health_status" "WARNING")
 					add_metric "Wear" "$percentage_used" "WARNING"
 				elif [ -n "$percentage_used" ]; then
@@ -747,7 +796,9 @@ check_disk_health() {
 				fi
 
 				# Check available spare
-				if [ -n "$available_spare" ] && [ "${available_spare%\%}" -lt 10 ]; then
+				local int_available_spare
+				int_available_spare=$(extract_integer "$available_spare")
+				if [ -n "$int_available_spare" ] && [ "$int_available_spare" -lt 10 ]; then
 					health_status=$(update_health_status "$health_status" "WARNING")
 					add_metric "Spare" "$available_spare" "WARNING"
 				elif [ -n "$available_spare" ]; then
@@ -825,12 +876,14 @@ check_disk_health() {
 				check_error_count "$crc_errors" "CRC Errors" "false"
 
 				# Check wear for SSDs
-				if [ -n "$wear" ] && [ "$wear" -le 10 ]; then
+				local int_wear
+				int_wear=$(extract_integer "$wear")
+				if [ -n "$int_wear" ] && [ "$int_wear" -le 10 ]; then
 					health_status=$(update_health_status "$health_status" "WARNING")
 					add_metric "Wear" "$wear" "WARNING"
-				elif [ -n "$wear" ] && [ "$wear" -le 20 ]; then
+				elif [ -n "$int_wear" ] && [ "$int_wear" -le 20 ]; then
 					add_metric "Wear" "$wear" "INFO"
-				elif [ -n "$wear" ]; then
+				elif [ -n "$int_wear" ]; then
 					add_metric "Wear" "$wear" "HEALTHY"
 				fi
 
@@ -841,11 +894,13 @@ check_disk_health() {
 				add_metric "Hours" "${power_on_hours:-N/A}" "INFO"
 
 				# Add total bytes written for SSDs
-				if [ -n "$total_bytes_written" ] && [ "$total_bytes_written" -gt 1000000 ]; then
-					local tbw_gb=$((total_bytes_written / 1000))
+				local int_total_bytes_written
+				int_total_bytes_written=$(extract_integer "$total_bytes_written")
+				if [ -n "$int_total_bytes_written" ] && [ "$int_total_bytes_written" -gt 1000000 ]; then
+					local tbw_gb=$((int_total_bytes_written / 1000))
 					add_metric "Written" "${tbw_gb}" "INFO" " GB"
-				elif [ -n "$total_bytes_written" ]; then
-					add_metric "Written" "${total_bytes_written}" "INFO" " LBAs"
+				elif [ -n "$int_total_bytes_written" ]; then
+					add_metric "Written" "${int_total_bytes_written}" "INFO" " LBAs"
 				fi
 
 				# Combine details

@@ -110,7 +110,7 @@ function get_level_num() {
 }
 
 # Logging functions
-log_to_file() {
+function log_to_file() {
 	local level=$1
 	local msg=$2
 	local file_num
@@ -122,7 +122,7 @@ log_to_file() {
 	fi
 }
 
-log_to_screen() {
+function log_to_screen() {
 	local level=$1
 	local msg=$2
 	local screen_num
@@ -141,7 +141,7 @@ log_to_screen() {
 	fi
 }
 
-log() {
+function log() {
 	local level=$1
 	local msg=$2
 	log_to_screen "$level" "$msg"
@@ -149,7 +149,7 @@ log() {
 }
 
 # Function to check if running as root
-check_root() {
+function check_root() {
 	log debug "Checking root status..."
 	if [[ $EUID -ne 0 ]]; then
 		log error "This script must be run as root (use sudo)."
@@ -159,7 +159,7 @@ check_root() {
 }
 
 # Function to check if running on Debian or Ubuntu
-check_os() {
+function check_os() {
 	log debug "Checking OS..."
 	local os
 	os=$(lsb_release -i -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -171,7 +171,7 @@ check_os() {
 }
 
 # Function to check architecture and set STORCLI command
-check_arch() {
+function check_arch() {
 	log debug "Checking architecture..."
 	local uname_arch
 	uname_arch=$(uname -m)
@@ -187,7 +187,7 @@ check_arch() {
 }
 
 # Function to download and extract the firmware bundle to WORK_DIR
-download_firmware_bundle() {
+function download_firmware_bundle() {
 	log info "Downloading firmware bundle to $WORK_DIR..."
 	if ! cd "$WORK_DIR"; then
 		log error "Failed to cd to $WORK_DIR"
@@ -224,7 +224,7 @@ download_firmware_bundle() {
 }
 
 # Function to install the correct storcli deb file from WORK_DIR
-install_storcli() {
+function install_storcli() {
 	log info "Installing STORCLI for $ARCH..."
 	local ref="${ARCH}_FILE_STORCLI"
 	local deb_file="${!ref}"
@@ -257,7 +257,7 @@ install_storcli() {
 }
 
 # Function to show SAS cards using storcli
-show_cards() {
+function show_cards() {
 	log info "Showing SAS cards with $STORCLI_CMD:"
 	if ! "$STORCLI_CMD" /c0 show all; then
 		log error "Failed to show SAS cards"
@@ -269,7 +269,7 @@ show_cards() {
 }
 
 # Function to flash the card firmware
-flash_card() {
+function flash_card() {
 	log info "Flashing the card firmware..."
 	local ref="${ARCH}_FILE_FIRMWARE"
 	local fw_file="${!ref}"
@@ -291,7 +291,7 @@ flash_card() {
 }
 
 # Function to flash the BIOS using storcli (optional)
-flash_efi_bios() {
+function flash_efi_bios() {
 	local ref="${ARCH}_FILE_BIOS"
 	local bios_file="${!ref}"
 	if [[ -z $bios_file ]]; then
@@ -317,7 +317,7 @@ flash_efi_bios() {
 }
 
 # Function to flash the PSOC catalog file
-flash_catalog() {
+function flash_catalog() {
 	log info "Flashing the PSOC catalog file..."
 	local ref="${ARCH}_FILE_PSOC"
 	local cat_file="${!ref}"
@@ -342,7 +342,7 @@ flash_catalog() {
 # Main
 #########################
 
-main() {
+function main() {
 
 	log info "Starting $SCRIPT_NAME (log: $LOG_FILE)"
 

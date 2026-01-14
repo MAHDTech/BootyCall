@@ -1,0 +1,6 @@
+# Release
+
+This is the folder where the LCM bundles are extracted.
+
+All files within this folder `*` are included in `.gitignore`
+

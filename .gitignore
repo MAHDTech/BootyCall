@@ -19,7 +19,9 @@ tftpboot/disk-images/
 *.tgz
 
 # Ignore darksite storage
-tftpboot/nce-darksite/
+tftpboot/nce-darksite/lcm-bundles/*.tar.gz
+tftpboot/nce-darksite/release/*
+!tftpboot/nce-darksite/release/.gitkeep
 
 # iVentoy
 tftpboot/tools/iventoy/log/log.txt

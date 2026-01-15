@@ -757,8 +757,10 @@ check_disk_health() {
 				# Parse critical warnings
 				critical_warning=$(echo "$nvme_output" | grep "critical_warning" | awk '{print $NF}')
 
-				# Parse temperature (get numeric value, not unit)
-				temp=$(echo "$nvme_output" | grep "temperature" | head -1 | awk '{print $(NF-1)}')
+				# Parse temperature - extract Celsius value directly
+				# nvme smart-log format: "temperature : 54°C (327 Kelvin)"
+				# We want the Celsius value (field 3), stripped of the °C suffix
+				temp=$(echo "$nvme_output" | grep "temperature" | head -1 | awk '{print $3}' | sed 's/°C//')
 
 				# Parse available spare
 				available_spare=$(echo "$nvme_output" | grep "available_spare" | head -1 | awk '{print $NF}')

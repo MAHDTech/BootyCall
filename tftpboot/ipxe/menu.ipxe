@@ -63,6 +63,7 @@ item --gap --   :: OPERATING ENVIRONMENTS ::
 item --gap --
 item boot_hdd       > Boot from HDD (Default)
 item netboot        > Netboot
+item nixos          > NixOS Installer
 item nce            > Nutanix CE
 item threefold      > Threefold ZeroOS
 item --gap --
@@ -90,6 +91,7 @@ goto ${selected}
 
 item --key b boot_hdd
 item --key n netboot        [N] Netboot.xyz
+item --key o nixos          [O] NixOS Installer
 item --key i nce            [C] Nutanix Community Edition
 item --key m mt86plus       [M] Memtest86+
 item --key p mt86passmark   [P] PassMark MemTest86
@@ -114,6 +116,16 @@ goto start
 echo Loading Netboot menu ...
 
 chain --autofree ${server_proto}://${server_name}/ipxe/netboot.ipxe || goto failed
+
+goto start
+
+#########################
+:nixos
+#########################
+
+echo Loading NixOS Minimal Installer (netboot) ...
+
+chain --autofree https://netboot.nixos.org/dispatch/nixos-25.11/x86_64-linux/netboot/default/ipxe || goto failed
 
 goto start
 

@@ -8,10 +8,10 @@ tftpboot/iso-extracted/*
 
 # Ignore images
 *.img
-!tftpboot/tools/memtest86/memtest86-usb.img
 *.ova
 *.qcow2
 tftpboot/disk-images/
+!tftpboot/disk-images/.gitkeep
 
 # Ignore archives
 *.tar.gz
@@ -23,8 +23,17 @@ tftpboot/nce-darksite/lcm-bundles/*.tar.gz
 tftpboot/nce-darksite/release/*
 !tftpboot/nce-darksite/release/.gitkeep
 
+# NixOS netboot (rebuildable via nix-build)
+tftpboot/images/nixos/
+result-*
+*.drv
+
 # iVentoy
 tftpboot/tools/iventoy/log/log.txt
+tftpboot/tools/iventoy/iso/
+
+# Memtest86 (download separately)
+tftpboot/tools/memtest86/memtest86-usb.img
 
 # dotenv
 .env
@@ -39,3 +48,4 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+

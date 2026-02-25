@@ -125,7 +125,9 @@ goto start
 
 echo Loading NixOS Minimal Installer (netboot) ...
 
-chain --autofree https://netboot.nixos.org/dispatch/nixos-25.11/x86_64-linux/netboot/default/ipxe || goto failed
+kernel ${server_proto}://${server_name}/images/nixos/bzImage init=/nix/store/l8wyfznmr5z66531yq5b5qw4rpkz9al7-nixos-system-nixos-kexec-25.11pre-git/init initrd=initrd nohibernate loglevel=4 lsm=landlock,yama,bpf || goto failed
+initrd ${server_proto}://${server_name}/images/nixos/initrd || goto failed
+boot || goto failed
 
 goto start
 

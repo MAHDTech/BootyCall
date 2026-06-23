@@ -78,8 +78,8 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 8: System Integration, CLI & Packaging
 
-- [ ] **Task 8.1**: Implement `main.rs` CLI parser utilising `clap`.
-- [ ] **Task 8.2**: Orchestrate Tokio spawn loops running DHCP, TFTP, and HTTP services concurrently.
-- [ ] **Task 8.3**: Integrate standard Unix signal handling (`SIGINT`/`SIGTERM`) for clean shutdowns.
-- [ ] **Task 8.4**: Add systemd socket activation support for port binding.
-- [ ] **Task 8.5**: Validate the build on both ARM64 and x86_64 target platforms.
+- [x] **Task 8.1**: Implement `main.rs` CLI parser utilising `clap`.
+- [x] **Task 8.2**: Orchestrate Tokio spawn loops running DHCP, TFTP, and HTTP services concurrently.
+- [x] **Task 8.3**: Integrate standard Unix signal handling (`SIGINT`/`SIGTERM`) for clean shutdowns.
+- [x] **Task 8.4**: Add systemd socket activation support for port binding.
+- [x] **Task 8.5**: Validate the build on both ARM64 and x86_64 target platforms.

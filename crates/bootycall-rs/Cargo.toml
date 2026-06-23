@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bootycall-core = { path = "../bootycall-core" }
+bootycall-dhcp = { path = "../bootycall-dhcp" }
+bootycall-tftp = { path = "../bootycall-tftp" }
+bootycall-extractor = { path = "../bootycall-extractor" }
+bootycall-http = { path = "../bootycall-http" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

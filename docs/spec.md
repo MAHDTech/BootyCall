@@ -44,37 +44,38 @@ The project is organized as a Cargo Workspace inside `bootycall-rs/` to guarante
 ```text
 bootycall-rs/
 ├── Cargo.toml                      # Workspace definition
-├── bootycall-core/                 # Shared types, logging, and config loading
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── config.rs               # YAML schema parser & watcher (notify crate)
-│       └── state.rs                # Shared in-memory active host/events state
-├── bootycall-dhcp/                 # Proxy DHCP Server logic
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       └── server.rs               # UDP listener (ports 67/4011), parses Option 93
-├── bootycall-tftp/                 # Async TFTP Server
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       └── server.rs               # UDP listener (port 69), serves efi files
-├── bootycall-extractor/            # ISO/IMG parser and file extractor
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       └── parser.rs               # Pure Rust parser (ISO9660 & FAT32) to extract kernels/initrd
-├── bootycall-http/                 # Axum web framework endpoints & UI
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── router.rs               # Endpoints for iPXE scripting and Web API
-│       └── ui.rs                   # Embedded Web UI assets using rust-embed
-└── bootycall-rs/                   # Main CLI binary wrapper
-    ├── Cargo.toml
-    └── src/
-        └── main.rs                 # Initialises configuration, orchestrates tokio tasks
+└── crates/
+    ├── bootycall-core/                 # Shared types, logging, and config loading
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── lib.rs
+    │       ├── config.rs               # YAML schema parser & watcher (notify crate)
+    │       └── state.rs                # Shared in-memory active host/events state
+    ├── bootycall-dhcp/                 # Proxy DHCP Server logic
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── lib.rs
+    │       └── server.rs               # UDP listener (ports 67/4011), parses Option 93
+    ├── bootycall-tftp/                 # Async TFTP Server
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── lib.rs
+    │       └── server.rs               # UDP listener (port 69), serves efi files
+    ├── bootycall-extractor/            # ISO/IMG parser and file extractor
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── lib.rs
+    │       └── parser.rs               # Pure Rust parser (ISO9660 & FAT32) to extract kernels/initrd
+    ├── bootycall-http/                 # Axum web framework endpoints & UI
+    │   ├── Cargo.toml
+    │   └── src/
+    │       ├── lib.rs
+    │       ├── router.rs               # Endpoints for iPXE scripting and Web API
+    │       └── ui.rs                   # Embedded Web UI assets using rust-embed
+    └── bootycall-rs/                   # Main CLI binary wrapper
+        ├── Cargo.toml
+        └── src/
+            └── main.rs                 # Initialises configuration, orchestrates tokio tasks
 ```
 
 ### Crate Responsibilities

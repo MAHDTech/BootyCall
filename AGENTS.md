@@ -43,7 +43,7 @@ This runs check-yaml, typos, action-validator, cargo-check, clippy, rustfmt, etc
 
 ## 3. Crate Responsibilities
 
-The Cargo Workspace is located inside the root project directory and splits responsibilities across the following crates:
+The Cargo Workspace is located inside the root project directory and splits responsibilities across the following crates inside the `crates/` folder:
 
 - `bootycall-core`: Configuration definitions, file monitoring, event registry, and global status state.
 - `bootycall-dhcp`: Proxy DHCP server parsing Option 93 and serving architecture-specific PXE redirection.

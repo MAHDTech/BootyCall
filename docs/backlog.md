@@ -24,10 +24,10 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 2: `bootycall-core` (Configuration & State Engine)
 
-- [ ] **Task 2.1**: Define YAML configuration struct schema in `config.rs`.
-- [ ] **Task 2.2**: Integrate `serde_yaml` to parse configuration and add unit tests.
-- [ ] **Task 2.3**: Implement configuration live-reloader using `notify` crate to reload on yaml changes.
-- [ ] **Task 2.4**: Create shared `State` structs to track currently active/polling hosts and historic boot events with thread-safe access (`Arc<RwLock>`).
+- [x] **Task 2.1**: Define YAML configuration struct schema in `config.rs`.
+- [x] **Task 2.2**: Integrate `serde_yaml` to parse configuration and add unit tests.
+- [x] **Task 2.3**: Implement configuration live-reloader using `notify` crate to reload on yaml changes.
+- [x] **Task 2.4**: Create shared `State` structs to track currently active/polling hosts and historic boot events with thread-safe access (`Arc<RwLock>`).
 
 ---
 

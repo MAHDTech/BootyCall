@@ -49,3 +49,6 @@ devenv.local.yaml
 # pre-commit
 .pre-commit-config.yaml
 
+# Ignore scratch space
+scratch/
+

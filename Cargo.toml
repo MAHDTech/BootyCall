@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "bootycall-core",
+    "bootycall-dhcp",
+    "bootycall-tftp",
+    "bootycall-extractor",
+    "bootycall-http",
+    "bootycall-rs"
+]

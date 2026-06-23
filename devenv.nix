@@ -8,6 +8,7 @@ let
 
   packages = with pkgs; [
     bashInteractive
+    pre-commit
   ];
 
   devPackages = with pkgs; [
@@ -87,8 +88,11 @@ in
   '';
 
   languages = {
-    nix = {
+    nix.enable = true;
+    rust = {
       enable = true;
+      toolchainFile = ./rust-toolchain.toml;
+      lsp.enable = true;
     };
     shell = {
       enable = true;
@@ -97,6 +101,11 @@ in
 
   git-hooks = {
     excludes = [
+      ".devenv/"
+      ".git/"
+      "^.vscode/"
+      "target/"
+      "scratch/"
     ];
     hooks = {
       actionlint.enable = true;
@@ -112,15 +121,22 @@ in
       check-symlinks.enable = true;
       check-yaml.enable = true;
       commitizen.enable = true;
+      cargo-check = {
+        enable = true;
+        package = config.languages.rust.toolchainPackage;
+      };
+      clippy = {
+        enable = true;
+        package = config.languages.rust.toolchainPackage;
+        settings = {
+          denyWarnings = true;
+          offline = true;
+          allFeatures = true;
+        };
+      };
       convco.enable = true;
       deadnix.enable = true;
-      dialyzer.enable = true;
       editorconfig-checker.enable = true;
-      gofmt.enable = true;
-      golangci-lint.enable = true;
-      golines.enable = true;
-      gotest.enable = true;
-      govet.enable = true;
       gptcommit.enable = true;
       markdownlint = {
         enable = true;
@@ -156,11 +172,11 @@ in
         };
       };
       pretty-format-json.enable = false; # using prettier
-      revive = {
-        enable = true;
-        fail_fast = false;
-      };
       ripsecrets.enable = true;
+      rustfmt = {
+        enable = true;
+        package = config.languages.rust.toolchainPackage;
+      };
       shellcheck = {
         enable = true;
         excludes = [
@@ -168,7 +184,6 @@ in
         ];
       };
       shfmt.enable = true;
-      staticcheck.enable = true;
       statix.enable = true;
       tflint.enable = true;
       trim-trailing-whitespace.enable = true;

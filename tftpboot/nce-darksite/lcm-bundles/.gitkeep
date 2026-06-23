@@ -1,6 +1,0 @@
-# LCM Bundles
-
-This is the folder where the unextracted LCM bundles are placed.
-
-Any `*.tar.gz` within this folder is included in `.gitignore`
-

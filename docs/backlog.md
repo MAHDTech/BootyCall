@@ -51,10 +51,10 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 5: `bootycall-tftp` (Asynchronous TFTP Server)
 
-- [ ] **Task 5.1**: Set up UDP listener socket on Port 69/UDP.
-- [ ] **Task 5.2**: Parse Read Request (RRQ) packets and handle option negotiation (`blksize`, `timeout`).
-- [ ] **Task 5.3**: Build packet transmitter sending 512-byte (or negotiated `blksize`) data blocks with block counters, retries, and timeout handling.
-- [ ] **Task 5.4**: Integrate MAC-based bootloader path lookup to serve customized loader binaries.
+- [x] **Task 5.1**: Set up UDP listener socket on Port 69/UDP.
+- [x] **Task 5.2**: Parse Read Request (RRQ) packets and handle option negotiation (`blksize`, `timeout`).
+- [x] **Task 5.3**: Build packet transmitter sending 512-byte (or negotiated `blksize`) data blocks with block counters, retries, and timeout handling.
+- [x] **Task 5.4**: Integrate MAC-based bootloader path lookup to serve customized loader binaries.
 
 ---
 

@@ -22,3 +22,6 @@ tftpboot/memdisk binary
 # Memdisk symlink
 tftpboot/syslinux/memdisk text symlink=auto
 
+# Static wallpapers
+static/wallpapers/*.png filter=lfs diff=lfs merge=lfs -text
+

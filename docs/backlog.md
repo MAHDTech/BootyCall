@@ -2,6 +2,12 @@
 
 This backlog outlines the tasks required to build, test, and release the new `bootycall-rs` network booting server.
 
+## Development Guidelines
+
+- **Unit Testing**: Write robust unit tests for every phase of the project to guarantee correct protocol parser and file mapping operations.
+- **Pre-commit Quality**: Ensure all pre-commit validation checks pass cleanly (including `cargo check`, `cargo clippy`, `rustfmt`, and all unit tests) before any commit.
+- **Conventional Commits**: Commit at the end of each phase using the Conventional Commits specification (e.g. `feat: ...`, `fix: ...`, `chore: ...`).
+
 ---
 
 ## Phase 1: Workspace & Tooling Initialisation (Current)

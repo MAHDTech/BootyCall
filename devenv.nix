@@ -5,40 +5,8 @@
   ...
 }:
 let
-
-  packages = with pkgs; [
-    bashInteractive
-    pre-commit
-  ];
-
-  devPackages = with pkgs; [
-    bc
-    binutils
-    bison
-    cdrkit
-    cpio
-    elfutils
-    figlet
-    file
-    flex
-    gcc
-    git
-    gnumake
-    gnutar
-    hello
-    jq
-    kmod
-    libelf
-    openssl
-    p7zip
-    perl
-    pigz
-    rpm
-    rsync
-    squashfsTools
-    wget
-  ];
-
+  mkCrate = import ./packages/crate.nix { inherit pkgs; };
+  bootycall = mkCrate "bootycall-rs";
 in
 {
   name = "BootyCall";
@@ -67,8 +35,11 @@ in
     enable = true;
   };
 
-  packages =
-    packages ++ lib.optionals (!config.container.isBuilding || config.name == "devenv") devPackages;
+  packages = with pkgs; [
+    bashInteractive
+    pre-commit
+    bootycall
+  ];
 
   enterShell = ''
     figlet -f starwars -w 180 $PROJECT
@@ -245,59 +216,13 @@ in
     };
   };
 
-  scripts = {
-    create-iso-nce = {
-      package = pkgs.bash;
-      description = "Create ISO for NCE";
-      exec = ''
-        echo "This will create/update a custom Nutanix Community Edition ISO."
-        echo ""
-        read -rp "Ready to start? " ANSWER
-        ANSWER=$(echo "''${ANSWER:-}" | tr '[:upper:]' '[:lower:]')
-        if [[ "$ANSWER" == "y" || "$ANSWER" == "yes" ]];
-        then
-          ./tftpboot/scripts/nce/nce_create_iso.sh
-        else
-          echo "Ok then, goodbye!"
-        fi
-      '';
-    };
-    create-iso-systemd-boot = {
-      package = pkgs.bash;
-      description = "Create ISO for Systemd Boot";
-      exec = ''
-        echo "This will create/update a custom Systemd Boot ISO."
-        echo ""
-        read -rp "Ready to start? " ANSWER
-        ANSWER=$(echo "''${ANSWER:-}" | tr '[:upper:]' '[:lower:]')
-        if [[ "$ANSWER" == "y" || "$ANSWER" == "yes" ]];
-        then
-          ./tftpboot/scripts/software/update-systemd-boot.sh
-        else
-          echo "Ok then, goodbye!"
-        fi
-      '';
-    };
-    create-iso-refind = {
-      package = pkgs.bash;
-      description = "Create ISO for Refind";
-      exec = ''
-        echo "This will create/update a custom Refind ISO."
-        echo ""
-        read -rp "Ready to start? " ANSWER
-        ANSWER=$(echo "''${ANSWER:-}" | tr '[:upper:]' '[:lower:]')
-        if [[ "$ANSWER" == "y" || "$ANSWER" == "yes" ]];
-        then
-          ./tftpboot/scripts/software/update-refind.sh
-        else
-          echo "Ok then, goodbye!"
-        fi
-      '';
-    };
-  };
+  scripts = { };
 
   enterTest = ''
     echo "Running devenv tests..."
   '';
 
+  outputs = {
+    inherit bootycall;
+  };
 }

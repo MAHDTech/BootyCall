@@ -1,0 +1,26 @@
+[Unit]
+Description=BootyCall Network Booting Suite
+Documentation=https://github.com/MAHDTech/BootyCall
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bootycall-rs --config /etc/bootycall/bootycall.yaml
+Restart=always
+RestartSec=5
+
+# Security hardening and capability configuration
+# Allows binding to privileged ports (67 DHCP, 69 TFTP) as non-root user
+User=bootycall
+Group=bootycall
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/bootycall /var/cache/bootycall
+
+[Install]
+WantedBy=multi-user.target

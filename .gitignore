@@ -52,3 +52,5 @@ devenv.local.yaml
 # Ignore scratch space
 scratch/
 
+# Ignore Rust build directory
+target/

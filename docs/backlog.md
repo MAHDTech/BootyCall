@@ -60,19 +60,19 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 6: `bootycall-http` (Axum Web Server & Dynamic Scripting)
 
-- [ ] **Task 6.1**: Configure Axum HTTP routing server.
-- [ ] **Task 6.2**: Implement `/start` and `/poll/{mac}` endpoints. If host is mapped in state, serve custom iPXE chainload commands; otherwise return the poll retry script.
-- [ ] **Task 6.3**: Implement static file server endpoint serving extracted kernels and initrd files from cache.
-- [ ] **Task 6.4**: Implement dynamic wallpaper endpoint `/dynamic/wallpaper.ipxe` which reads files in `static/wallpapers/` and picks one at random, prioritising resolution parameters if present.
-- [ ] **Task 6.5**: Create iPXE menu template fallback `/ipxemenu` using `minijinja` for hosts without MAC mapping.
+- [x] **Task 6.1**: Configure Axum HTTP routing server.
+- [x] **Task 6.2**: Implement `/start` and `/poll/{mac}` endpoints. If host is mapped in state, serve custom iPXE chainload commands; otherwise return the poll retry script.
+- [x] **Task 6.3**: Implement static file server endpoint serving extracted kernels and initrd files from cache.
+- [x] **Task 6.4**: Implement dynamic wallpaper endpoint `/dynamic/wallpaper.ipxe` which reads files in `static/wallpapers/` and picks one at random, prioritising resolution parameters if present.
+- [x] **Task 6.5**: Create iPXE menu template fallback `/ipxemenu` using `minijinja` for hosts without MAC mapping.
 
 ---
 
 ## Phase 7: Embedded UI (Glassmorphic Web Dashboard)
 
-- [ ] **Task 7.1**: Create dynamic web dashboard using vanilla HTML, modern CSS, and JS (glassmorphic dark mode).
-- [ ] **Task 7.2**: Bundle assets into the Rust executable using `rust-embed`.
-- [ ] **Task 7.3**: Expose web routes for `/api/status` (live host metrics), `/api/logs` (events), and `/api/override` (to manually select a boot script for a polling host).
+- [x] **Task 7.1**: Create dynamic web dashboard using vanilla HTML, modern CSS, and JS (glassmorphic dark mode).
+- [x] **Task 7.2**: Bundle assets into the Rust executable using `rust-embed`.
+- [x] **Task 7.3**: Expose web routes for `/api/status` (live host metrics), `/api/logs` (events), and `/api/override` (to manually select a boot script for a polling host).
 
 ---
 

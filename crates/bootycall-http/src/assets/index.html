@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BootyCall - UEFI iPXE Boot Suite</title>
+    <link rel="stylesheet" href="/ui/style.css">
+    <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦾</text></svg>">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <span class="logo-icon">🦾</span>
+                <h1>BootyCall</h1>
+                <span class="badge">UEFI Server Suite</span>
+            </div>
+            <div class="server-status">
+                <span class="pulse-indicator green"></span>
+                <span id="server-time">System Active</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="dashboard-grid">
+            <!-- Left Panel: Hosts List -->
+            <section class="panel hosts-panel">
+                <div class="panel-header">
+                    <h2>Active Host Tracking</h2>
+                    <span class="counter" id="host-count">0 Hosts</span>
+                </div>
+                <div class="hosts-table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>MAC Address</th>
+                                <th>Name / IP</th>
+                                <th>Architecture</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="hosts-list">
+                            <!-- Dynamically loaded -->
+                            <tr class="empty-row">
+                                <td colspan="5">Scanning network for PXE boot requests...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Right Panel: Logs & Events -->
+            <section class="panel logs-panel">
+                <div class="panel-header">
+                    <h2>System Events Log</h2>
+                    <button class="btn btn-secondary btn-sm" id="clear-logs-btn">Clear View</button>
+                </div>
+                <div class="logs-container" id="logs-list">
+                    <!-- Dynamically loaded -->
+                    <div class="log-entry system">Waiting for events...</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal for Manual Override Assignment -->
+    <div class="modal-overlay" id="override-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Assign Boot Target</h3>
+                <button class="close-btn" id="close-modal-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Select a boot target configuration to override for host <strong id="modal-mac"></strong>:</p>
+                <form id="override-form">
+                    <div class="form-group">
+                        <label for="override-target">Available Configs</label>
+                        <select id="override-target" required>
+                            <!-- Dynamically loaded -->
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancel-override-btn">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Assign Configuration</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="/ui/app.js"></script>
+</body>
+</html>

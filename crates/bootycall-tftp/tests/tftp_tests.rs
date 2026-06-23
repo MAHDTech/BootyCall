@@ -197,7 +197,7 @@ async fn test_tftp_server_negotiation_and_transfer() {
     let ack1 = make_ack_packet(1);
     client_socket.send_to(&ack1, server_tid_addr).await.unwrap();
 
-    // Wait briefly for TFTP task to finalize and update state store
+    // Wait briefly for TFTP task to finalise and update state store
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Check host status in StateStore is Completed

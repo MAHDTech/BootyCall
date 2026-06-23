@@ -42,10 +42,10 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 4: `bootycall-dhcp` (Proxy DHCP Server)
 
-- [ ] **Task 4.1**: Set up UDP listener socket binding to port 4011/UDP (and port 67 if specified).
-- [ ] **Task 4.2**: Parse incoming DHCP Discover / Request packets using `dhcproto`.
-- [ ] **Task 4.3**: Implement architecture identification logic looking at Option 93 (x86_64 vs. ARM64 UEFI).
-- [ ] **Task 4.4**: Craft and reply with a DHCP ACK containing Option 60 (`PXEClient`), Option 66 (our IP), and Option 67 (pointing to the correct bootloader path).
+- [x] **Task 4.1**: Set up UDP listener socket binding to port 4011/UDP (and port 67 if specified).
+- [x] **Task 4.2**: Parse incoming DHCP Discover / Request packets using `dhcproto`.
+- [x] **Task 4.3**: Implement architecture identification logic looking at Option 93 (x86_64 vs. ARM64 UEFI).
+- [x] **Task 4.4**: Craft and reply with a DHCP ACK containing Option 60 (`PXEClient`), Option 66 (our IP), and Option 67 (pointing to the correct bootloader path).
 
 ---
 

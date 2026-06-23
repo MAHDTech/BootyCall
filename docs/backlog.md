@@ -33,10 +33,10 @@ This backlog outlines the tasks required to build, test, and release the new `bo
 
 ## Phase 3: `bootycall-extractor` (ISO & Image Filesystem Parser)
 
-- [ ] **Task 3.1**: Create ISO9660 parser using `iso9660` or similar crate to traverse directories.
-- [ ] **Task 3.2**: Create GPT / FAT partition parser using `gpt` and `fatfs` crates to extract files from disk images.
-- [ ] **Task 3.3**: Implement hybrid lookup system: scans the image directory for kernel/initrd names (case-insensitive heuristics) with user overrides in YAML.
-- [ ] **Task 3.4**: Build the caching engine: extracts kernel and initrd to `cache/<mac>/` if modified time or file hash changed, optimising startup speed.
+- [x] **Task 3.1**: Create ISO9660 parser using `iso9660` or similar crate to traverse directories.
+- [x] **Task 3.2**: Create GPT / FAT partition parser using `gpt` and `fatfs` crates to extract files from disk images.
+- [x] **Task 3.3**: Implement hybrid lookup system: scans the image directory for kernel/initrd names (case-insensitive heuristics) with user overrides in YAML.
+- [x] **Task 3.4**: Build the caching engine: extracts kernel and initrd to `cache/<mac>/` if modified time or file hash changed, optimising startup speed.
 
 ---
 

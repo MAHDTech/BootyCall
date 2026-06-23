@@ -4,3 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bootycall-core = { path = "../bootycall-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+iso9660 = { workspace = true }
+fatfs = { workspace = true }
+gpt = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -8,3 +8,23 @@ members = [
     "crates/bootycall-http",
     "crates/bootycall-rs"
 ]
+
+[workspace.dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+thiserror = "2.0.18"
+tokio = { version = "1.52.1", features = ["full"] }
+notify = "6.1.1"
+tracing = "0.1.44"
+axum = "0.8.9"
+clap = { version = "4.6.1", features = ["derive"] }
+bytes = "1.10.0"
+dhcproto = "0.12.0"
+iso9660 = "0.1.1"
+fatfs = "0.4.0"
+gpt = "3.1.0"
+minijinja = { version = "2.7.0", features = ["loader"] }
+rust-embed = "8.5.0"
+anyhow = "1.0.102"
+tempfile = "3.15.0"
+

@@ -63,6 +63,14 @@ specializing = "specializing"
 stabilize = "stabilize"
 synchronized = "synchronized"
 utilize = "utilize"
+serialize = "serialize"
+Serialize = "Serialize"
+deserialize = "deserialize"
+Deserialize = "Deserialize"
+deserializer = "deserializer"
+Deserializer = "Deserializer"
+serializer = "serializer"
+Serializer = "Serializer"
 
 [files]
 

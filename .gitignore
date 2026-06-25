@@ -54,3 +54,7 @@ scratch/
 
 # Ignore Rust build directory
 target/
+
+# Nix builds
+result
+result-*

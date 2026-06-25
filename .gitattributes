@@ -10,17 +10,8 @@
 # EFI binaries
 *.efi filter=lfs diff=lfs merge=lfs -text
 
-# Memtest x86 image
-tftpboot/tools/memtest86/*.img filter=lfs diff=lfs merge=lfs -text
-
-# Memtest x86+ binaries
-tftpboot/tools/mt86plus/* filter=lfs diff=lfs merge=lfs -text
-
-# Memdisk as binary
-tftpboot/memdisk binary
-
-# Memdisk symlink
-tftpboot/syslinux/memdisk text symlink=auto
+# Images
+*.img filter=lfs diff=lfs merge=lfs -text
 
 # Static wallpapers
 static/wallpapers/*.png filter=lfs diff=lfs merge=lfs -text

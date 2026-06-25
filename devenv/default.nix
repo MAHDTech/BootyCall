@@ -5,7 +5,7 @@
   ...
 }:
 let
-  mkCrate = import ./packages/crate.nix { inherit pkgs; };
+  mkCrate = import ../packages/crate.nix { inherit pkgs; };
   bootycall = mkCrate "bootycall-rs";
 in
 {
@@ -20,10 +20,6 @@ in
       "mahdtech"
     ];
     push = "mahdtech";
-  };
-
-  devenv = {
-    warnOnNewVersion = true;
   };
 
   dotenv = {
@@ -62,7 +58,7 @@ in
     nix.enable = true;
     rust = {
       enable = true;
-      toolchainFile = ./rust-toolchain.toml;
+      toolchainFile = ../rust-toolchain.toml;
       lsp.enable = true;
     };
     shell = {
@@ -92,6 +88,7 @@ in
       check-symlinks.enable = true;
       check-yaml.enable = true;
       commitizen.enable = true;
+      cspell.enable = true;
       cargo-check = {
         enable = true;
         package = config.languages.rust.toolchainPackage;
@@ -108,7 +105,7 @@ in
       convco.enable = true;
       deadnix.enable = true;
       editorconfig-checker.enable = true;
-      gptcommit.enable = true;
+      lychee.enable = true;
       markdownlint = {
         enable = true;
         settings = {
@@ -129,7 +126,7 @@ in
         };
       };
       mixed-line-endings.enable = true;
-      nixfmt-rfc-style.enable = true;
+      nixfmt.enable = true;
       pre-commit-hook-ensure-sops.enable = true;
       prettier = {
         enable = true;
@@ -159,7 +156,6 @@ in
       tflint.enable = true;
       trim-trailing-whitespace.enable = true;
       trufflehog.enable = false;
-      typos.enable = true;
       yamllint = {
         enable = true;
         settings = {
@@ -203,7 +199,6 @@ in
             "skellock.just"
             "streetsidesoftware.code-spell-checker"
             "tamasfe.even-better-toml"
-            "tekumura.typos-vscode"
             "timonwong.shellcheck"
             "tuxtina.json2yaml"
             "vscodevim.vim"
@@ -221,8 +216,4 @@ in
   enterTest = ''
     echo "Running devenv tests..."
   '';
-
-  outputs = {
-    inherit bootycall;
-  };
 }

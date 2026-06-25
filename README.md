@@ -8,12 +8,12 @@ It hosts three core protocols (Proxy DHCP, TFTP, and HTTP) on a single asynchron
 
 ## 🚀 Key Features
 
-* **Proxy DHCP**: Intercepts client boot requests, parses client UEFI architecture (Option 93), and redirects them to the bootloader.
-* **Asynchronous TFTP**: Serves customized or default bootloaders (`ipxe.efi`) with built-in block negotiation (`blksize`, `timeout`, `tsize`) and path traversal protection.
-* **ISO & Disk Extraction**: Pure Rust extraction cache for kernels and ramdisks from ISOs or disk images (GPT/FAT), lowering idle memory footprint.
-* **Dynamic iPXE Scripting**: Generates customized boot scripts per host MAC address, allowing infinite polling loops until assigned.
-* **Dynamic Wallpapers**: Renders randomly selected wallpaper console backgrounds on client boot, supporting resolution matching.
-* **Embedded UI**: Glassmorphic dark-mode web dashboard for real-time tracking of active host boots, events logging, and manual target assignments.
+- **Proxy DHCP**: Intercepts client boot requests, parses client UEFI architecture (Option 93), and redirects them to the bootloader.
+- **Asynchronous TFTP**: Serves customized or default bootloaders (`ipxe.efi`) with built-in block negotiation (`blksize`, `timeout`, `tsize`) and path traversal protection.
+- **ISO & Disk Extraction**: Pure Rust extraction cache for kernels and ramdisks from ISOs or disk images (GPT/FAT), lowering idle memory footprint.
+- **Dynamic iPXE Scripting**: Generates customized boot scripts per host MAC address, allowing infinite polling loops until assigned.
+- **Dynamic Wallpapers**: Renders randomly selected wallpaper console backgrounds on client boot, supporting resolution matching.
+- **Embedded UI**: Glassmorphic dark-mode web dashboard for real-time tracking of active host boots, events logging, and manual target assignments.
 
 ---
 
@@ -59,7 +59,7 @@ devenv shell
 cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
-*The binary is automatically compiled and added to your shell path when entering `devenv shell`.*
+_The binary is automatically compiled and added to your shell path when entering `devenv shell`._
 
 ### 2. Run Tests
 
@@ -73,6 +73,6 @@ cargo test --all
 
 ## 📖 Further Documentation
 
-* [Specification Guide](docs/spec.md) - Deep architectural and schema details.
-* [Development Usage Guide](docs/usage.md) - How to setup directory trees, configure yaml, and bind privileged ports.
-* [Systemd Example](docs/examples/bootycall.service) - Running BootyCall securely in production environments.
+- [Specification Guide](docs/spec.md) - Deep architectural and schema details.
+- [Development Usage Guide](docs/usage.md) - How to setup directory trees, configure yaml, and bind privileged ports.
+- [Systemd Example](docs/examples/bootycall.service) - Running BootyCall securely in production environments.

@@ -30,7 +30,7 @@ Before committing code, make sure to execute:
 
 ```bash
 devenv shell
-pre-commit run --all-files
+prek run --all-files
 ```
 
 > [!IMPORTANT]

@@ -14,8 +14,8 @@ mkdir -p tftpboot/boot/x64
 mkdir -p tftpboot/boot/arm64
 ```
 
-* **Wallpapers**: Put any `.png` or `.jpg` background images under `static/wallpapers/`.
-* **Bootloaders**: Place `ipxe.efi` files under `tftpboot/boot/x64/ipxe.efi` and `tftpboot/boot/arm64/ipxe.efi`.
+- **Wallpapers**: Put any `.png` or `.jpg` background images under `static/wallpapers/`.
+- **Bootloaders**: Place `ipxe.efi` files under `tftpboot/boot/x64/ipxe.efi` and `tftpboot/boot/arm64/ipxe.efi`.
 
 ---
 
@@ -46,21 +46,30 @@ hosts:
 Binding to ports below 1024 on Linux requires special permissions. You can run the server in two ways:
 
 ### Option A: Use Non-Privileged Ports (Recommended for local dev)
+
 Modify `bootycall.yaml` to use high ports:
-* `tftp_bind: "0.0.0.0:6969"`
-* `proxy_dhcp_bind: "0.0.0.0:4011"`
+
+- `tftp_bind: "0.0.0.0:6969"`
+- `proxy_dhcp_bind: "0.0.0.0:4011"`
 
 ### Option B: Grant Network Capabilities to Binary
+
 To run on standard ports (69/UDP, 67/UDP) without using `sudo` or `root`:
+
 1. Build the binary:
+
    ```bash
    devenv shell -- cargo build
    ```
+
 2. Grant bind capabilities:
+
    ```bash
    sudo setcap 'cap_net_bind_service=+ep' target/debug/bootycall-rs
    ```
+
 3. Execute the binary:
+
    ```bash
    ./target/debug/bootycall-rs --config bootycall.yaml
    ```
@@ -70,21 +79,25 @@ To run on standard ports (69/UDP, 67/UDP) without using `sudo` or `root`:
 ## 4. Standard Commands
 
 ### Build Crate
+
 ```bash
 devenv shell -- cargo build
 ```
 
 ### Run Server Loop
+
 ```bash
 devenv shell -- cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
 ### Run Tests
+
 ```bash
 devenv shell -- cargo test --all
 ```
 
 ### Run Linter Checks
+
 ```bash
 devenv shell -- pre-commit run --all-files
 ```

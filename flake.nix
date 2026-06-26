@@ -62,8 +62,8 @@
         }:
         let
           cfg = config.services.bootycall;
-          bootycallPkg = self.packages.${pkgs.system}.default;
-          assetsPkg = self.packages.${pkgs.system}.assets;
+          bootycallPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          assetsPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
         in
         {
           options.services.bootycall = {

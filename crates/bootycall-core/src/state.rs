@@ -165,4 +165,122 @@ mod tests {
         assert_eq!(logs[0].mac, Some("aa:bb:cc:11:22:33".to_string()));
         assert_eq!(logs[0].message, "Started polling");
     }
+
+    #[test]
+    fn test_clean_stale_hosts() {
+        let store = StateStore::new();
+
+        store.update_host_status(
+            "aa:bb:cc:00:00:01",
+            HostStatus::Polling,
+            Some("stale-host".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        // Verify the host exists
+        assert!(store.get_host("aa:bb:cc:00:00:01").is_some());
+
+        // Sleep briefly so the host's last_seen is in the past relative to a
+        // zero-second TTL
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // A max_idle of 0 seconds means anything older than "right now" is stale
+        store.clean_stale_hosts(0);
+
+        assert!(
+            store.get_host("aa:bb:cc:00:00:01").is_none(),
+            "Stale host should be removed after clean_stale_hosts(0)"
+        );
+        assert_eq!(store.list_hosts().len(), 0);
+    }
+
+    #[test]
+    fn test_partial_update_preserves_existing() {
+        let store = StateStore::new();
+
+        // First update sets all fields
+        store.update_host_status(
+            "aa:bb:cc:00:00:02",
+            HostStatus::Booting,
+            Some("my-host".to_string()),
+            Some("target-a".to_string()),
+            Some("10.0.0.1".to_string()),
+            Some("aarch64".to_string()),
+        );
+
+        // Second update passes None for optional fields — originals should survive
+        store.update_host_status(
+            "aa:bb:cc:00:00:02",
+            HostStatus::Completed,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let host = store.get_host("aa:bb:cc:00:00:02").unwrap();
+        assert_eq!(host.status, HostStatus::Completed, "Status should be updated");
+        assert_eq!(host.name, Some("my-host".to_string()), "Name should be preserved");
+        assert_eq!(
+            host.assigned_target,
+            Some("target-a".to_string()),
+            "Target should be preserved"
+        );
+        assert_eq!(
+            host.client_ip,
+            Some("10.0.0.1".to_string()),
+            "IP should be preserved"
+        );
+        assert_eq!(
+            host.architecture,
+            Some("aarch64".to_string()),
+            "Architecture should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_get_host_not_found() {
+        let store = StateStore::new();
+        assert!(
+            store.get_host("ff:ff:ff:ff:ff:ff").is_none(),
+            "Getting a nonexistent host should return None"
+        );
+    }
+
+    #[test]
+    fn test_list_hosts_returns_all() {
+        let store = StateStore::new();
+
+        store.update_host_status("aa:00:00:00:00:01", HostStatus::Polling, None, None, None, None);
+        store.update_host_status("aa:00:00:00:00:02", HostStatus::Booting, None, None, None, None);
+        store.update_host_status("aa:00:00:00:00:03", HostStatus::Completed, None, None, None, None);
+
+        let hosts = store.list_hosts();
+        assert_eq!(hosts.len(), 3, "list_hosts should return all 3 inserted hosts");
+    }
+
+    #[test]
+    fn test_log_event_ordering() {
+        let store = StateStore::new();
+
+        store.log_event("INFO", None, "first event");
+        store.log_event("WARN", Some("aa:bb:cc:dd:ee:ff"), "second event");
+        store.log_event("ERROR", None, "third event");
+
+        let logs = store.list_logs();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0].message, "first event");
+        assert_eq!(logs[1].message, "second event");
+        assert_eq!(logs[2].message, "third event");
+
+        // Verify levels are preserved
+        assert_eq!(logs[0].level, "INFO");
+        assert_eq!(logs[1].level, "WARN");
+        assert_eq!(logs[2].level, "ERROR");
+
+        // Verify MAC normalization in log events
+        assert_eq!(logs[1].mac, Some("aa:bb:cc:dd:ee:ff".to_string()));
+    }
 }

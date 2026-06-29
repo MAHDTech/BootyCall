@@ -138,3 +138,34 @@ fn test_gpt_fat_extraction_and_caching() {
         "kernel_test_payload"
     );
 }
+
+#[test]
+fn test_sync_host_cache_missing_image() {
+    let dir = tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+    let bogus_image_path = dir.path().join("does_not_exist.iso");
+
+    let host = HostConfig {
+        mac: "aa:bb:cc:dd:ee:ff".to_string(),
+        name: "missing-image-host".to_string(),
+        image_path: bogus_image_path.clone(),
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+
+    let result = bootycall_extractor::sync_host_cache(&host, &cache_dir);
+    assert!(result.is_err(), "Expected an error for a missing image");
+
+    let err = result.unwrap_err();
+    let err_msg = format!("{err}");
+    assert!(
+        err_msg.contains("Image file not found"),
+        "Error should indicate image not found, got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("does_not_exist.iso"),
+        "Error should contain the missing file name, got: {err_msg}"
+    );
+}

@@ -216,3 +216,225 @@ async fn test_http_server_endpoints() {
         assert_eq!(state.status, HostStatus::Booting);
     }
 }
+
+/// Helper to create a minimal Config and StateStore, spawn the HTTP server on the
+/// given port, and return the shared state objects for assertion.
+async fn spawn_test_server(
+    port: u16,
+) -> (Arc<std::sync::RwLock<Config>>, StateStore) {
+    let tmp_dir = tempdir().unwrap();
+    let cache_dir = tmp_dir.path().join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{}", port),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp_dir.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir,
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+    };
+
+    let host = HostConfig {
+        mac: "aa:bb:cc:dd:ee:ff".to_string(),
+        name: "nixos-test".to_string(),
+        image_path: "/tmp/nixos.iso".into(),
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: Some("console=tty0".to_string()),
+    };
+
+    let config = Config {
+        server: server_config,
+        hosts: vec![host],
+    };
+
+    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    let bind_addr = format!("127.0.0.1:{}", port);
+
+    // Leak the tempdir so it lives for the duration of the test
+    let _leaked = Box::leak(Box::new(tmp_dir));
+
+    tokio::spawn(async move {
+        let _ =
+            bootycall_http::run_http_server(&bind_addr, server_config_clone, server_store).await;
+    });
+
+    // Wait for server to bind
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    (shared_config, state_store)
+}
+
+#[tokio::test]
+async fn test_api_status_endpoint() {
+    let port: u16 = 26081;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    // GET /api/status should return 200 with JSON containing "hosts"
+    let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                port
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    let (status, headers, body) = parse_http_response(&response);
+    assert!(
+        status.contains("200 OK"),
+        "Expected 200 OK for /api/status, got: {}",
+        status
+    );
+
+    // Verify content-type is JSON
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k == "content-type")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("application/json"),
+        "Expected JSON content-type, got: {}",
+        content_type
+    );
+
+    // Verify body contains the "hosts" key
+    let body_str = String::from_utf8(body).unwrap();
+    assert!(
+        body_str.contains("\"hosts\""),
+        "Expected JSON body to contain 'hosts' key, got: {}",
+        body_str
+    );
+
+    // Verify body also contains the "configs" key
+    assert!(
+        body_str.contains("\"configs\""),
+        "Expected JSON body to contain 'configs' key, got: {}",
+        body_str
+    );
+
+    // Verify the body is valid JSON and can be parsed
+    let parsed: serde_json::Value = serde_json::from_str(&body_str)
+        .expect("Response body should be valid JSON");
+    assert!(parsed["hosts"].is_array(), "hosts should be a JSON array");
+    assert!(parsed["configs"].is_array(), "configs should be a JSON array");
+}
+
+#[tokio::test]
+async fn test_api_logs_endpoint() {
+    let port: u16 = 26082;
+    let (_config, state_store) = spawn_test_server(port).await;
+
+    // Seed some log events so we can verify they appear
+    state_store.log_event("INFO", Some("aa:bb:cc:dd:ee:ff"), "Test log entry");
+    state_store.log_event("WARN", None, "Another test log");
+
+    // GET /api/logs should return 200 with a JSON array
+    let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /api/logs HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                port
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    let (status, headers, body) = parse_http_response(&response);
+    assert!(
+        status.contains("200 OK"),
+        "Expected 200 OK for /api/logs, got: {}",
+        status
+    );
+
+    // Verify content-type is JSON
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k == "content-type")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("application/json"),
+        "Expected JSON content-type, got: {}",
+        content_type
+    );
+
+    // Verify body is a valid JSON array
+    let body_str = String::from_utf8(body).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body_str)
+        .expect("Response body should be valid JSON");
+    assert!(parsed.is_array(), "Expected JSON array body for /api/logs");
+
+    // Verify our seeded log entries are present
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "Expected 2 log entries, got {}", arr.len());
+    assert_eq!(arr[0]["message"], "Test log entry");
+    assert_eq!(arr[1]["message"], "Another test log");
+}
+
+#[tokio::test]
+async fn test_root_redirect() {
+    let port: u16 = 26083;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    // GET / should return 303 See Other with Location header pointing to /ui/index.html
+    let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                port
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    let (status, headers, _body) = parse_http_response(&response);
+    assert!(
+        status.contains("303"),
+        "Expected 303 See Other for root redirect, got: {}",
+        status
+    );
+
+    // Verify location header points to /ui/index.html
+    let location = headers
+        .iter()
+        .find(|(k, _)| k == "location")
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/ui/index.html",
+        "Expected redirect to /ui/index.html, got: {}",
+        location
+    );
+}
+

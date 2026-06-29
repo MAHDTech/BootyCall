@@ -204,3 +204,146 @@ async fn test_tftp_server_negotiation_and_transfer() {
     let host_state_completed = state_store.get_host("00:aa:bb:cc:dd:ee").unwrap();
     assert_eq!(host_state_completed.status, HostStatus::Completed);
 }
+
+fn parse_error_packet(pkt: &[u8]) -> (u16, u16, String) {
+    assert!(pkt.len() >= 5, "ERROR packet too short");
+    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
+    let error_code = u16::from_be_bytes([pkt[2], pkt[3]]);
+    // Message runs from byte 4 to the trailing null (or end)
+    let msg_end = pkt[4..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(pkt.len() - 4);
+    let msg = String::from_utf8_lossy(&pkt[4..4 + msg_end]).to_string();
+    (opcode, error_code, msg)
+}
+
+#[tokio::test]
+async fn test_tftp_file_not_found() {
+    // Setup temporary directory for tftp root with NO test files
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+
+    let server_config = ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "127.0.0.1:25074".to_string(),
+        tftp_root: tftp_root.clone(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+    };
+
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Spawn TFTP server on port 25070
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25074", server_config_clone, server_store)
+                .await;
+    });
+
+    // Wait for server to bind
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client socket on a unique port
+    let client_socket = UdpSocket::bind("127.0.0.1:25075").await.unwrap();
+
+    // Request a file that does not exist
+    let rrq = make_rrq_packet("nonexistent/bootloader.efi", &[]);
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25074")
+        .await
+        .unwrap();
+
+    // Receive the ERROR packet from the server's transfer socket
+    let mut response_buf = [0u8; 1024];
+    let (len, _server_tid) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("Timed out waiting for ERROR response")
+    .expect("Failed to receive ERROR response");
+
+    let (opcode, error_code, msg) = parse_error_packet(&response_buf[..len]);
+    assert_eq!(opcode, 5, "Expected ERROR opcode (5)");
+    assert_eq!(error_code, 1, "Expected error code 1 (File Not Found)");
+    assert!(
+        msg.contains("not found") || msg.contains("Not found"),
+        "Error message should mention 'not found', got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_tftp_path_traversal_blocked() {
+    // Setup temporary directory for tftp root
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+
+    let server_config = ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "127.0.0.1:25076".to_string(),
+        tftp_root: tftp_root.clone(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+    };
+
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Spawn TFTP server on port 25071
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25076", server_config_clone, server_store)
+                .await;
+    });
+
+    // Wait for server to bind
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client socket on a unique port
+    let client_socket = UdpSocket::bind("127.0.0.1:25077").await.unwrap();
+
+    // Request a path traversal attempt
+    let rrq = make_rrq_packet("../../etc/passwd", &[]);
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25076")
+        .await
+        .unwrap();
+
+    // Receive the ERROR packet from the server's transfer socket
+    let mut response_buf = [0u8; 1024];
+    let (len, _server_tid) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("Timed out waiting for ERROR response")
+    .expect("Failed to receive ERROR response");
+
+    let (opcode, error_code, msg) = parse_error_packet(&response_buf[..len]);
+    assert_eq!(opcode, 5, "Expected ERROR opcode (5)");
+    assert_eq!(error_code, 2, "Expected error code 2 (Access Violation)");
+    assert!(
+        msg.contains("Access violation"),
+        "Error message should mention 'Access violation', got: {msg}"
+    );
+}

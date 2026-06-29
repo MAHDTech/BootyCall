@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - trunk
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: mahdtech
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: 'true'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute Next Version
+        id: version
+        run: |
+          NEXT_VERSION=$(devenv shell -- convco version --bump)
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version will be: $NEXT_VERSION"
+
+      - name: Update Cargo.toml Workspace Version
+        run: |
+          # Use sed to update the workspace version.
+          # Note: convco output might not have a 'v' prefix, but tags usually do.
+          # convco returns semantic versions like 0.1.1
+          VERSION="${{ steps.version.outputs.next_version }}"
+          # Strip 'v' if present
+          VERSION="${VERSION#v}"
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          # Verify the change
+          git diff
+
+      - name: Generate Changelog
+        run: |
+          devenv shell -- convco changelog > CHANGELOG.md
+
+      - name: Commit and Push Release
+        id: commit
+        run: |
+          VERSION="${{ steps.version.outputs.next_version }}"
+          # Add 'v' prefix for tag if not present
+          if [[ $VERSION != v* ]]; then
+            TAG="v$VERSION"
+          else
+            TAG="$VERSION"
+          fi
+          
+          git add Cargo.toml CHANGELOG.md
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          git commit -m "chore(release): $TAG"
+          git tag "$TAG"
+          git push origin trunk
+          git push origin "$TAG"
+          
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: steps.commit.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.commit.outputs.tag }}
+          body_path: CHANGELOG.md
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,46 @@
+name: PR Test
+
+on:
+  pull_request:
+    branches:
+      - trunk
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-pr:
+    name: Validate PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: mahdtech
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: 'true'
+
+      - name: Cache Cargo
+        uses: ./.github/actions/cache-cargo
+
+      - name: Pre-commit Hooks (Lint & Format)
+        run: devenv shell -- prek run --all-files
+
+      - name: Cargo Test
+        run: devenv shell -- cargo test --workspace
+
+      - name: Nix Flake Check
+        run: nix flake check --all-systems --impure

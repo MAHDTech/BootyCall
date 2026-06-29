@@ -1,0 +1,23 @@
+name: Nix Flake Update
+
+on:
+  schedule:
+    - cron: '0 4 * * 0' # Every Sunday at 04:00 UTC
+  workflow_dispatch:
+
+jobs:
+  update-flake-lock:
+    name: Update flake.lock
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update flake.lock
+        uses: DeterminateSystems/update-flake-lock@v24
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pr-title: "chore: update flake.lock"
+          pr-labels: |
+            dependencies
+            nix

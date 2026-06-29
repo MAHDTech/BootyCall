@@ -221,8 +221,16 @@ mod tests {
         );
 
         let host = store.get_host("aa:bb:cc:00:00:02").unwrap();
-        assert_eq!(host.status, HostStatus::Completed, "Status should be updated");
-        assert_eq!(host.name, Some("my-host".to_string()), "Name should be preserved");
+        assert_eq!(
+            host.status,
+            HostStatus::Completed,
+            "Status should be updated"
+        );
+        assert_eq!(
+            host.name,
+            Some("my-host".to_string()),
+            "Name should be preserved"
+        );
         assert_eq!(
             host.assigned_target,
             Some("target-a".to_string()),
@@ -253,12 +261,37 @@ mod tests {
     fn test_list_hosts_returns_all() {
         let store = StateStore::new();
 
-        store.update_host_status("aa:00:00:00:00:01", HostStatus::Polling, None, None, None, None);
-        store.update_host_status("aa:00:00:00:00:02", HostStatus::Booting, None, None, None, None);
-        store.update_host_status("aa:00:00:00:00:03", HostStatus::Completed, None, None, None, None);
+        store.update_host_status(
+            "aa:00:00:00:00:01",
+            HostStatus::Polling,
+            None,
+            None,
+            None,
+            None,
+        );
+        store.update_host_status(
+            "aa:00:00:00:00:02",
+            HostStatus::Booting,
+            None,
+            None,
+            None,
+            None,
+        );
+        store.update_host_status(
+            "aa:00:00:00:00:03",
+            HostStatus::Completed,
+            None,
+            None,
+            None,
+            None,
+        );
 
         let hosts = store.list_hosts();
-        assert_eq!(hosts.len(), 3, "list_hosts should return all 3 inserted hosts");
+        assert_eq!(
+            hosts.len(),
+            3,
+            "list_hosts should return all 3 inserted hosts"
+        );
     }
 
     #[test]

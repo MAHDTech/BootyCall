@@ -143,7 +143,10 @@ hosts:
     #[test]
     fn test_config_load_missing_file() {
         let result = Config::load("/tmp/nonexistent_bootycall_config_42.yaml");
-        assert!(result.is_err(), "Loading a nonexistent file should return Err");
+        assert!(
+            result.is_err(),
+            "Loading a nonexistent file should return Err"
+        );
     }
 
     #[test]
@@ -213,7 +216,10 @@ hosts:
         let config = Config::load(&file_path).unwrap();
         // Lookup with uppercase MAC should still find the host
         let found = config.find_host("AA:BB:CC:DD:EE:FF");
-        assert!(found.is_some(), "Uppercase MAC lookup should match lowercase entry");
+        assert!(
+            found.is_some(),
+            "Uppercase MAC lookup should match lowercase entry"
+        );
         assert_eq!(found.unwrap().name, "lower-host");
     }
 
@@ -238,7 +244,11 @@ hosts: []
         file.write_all(yaml.as_bytes()).unwrap();
 
         let config = Config::load(&file_path).unwrap();
-        assert_eq!(config.hosts.len(), 0, "Empty hosts list should load as zero-length vec");
+        assert_eq!(
+            config.hosts.len(),
+            0,
+            "Empty hosts list should load as zero-length vec"
+        );
         assert!(config.find_host("aa:bb:cc:dd:ee:ff").is_none());
     }
 

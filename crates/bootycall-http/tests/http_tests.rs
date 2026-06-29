@@ -219,9 +219,7 @@ async fn test_http_server_endpoints() {
 
 /// Helper to create a minimal Config and StateStore, spawn the HTTP server on the
 /// given port, and return the shared state objects for assertion.
-async fn spawn_test_server(
-    port: u16,
-) -> (Arc<std::sync::RwLock<Config>>, StateStore) {
+async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateStore) {
     let tmp_dir = tempdir().unwrap();
     let cache_dir = tmp_dir.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
@@ -330,10 +328,13 @@ async fn test_api_status_endpoint() {
     );
 
     // Verify the body is valid JSON and can be parsed
-    let parsed: serde_json::Value = serde_json::from_str(&body_str)
-        .expect("Response body should be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body_str).expect("Response body should be valid JSON");
     assert!(parsed["hosts"].is_array(), "hosts should be a JSON array");
-    assert!(parsed["configs"].is_array(), "configs should be a JSON array");
+    assert!(
+        parsed["configs"].is_array(),
+        "configs should be a JSON array"
+    );
 }
 
 #[tokio::test]
@@ -384,8 +385,8 @@ async fn test_api_logs_endpoint() {
 
     // Verify body is a valid JSON array
     let body_str = String::from_utf8(body).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&body_str)
-        .expect("Response body should be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body_str).expect("Response body should be valid JSON");
     assert!(parsed.is_array(), "Expected JSON array body for /api/logs");
 
     // Verify our seeded log entries are present
@@ -437,4 +438,3 @@ async fn test_root_redirect() {
         location
     );
 }
-

@@ -60,4 +60,4 @@ jobs:
 
       - name: Nix Flake Check
         shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: nix flake check --all-systems
+        run: nix flake check --impure --all-systems

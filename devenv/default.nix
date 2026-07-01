@@ -32,8 +32,11 @@ in
   };
 
   packages = with pkgs; [
+    figlet
+    hello
+    gh
     bashInteractive
-    pre-commit
+    nil
     bootycall
   ];
 
@@ -69,10 +72,10 @@ in
   git-hooks = {
     excludes = [
       ".devenv/"
-      ".git/"
+      "\\.git(/.*)?$"
       "^.vscode/"
       "target/"
-      "scratch/"
+      "^scratch(/.*)?$"
     ];
     hooks = {
       actionlint.enable = true;
@@ -85,6 +88,7 @@ in
           ".*\\.ipxe"
         ];
       };
+      convco.enable = true;
       check-symlinks.enable = true;
       check-yaml.enable = true;
       commitizen.enable = true;
@@ -102,8 +106,12 @@ in
           allFeatures = true;
         };
       };
-      convco.enable = true;
-      deadnix.enable = true;
+      deadnix = {
+        enable = true;
+        settings = {
+          noUnderscore = true;
+        };
+      };
       editorconfig-checker.enable = true;
       lychee.enable = true;
       markdownlint = {
@@ -139,7 +147,6 @@ in
           ];
         };
       };
-      pretty-format-json.enable = false; # using prettier
       ripsecrets.enable = true;
       rustfmt = {
         enable = true;
@@ -147,15 +154,16 @@ in
       };
       shellcheck = {
         enable = true;
+        args = [
+          "--external-sources"
+        ];
         excludes = [
           ".env"
         ];
       };
       shfmt.enable = true;
       statix.enable = true;
-      tflint.enable = true;
       trim-trailing-whitespace.enable = true;
-      trufflehog.enable = false;
       yamllint = {
         enable = true;
         settings = {
@@ -196,7 +204,6 @@ in
             "nhoizey.gremlins"
             "pinage404.nix-extension-pack"
             "redhat.vscode-yaml"
-            "skellock.just"
             "streetsidesoftware.code-spell-checker"
             "tamasfe.even-better-toml"
             "timonwong.shellcheck"

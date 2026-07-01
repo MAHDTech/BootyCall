@@ -33,20 +33,27 @@ jobs:
         uses: ./.github/actions/setup-devenv
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          cachix-cache-name: mahdtech
+          cachix-cache-name: ${{ github.repository_owner }}
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skip-push: "true"
 
       - name: Cache Cargo
         uses: ./.github/actions/cache-cargo
 
-      - name: Pre-commit Hooks (Lint & Format)
-        shell: devenv shell --quiet bash -- -e {0}
-        run: prek run --all-files
+      - name: Run Devenv Tests
+        shell: nix develop --impure --command bash -- -e {0}
+        env:
+          DEVENV_ROOT: ${{ github.workspace }}
+        run: devenv test
 
       - name: Cargo Test
-        shell: devenv shell --quiet bash -- -e {0}
+        shell: nix develop --impure --command bash -- -e {0}
+        env:
+          DEVENV_ROOT: ${{ github.workspace }}
         run: cargo test --workspace
 
       - name: Nix Flake Check
+        shell: nix develop --impure --command bash -- -e {0}
+        env:
+          DEVENV_ROOT: ${{ github.workspace }}
         run: nix flake check --all-systems --impure

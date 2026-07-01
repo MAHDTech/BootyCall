@@ -101,14 +101,14 @@ pub fn extract_from_disk(
         let start = match partition.bytes_start(lb_size) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!("Failed to get partition start byte: {:?}", e);
+                bootycall_log::warn!("Failed to get partition start byte: {:?}", e);
                 continue;
             }
         };
         let len = match partition.bytes_len(lb_size) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!("Failed to get partition length: {:?}", e);
+                bootycall_log::warn!("Failed to get partition length: {:?}", e);
                 continue;
             }
         };

@@ -70,6 +70,7 @@ async fn test_http_server_endpoints() {
         cache_dir: cache_dir.clone(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let host = HostConfig {
@@ -232,6 +233,7 @@ async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateS
         cache_dir,
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let host = HostConfig {

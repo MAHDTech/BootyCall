@@ -9,8 +9,9 @@ bootycall-dhcp = { path = "../bootycall-dhcp" }
 bootycall-tftp = { path = "../bootycall-tftp" }
 bootycall-extractor = { path = "../bootycall-extractor" }
 bootycall-http = { path = "../bootycall-http" }
+bootycall-oled = { path = "../bootycall-oled" }
+bootycall-led = { path = "../bootycall-led" }
 tokio = { workspace = true }
-tracing = { workspace = true }
+bootycall-log = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

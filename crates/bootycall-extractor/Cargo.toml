@@ -8,7 +8,7 @@ bootycall-core = { path = "../bootycall-core" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
+bootycall-log = { workspace = true }
 iso9660 = { workspace = true }
 fatfs = { workspace = true }
 gpt = { workspace = true }

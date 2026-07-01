@@ -8,5 +8,5 @@ bootycall-core = { path = "../bootycall-core" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
+bootycall-log = { workspace = true }
 dhcproto = { workspace = true }

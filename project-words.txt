@@ -113,3 +113,6 @@ syslinux
 cdrkit
 memdisk
 prek
+sysinfo
+backbuffer
+libc

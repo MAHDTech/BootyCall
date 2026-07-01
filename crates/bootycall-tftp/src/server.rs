@@ -1,10 +1,10 @@
+use bootycall_log::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::time::Duration;
-use tracing::{debug, error, info, warn};
 
 use bootycall_core::config::Config;
 use bootycall_core::state::{HostStatus, StateStore};

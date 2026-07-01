@@ -6,6 +6,9 @@ members = [
     "crates/bootycall-tftp",
     "crates/bootycall-extractor",
     "crates/bootycall-http",
+    "crates/bootycall-oled",
+    "crates/bootycall-led",
+    "crates/bootycall-log",
     "crates/bootycall-rs"
 ]
 
@@ -30,4 +33,4 @@ minijinja = { version = "2.7.0", features = ["loader"] }
 rust-embed = "8.5.0"
 anyhow = "1.0.102"
 tempfile = "3.15.0"
-
+bootycall-log = { path = "crates/bootycall-log" }

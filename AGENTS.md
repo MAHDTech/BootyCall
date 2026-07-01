@@ -8,8 +8,8 @@ Welcome! This document outlines code standards, architectural constraints, and d
 
 ## 1. Project Specifications & Rules
 
-- **Specifications**: See [./docs/spec.md](file:///home/mahdtech/Projects/syncthing/GitHub/MAHDTech/BootyCall/docs/spec.md) for architecture, configuration formats, and dynamic features.
-- **Development Backlog**: Track and update tasks in [./docs/backlog.md](file:///home/mahdtech/Projects/syncthing/GitHub/MAHDTech/BootyCall/docs/backlog.md). Mark tasks complete after code validation.
+- **Specifications**: See [spec](./docs/spec.md) for architecture, configuration formats, and dynamic features.
+- **Development Backlog**: Track and update tasks in [backlog](./docs/backlog.md). Mark tasks complete after code validation.
 - **Style and Integrity**: Maintain all documentation, comments, and docstrings. Write idiomatic, readable, and highly performant Rust code with minimum dependencies.
 
 ---

@@ -44,7 +44,7 @@ jobs:
 
       - name: Compute Next Version
         id: version
-        shell: devenv shell --quiet bash -- -e {0}
+        shell: devenv shell --quiet bash -- {0}
         run: |
           NEXT_VERSION=$(convco version --bump)
           echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
@@ -63,7 +63,7 @@ jobs:
           git diff
 
       - name: Generate Changelog
-        shell: devenv shell --quiet bash -- -e {0}
+        shell: devenv shell --quiet bash -- {0}
         run: |
           convco changelog > CHANGELOG.md
 

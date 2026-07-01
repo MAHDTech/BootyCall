@@ -2,8 +2,12 @@ name: Nix Flake Update
 
 on:
   schedule:
-    - cron: '0 4 * * 0' # Every Sunday at 04:00 UTC
+    - cron: "0 4 * * 0" # Every Sunday at 04:00 UTC
   workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   update-flake-lock:

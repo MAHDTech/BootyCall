@@ -9,6 +9,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   release:
     name: Release
@@ -26,7 +29,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cachix-cache-name: mahdtech
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skip-push: 'true'
+          skip-push: "true"
 
       - name: Configure Git
         run: |
@@ -38,7 +41,7 @@ jobs:
         shell: devenv shell --quiet bash -- -e {0}
         run: |
           NEXT_VERSION=$(convco version --bump)
-          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
           echo "Next version will be: $NEXT_VERSION"
 
       - name: Update Cargo.toml Workspace Version
@@ -68,23 +71,23 @@ jobs:
           else
             TAG="$VERSION"
           fi
-          
+
           git add Cargo.toml CHANGELOG.md
-          
+
           # Only commit if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit."
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           git commit -m "chore(release): $TAG"
           git tag "$TAG"
           git push origin trunk
           git push origin "$TAG"
-          
-          echo "changed=true" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         if: steps.commit.outputs.changed == 'true'

@@ -116,3 +116,9 @@ prek
 sysinfo
 backbuffer
 libc
+softprops
+amannn
+endersonmenezes
+temurin
+secretspec
+elif

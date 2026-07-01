@@ -79,4 +79,15 @@ runs:
       name: Warm up Devenv shell
       shell: bash
       run: |
-        devenv shell -- true
+        if [[ -f "devenv.nix" ]];
+        then
+          echo "Testing using native devenv"
+          devenv shell -- echo "Running native devenv"
+        elif [[ -f "flake.nix" ]];
+        then
+          echo "Testing using Nix flakes"
+          nix develop --impure --command echo "Running via Nix flakes"
+        else
+          echo "No devenv configuration found, why did you even set it up?"
+          exit 1
+        fi

@@ -54,6 +54,10 @@ jobs:
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: cargo test --workspace
 
+      - name: Cargo Clippy
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo clippy --workspace
+
       - name: Nix Flake Check
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: nix flake check --all-systems

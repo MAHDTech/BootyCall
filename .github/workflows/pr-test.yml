@@ -41,19 +41,13 @@ jobs:
         uses: ./.github/actions/cache-cargo
 
       - name: Run Devenv Tests
-        shell: nix develop --impure --command bash -- -e {0}
-        env:
-          DEVENV_ROOT: ${{ github.workspace }}
+        shell: bash -c "nix develop --impure -c bash -- {0}"
         run: devenv test
 
       - name: Cargo Test
-        shell: nix develop --impure --command bash -- -e {0}
-        env:
-          DEVENV_ROOT: ${{ github.workspace }}
+        shell: bash -c "nix develop --impure -c bash -- {0}"
         run: cargo test --workspace
 
       - name: Nix Flake Check
-        shell: nix develop --impure --command bash -- -e {0}
-        env:
-          DEVENV_ROOT: ${{ github.workspace }}
+        shell: bash -c "nix develop --impure -c bash -- {0}"
         run: nix flake check --all-systems

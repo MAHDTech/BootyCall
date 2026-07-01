@@ -29,11 +29,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Get lowercased repository owner
+        id: repository_owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
       - name: Setup Devenv
         uses: ./.github/actions/setup-devenv
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          cachix-cache-name: ${{ github.repository_owner }}
+          cachix-cache-name: ${{ steps.repository_owner.outputs.owner }}
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skip-push: "true"
 

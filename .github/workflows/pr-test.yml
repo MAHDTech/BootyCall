@@ -56,4 +56,4 @@ jobs:
         shell: nix develop --impure --command bash -- -e {0}
         env:
           DEVENV_ROOT: ${{ github.workspace }}
-        run: nix flake check --all-systems --impure
+        run: nix flake check --all-systems

@@ -41,6 +41,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 1. Extract local version
+          CURRENT_VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
+          fi
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Error: Could not extract version from Cargo.toml"
+            exit 1
+          fi
+
+          # 2. Determine default branch
           DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || true)
           if [ -z "$DEFAULT_BRANCH" ]; then
             DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
@@ -58,20 +69,63 @@ jobs:
             exit 1
           fi
 
-          VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
-          if [ -z "$VERSION" ]; then
-            VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
+          # 3. Extract version from base/default branch
+          TARGET="origin/$DEFAULT_BRANCH"
+          TARGET_CARGO=$(git show "$TARGET:Cargo.toml" 2>/dev/null || true)
+          if [ -z "$TARGET_CARGO" ]; then
+            echo "Warning: Could not read Cargo.toml from $TARGET. Skipping collision check."
+            exit 0
           fi
-          if [ -z "$VERSION" ]; then
-            echo "Error: Could not extract version from Cargo.toml"
+
+          BASE_VERSION=$(echo "$TARGET_CARGO" | sed -n '/\[workspace.package\]/,/^\[/p' | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+          if [ -z "$BASE_VERSION" ]; then
+            BASE_VERSION=$(echo "$TARGET_CARGO" | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+          fi
+
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Warning: Could not find version in $TARGET:Cargo.toml. Skipping collision check."
+            exit 0
+          fi
+
+          echo "Comparing PR version ($CURRENT_VERSION) against default branch ($DEFAULT_BRANCH) version ($BASE_VERSION)..."
+
+          if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+            echo "No version bump detected in Cargo.toml. This is a non-release PR."
+            echo "Bypassing version collision check."
+            exit 0
+          fi
+
+          # Function to compare semver (returns 0 if arg1 > arg2)
+          semver_gt() {
+            local -a v1 v2
+            IFS='.' read -r -a v1 <<<"$1"
+            IFS='.' read -r -a v2 <<<"$2"
+
+            for ((i = ${#v1[@]}; i < 3; i++)); do v1[i]=0; done
+            for ((i = ${#v2[@]}; i < 3; i++)); do v2[i]=0; done
+
+            for ((i = 0; i < 3; i++)); do
+              if ((v1[i] > v2[i])); then
+                return 0
+              elif ((v1[i] < v2[i])); then
+                return 1
+              fi
+            done
+            return 1
+          }
+
+          if ! semver_gt "$CURRENT_VERSION" "$BASE_VERSION"; then
+            echo "Error: Version in Cargo.toml ($CURRENT_VERSION) is not greater than the default branch version ($BASE_VERSION)."
+            echo "Please ensure the version is strictly greater than the base branch when releasing."
             exit 1
           fi
-          TAG="v$VERSION"
+
+          # 4. Check tag collision on remote
+          TAG="v$CURRENT_VERSION"
           echo "Checking if tag $TAG already exists on remote origin..."
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
             echo "Error: Release/Tag $TAG already exists on the remote!"
-            echo "It looks like you forgot to bump the version in Cargo.toml."
-            echo "Please increment the version under [workspace.package] in Cargo.toml."
+            echo "Please increment the version to a unique value under [workspace.package] in Cargo.toml."
             exit 1
           else
             echo "Version $TAG is valid and does not exist yet on the remote."

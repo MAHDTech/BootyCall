@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1. Get current branch
+# Ensure we are not on trunk
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-
 if [ "$BRANCH" = "trunk" ] || [ "$BRANCH" = "HEAD" ]; then
 	echo "On trunk or detached HEAD, skipping version bump check."
 	exit 0
 fi
 
-# 2. Extract version from local Cargo.toml
-# Find version under [workspace.package]
-CURRENT_VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+# Check if convco and toml are installed
+if ! command -v convco &>/dev/null; then
+	echo "Warning: convco not found. Skipping auto-version bump."
+	exit 0
+fi
 
+if ! command -v toml &>/dev/null; then
+	echo "Warning: toml (toml-cli) not found. Skipping auto-version bump."
+	exit 0
+fi
+
+# Fetch tags silently in background or fail fast if offline
+git fetch --tags origin >/dev/null 2>&1 || true
+
+# Extract version from local Cargo.toml under [workspace.package]
+CURRENT_VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
 if [ -z "$CURRENT_VERSION" ]; then
-	# Fallback to standard version = "..."
 	CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
 fi
 
@@ -23,84 +33,27 @@ if [ -z "$CURRENT_VERSION" ]; then
 	exit 1
 fi
 
-# 3. Determine target branch to compare against
-DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || true)
-if [ -z "$DEFAULT_BRANCH" ]; then
-	DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
-fi
-if [ -z "$DEFAULT_BRANCH" ]; then
-	for b in trunk main master; do
-		if git rev-parse --verify "origin/$b" &>/dev/null || git rev-parse --verify "$b" &>/dev/null; then
-			DEFAULT_BRANCH="$b"
-			break
-		fi
-	done
-fi
+# Run convco version --bump to calculate the next version based on conventional commits
+NEXT_VERSION=$(convco version --bump 2>/dev/null || echo "")
+NEXT_VERSION="${NEXT_VERSION#v}"
 
-if [ -z "$DEFAULT_BRANCH" ]; then
-	echo "Could not determine default branch. Skipping version bump check."
+if [ -z "$NEXT_VERSION" ] || [ "$NEXT_VERSION" = "$CURRENT_VERSION" ]; then
+	echo "No version bump needed (Current version: $CURRENT_VERSION)."
 	exit 0
 fi
 
-TARGET="origin/$DEFAULT_BRANCH"
-if ! git rev-parse --verify "$TARGET" &>/dev/null; then
-	TARGET="$DEFAULT_BRANCH"
-	if ! git rev-parse --verify "$TARGET" &>/dev/null; then
-		echo "Could not find branch $DEFAULT_BRANCH locally or on remote. Skipping version bump check."
-		exit 0
-	fi
+# A version bump is needed! Update Cargo.toml
+echo "Version bump required by conventional commits: $CURRENT_VERSION -> $NEXT_VERSION"
+echo "Updating Cargo.toml..."
+toml set Cargo.toml workspace.package.version "$NEXT_VERSION" >Cargo.toml.tmp
+mv Cargo.toml.tmp Cargo.toml
+
+# Update Cargo.lock by running cargo check
+if command -v cargo &>/dev/null; then
+	echo "Updating Cargo.lock..."
+	cargo check --quiet 2>/dev/null || true
 fi
 
-# 4. Extract version from target Cargo.toml
-TARGET_CARGO=$(git show "$TARGET:Cargo.toml" 2>/dev/null || true)
-if [ -z "$TARGET_CARGO" ]; then
-	echo "Warning: Could not read Cargo.toml from $TARGET. Skipping check."
-	exit 0
-fi
-
-BASE_VERSION=$(echo "$TARGET_CARGO" | sed -n '/\[workspace.package\]/,/^\[/p' | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
-if [ -z "$BASE_VERSION" ]; then
-	BASE_VERSION=$(echo "$TARGET_CARGO" | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
-fi
-
-if [ -z "$BASE_VERSION" ]; then
-	echo "Warning: Could not find version in $TARGET:Cargo.toml. Skipping check."
-	exit 0
-fi
-
-echo "Comparing current version ($CURRENT_VERSION) against $TARGET version ($BASE_VERSION)..."
-
-if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
-	echo "Error: Version in Cargo.toml is unchanged ($CURRENT_VERSION)."
-	echo "Please bump the version in Cargo.toml (under [workspace.package]) before committing."
-	exit 1
-fi
-
-# Function to compare semver (returns 0 if arg1 > arg2)
-semver_gt() {
-	local -a v1 v2
-	IFS='.' read -r -a v1 <<<"$1"
-	IFS='.' read -r -a v2 <<<"$2"
-
-	# Pad to 3 components if needed
-	for ((i = ${#v1[@]}; i < 3; i++)); do v1[i]=0; done
-	for ((i = ${#v2[@]}; i < 3; i++)); do v2[i]=0; done
-
-	for ((i = 0; i < 3; i++)); do
-		if ((v1[i] > v2[i])); then
-			return 0
-		elif ((v1[i] < v2[i])); then
-			return 1
-		fi
-	done
-	return 1 # equal
-}
-
-if ! semver_gt "$CURRENT_VERSION" "$BASE_VERSION"; then
-	echo "Error: Version in Cargo.toml ($CURRENT_VERSION) is not greater than $TARGET ($BASE_VERSION)."
-	echo "Please bump the version to a value strictly greater than the base branch."
-	exit 1
-fi
-
-echo "Version bump check passed!"
-exit 0
+echo "Error: Cargo.toml version was automatically bumped to $NEXT_VERSION."
+echo "Please stage Cargo.toml and Cargo.lock ('git add Cargo.toml Cargo.lock') and commit again."
+exit 1

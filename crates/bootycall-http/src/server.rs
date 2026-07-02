@@ -351,8 +351,8 @@ async fn wallpaper_handler(
         }
 
         if !candidates.is_empty() {
-            use rand::seq::SliceRandom;
-            let mut rng = rand::thread_rng();
+            use rand::seq::IndexedRandom;
+            let mut rng = rand::rng();
             if let Some(chosen) = candidates.choose(&mut rng) {
                 selected_path = Some(format!("wallpapers/{}/{}", res_dir_name, chosen));
             }
@@ -373,8 +373,8 @@ async fn wallpaper_handler(
         }
 
         if !candidates.is_empty() {
-            use rand::seq::SliceRandom;
-            let mut rng = rand::thread_rng();
+            use rand::seq::IndexedRandom;
+            let mut rng = rand::rng();
             if let Some(chosen) = candidates.choose(&mut rng) {
                 selected_path = Some(format!("wallpapers/{}", chosen));
             }

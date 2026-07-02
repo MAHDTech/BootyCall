@@ -32,12 +32,13 @@ in
   };
 
   packages = with pkgs; [
-    figlet
-    hello
-    gh
     bashInteractive
-    nil
     bootycall
+    cargo-edit # Adds the 'cargo upgrade'
+    figlet
+    gh
+    hello
+    nil
   ];
 
   enterShell = ''

@@ -35,13 +35,15 @@ impl SystemMetrics {
 
     pub fn get_ip_address(&self) -> String {
         // Quick UDP probe
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
-        if let Some(s) = socket {
-            if s.connect("1.1.1.1:80").is_ok() {
-                if let Ok(addr) = s.local_addr() {
-                    return addr.ip().to_string();
-                }
-            }
+        if let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+            .ok()
+            .and_then(|s| {
+                s.connect("1.1.1.1:80").ok()?;
+                s.local_addr().ok()
+            })
+            .map(|addr| addr.ip().to_string())
+        {
+            return ip;
         }
         "No IP".to_string()
     }

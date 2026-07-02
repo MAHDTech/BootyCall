@@ -1,12 +1,12 @@
 [package]
 name = "bootycall-oled"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-sysinfo = "0.33"
+tokio = { workspace = true }
+sysinfo = { workspace = true }
 bootycall-core = { path = "../bootycall-core" }
 bootycall-log = { workspace = true }
-anyhow = "1.0"
-libc = "0.2"
+anyhow = { workspace = true }
+libc = { workspace = true }

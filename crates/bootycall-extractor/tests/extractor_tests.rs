@@ -39,7 +39,6 @@ fn test_gpt_fat_extraction_and_caching() {
             .open(&disk_path)
             .unwrap();
         let mut gdisk = gpt::GptConfig::default()
-            .initialized(false)
             .writable(true)
             .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
             .create_from_device(Box::new(f), None)

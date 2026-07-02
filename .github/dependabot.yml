@@ -1,0 +1,71 @@
+---
+# Dependabot configuration for BootyCall
+version: 2
+
+updates:
+  #########################
+  # GitHub Actions
+  #########################
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "00:00"
+      timezone: "Australia/Sydney"
+    assignees:
+      - "MAHDTech"
+    reviewers:
+      - "MAHDTech"
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "actions"
+    commit-message:
+      prefix: "chore(deps)"
+    rebase-strategy: "auto"
+    open-pull-requests-limit: 5
+
+  #########################
+  # Cargo Crates
+  #########################
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "00:00"
+      timezone: "Australia/Sydney"
+    assignees:
+      - "MAHDTech"
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "cargo"
+    commit-message:
+      prefix: "chore(deps)"
+    rebase-strategy: "auto"
+    open-pull-requests-limit: 5
+
+  #########################
+  # Nix Flakes
+  #########################
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+      time: "00:00"
+      timezone: "Australia/Sydney"
+    assignees:
+      - "MAHDTech"
+    reviewers:
+      - "MAHDTech"
+    labels:
+      - "dependencies"
+      - "dependabot"
+      - "nix"
+    commit-message:
+      prefix: "chore(deps)"
+    rebase-strategy: "auto"
+    open-pull-requests-limit: 5

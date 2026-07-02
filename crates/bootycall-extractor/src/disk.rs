@@ -86,7 +86,6 @@ pub fn extract_from_disk(
 ) -> Result<(), ExtractorError> {
     let disk = GptConfig::new()
         .writable(false)
-        .initialized(true)
         .open(disk_path)
         .map_err(|e| ExtractorError::Disk(format!("Failed to open GPT disk: {:?}", e)))?;
 

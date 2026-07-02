@@ -103,11 +103,11 @@ pub async fn run_dhcp_server(
         };
 
         let arch_str = match arch {
-            Some(v4::Architecture::X86_64) => "x86_64",
+            Some(v4::Architecture::X64) => "x86_64",
             Some(v4::Architecture::BC) => "BC (x86_64)",
-            Some(v4::Architecture::Unknown(11)) => "aarch64",
+            Some(a) if a.0 == 11 => "aarch64",
             Some(other) => {
-                debug!("Other architecture detected: {:?}", other);
+                debug!("Other architecture detected: {:?}", other.0);
                 "other"
             }
             None => "unknown",
@@ -143,7 +143,7 @@ pub async fn run_dhcp_server(
                     override_path.clone()
                 } else {
                     match arch {
-                        Some(v4::Architecture::Unknown(11)) => {
+                        Some(a) if a.0 == 11 => {
                             config_guard.server.default_bootloader_arm64.clone()
                         }
                         _ => config_guard.server.default_bootloader_amd64.clone(),
@@ -151,9 +151,7 @@ pub async fn run_dhcp_server(
                 }
             } else {
                 match arch {
-                    Some(v4::Architecture::Unknown(11)) => {
-                        config_guard.server.default_bootloader_arm64.clone()
-                    }
+                    Some(a) if a.0 == 11 => config_guard.server.default_bootloader_arm64.clone(),
                     _ => config_guard.server.default_bootloader_amd64.clone(),
                 }
             };

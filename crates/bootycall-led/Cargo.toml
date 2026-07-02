@@ -1,9 +1,9 @@
 [package]
 name = "bootycall-led"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
+tokio = { workspace = true }
 bootycall-log = { workspace = true }
-anyhow = "1.0"
+anyhow = { workspace = true }

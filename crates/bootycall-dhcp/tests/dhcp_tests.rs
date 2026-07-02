@@ -65,7 +65,7 @@ async fn test_dhcp_server_redirection() {
     // Request UEFI x86-64 architecture
     msg.opts_mut()
         .insert(v4::DhcpOption::ClientSystemArchitecture(
-            v4::Architecture::X86_64,
+            v4::Architecture::X64,
         ));
 
     let mut request_buf = Vec::new();

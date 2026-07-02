@@ -1,7 +1,7 @@
 use bootycall_log::info;
 use std::fs::OpenOptions;
 use std::io::Write;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
 const LED_WHITE_PATH: &str = "/sys/class/leds/white/brightness";

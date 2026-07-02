@@ -1,4 +1,4 @@
-name: PR Test
+name: CI
 
 on:
   pull_request:
@@ -17,11 +17,11 @@ permissions:
 
 jobs:
   validate-pr:
-    name: Validate PR Title
+    name: Conventional Commit
     runs-on: ubuntu-latest
     steps:
       - id: validate_pr_title
-        name: Validate PR Title
+        name: Validate Conventional Commit
         uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,7 +124,14 @@ jobs:
       - id: check_flake
         name: Nix Flake Check
         shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: nix flake check --impure --all-systems
+        run: >-
+          nix flake check
+          --accept-flake-config
+          --all-systems
+          --impure
+          --keep-going
+          --refresh
+          --verbose
 
       - id: check_statix
         name: Check Statix

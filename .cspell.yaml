@@ -19,6 +19,8 @@ ignorePaths:
   - devenv.nix
   - "*.svg"
   - secrets
+  - scratch
+  - scratch/**
 ignoreRegExpList:
   - /-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----/
   - /initialHashedPassword\s*=\s*.*/

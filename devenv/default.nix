@@ -95,7 +95,12 @@ in
       check-symlinks.enable = true;
       check-yaml.enable = true;
       commitizen.enable = true;
-      cspell.enable = true;
+      cspell = {
+        enable = true;
+        args = [
+          "--no-must-find-files"
+        ];
+      };
       cargo-check = {
         enable = true;
         package = config.languages.rust.toolchainPackage;

@@ -90,6 +90,7 @@ jobs:
       - id: check_flake
         name: Nix Flake Check
         shell: bash -c "nix develop --impure -c bash -- {0}"
+        timeout-minutes: 60
         run: >-
           nix flake check
           --accept-flake-config

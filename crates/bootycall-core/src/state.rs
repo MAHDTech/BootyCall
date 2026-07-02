@@ -100,6 +100,16 @@ impl StateStore {
         hosts.values().cloned().collect()
     }
 
+    pub fn has_recent_activity(&self, max_age: std::time::Duration) -> bool {
+        let now = SystemTime::now();
+        let hosts = self.hosts.read().unwrap();
+        hosts.values().any(|h| {
+            now.duration_since(h.last_seen)
+                .map(|age| age <= max_age)
+                .unwrap_or(false)
+        })
+    }
+
     pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
         let mut logs = self.logs.write().unwrap();
         logs.push(LogEvent {

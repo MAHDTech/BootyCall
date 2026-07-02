@@ -4,9 +4,9 @@ pub mod iso;
 
 use crate::error::ExtractorError;
 use bootycall_core::config::{Config, HostConfig};
+use bootycall_log::{error, info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{error, info, warn};
 
 struct CacheMetadata {
     image_path: PathBuf,

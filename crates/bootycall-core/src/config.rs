@@ -1,7 +1,7 @@
 use crate::error::CoreError;
+use bootycall_log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -12,6 +12,8 @@ pub struct ServerConfig {
     pub cache_dir: PathBuf,
     pub default_bootloader_amd64: String,
     pub default_bootloader_arm64: String,
+    #[serde(default)]
+    pub oled_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

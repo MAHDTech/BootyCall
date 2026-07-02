@@ -113,3 +113,14 @@ syslinux
 cdrkit
 memdisk
 prek
+sysinfo
+backbuffer
+libc
+softprops
+amannn
+endersonmenezes
+temurin
+secretspec
+elif
+versionrc
+alnum

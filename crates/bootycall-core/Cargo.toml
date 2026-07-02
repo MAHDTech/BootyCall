@@ -1,6 +1,6 @@
 [package]
 name = "bootycall-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -9,7 +9,7 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }
-tracing = { workspace = true }
+bootycall-log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

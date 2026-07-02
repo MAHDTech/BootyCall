@@ -1,12 +1,12 @@
 [package]
 name = "bootycall-tftp"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
 tokio = { workspace = true }
-tracing = { workspace = true }
+bootycall-log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

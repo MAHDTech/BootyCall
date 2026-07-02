@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - trunk
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: check_default_branch
+        name: Check if on Default Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "Current branch ($GITHUB_REF_NAME) is not the default branch ($DEFAULT_BRANCH). Skipping release."
+            echo "is_default=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Running on default branch ($DEFAULT_BRANCH). Proceeding with release."
+            echo "is_default=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        if: steps.check_default_branch.outputs.is_default == 'true'
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        if: steps.check_default_branch.outputs.is_default == 'true'
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: configure_git
+        name: Configure Git
+        if: steps.check_default_branch.outputs.is_default == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - id: read_cargo_version
+        name: Read Cargo Version
+        if: steps.check_default_branch.outputs.is_default == 'true'
+        run: |
+          VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from Cargo.toml"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Workspace version is: $VERSION"
+
+      - id: check_tag_existence
+        name: Check if Tag Exists
+        if: steps.check_default_branch.outputs.is_default == 'true'
+        run: |
+          TAG="${{ steps.read_cargo_version.outputs.tag }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+            echo "Release/Tag $TAG already exists on remote. Skipping release."
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New release version $TAG detected!"
+            echo "create_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: generate_release_notes
+        name: Generate Release Notes
+        if: steps.check_default_branch.outputs.is_default == 'true' && steps.check_tag_existence.outputs.create_release == 'true'
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: |
+          # Generate notes for the new version since the last tag
+          convco changelog --max-versions 1 > RELEASE_NOTES.md
+
+      - id: create_github_release
+        name: Push Tag and Create GitHub Release
+        if: steps.check_default_branch.outputs.is_default == 'true' && steps.check_tag_existence.outputs.create_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.read_cargo_version.outputs.tag }}"
+
+          # Create and push the tag
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          # Create the GitHub Release
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md

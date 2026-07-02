@@ -1,0 +1,18 @@
+---
+name: Cache Cargo
+description: Cache Rust cargo registry, git sources, and build target directory.
+
+runs:
+  using: composite
+  steps:
+    - id: cache_cargo
+      name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-

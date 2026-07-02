@@ -1,10 +1,10 @@
 use bootycall_core::config::Config;
 use bootycall_core::state::{HostStatus, StateStore};
+use bootycall_log::{debug, error, info};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder, v4};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tracing::{debug, error, info};
 
 fn get_local_ip_for_target(target: Ipv4Addr) -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;

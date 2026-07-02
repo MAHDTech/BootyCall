@@ -1,0 +1,131 @@
+name: PR Test
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - trunk
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate-pr:
+    name: Validate PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - id: validate_pr_title
+        name: Validate PR Title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check_version_collision
+        name: Check for version collision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || true)
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
+          fi
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            for b in trunk main master; do
+              if git rev-parse --verify "origin/$b" &>/dev/null || git rev-parse --verify "$b" &>/dev/null; then
+                DEFAULT_BRANCH="$b"
+                break
+              fi
+            done
+          fi
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            echo "Error: Could not determine default branch"
+            exit 1
+          fi
+
+          VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Error: Could not extract version from Cargo.toml"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "Checking if tag $TAG already exists on remote origin..."
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+            echo "Error: Release/Tag $TAG already exists on the remote!"
+            echo "It looks like you forgot to bump the version in Cargo.toml."
+            echo "Please increment the version under [workspace.package] in Cargo.toml."
+            exit 1
+          else
+            echo "Version $TAG is valid and does not exist yet on the remote."
+          fi
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: check_commit_messages
+        name: Check Commit Messages
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+          git fetch origin "$DEFAULT_BRANCH" --depth=1
+          convco check "origin/$DEFAULT_BRANCH..HEAD"
+
+      - id: cache_cargo
+        name: Cache Cargo
+        uses: ./.github/actions/cache-cargo
+
+      - id: run_devenv_tests
+        name: Run Devenv Tests
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: devenv test
+
+      - id: run_cargo_tests
+        name: Cargo Test
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo test --workspace
+
+      - id: run_cargo_clippy
+        name: Cargo Clippy
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo clippy --workspace
+
+      - id: check_flake
+        name: Nix Flake Check
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: nix flake check --impure --all-systems
+
+      - id: check_statix
+        name: Check Statix
+        run: nix run nixpkgs#statix -- check

@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use bootycall_log::{error, info};
 use minijinja::context;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use tracing::{error, info};
 
 use bootycall_core::config::{Config, HostConfig};
 use bootycall_core::state::{HostStatus, StateStore};

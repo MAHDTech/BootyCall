@@ -1,0 +1,93 @@
+---
+name: Setup Devenv
+description: Install Nix + Cachix + devenv, and run secretspec check. Requires checkout first.
+
+inputs:
+  github-token:
+    description: "GitHub token for Nix and Cachix"
+    required: true
+  cachix-cache-name:
+    description: "Name of the Cachix binary cache"
+    required: true
+    default: ""
+  cachix-auth-token:
+    description: "Auth token for Cachix push"
+    required: true
+    default: ""
+  skip-push:
+    description: "Set to true to skip pushing to Cachix (pull/substitute only). Use for jobs that don't produce cacheable build artifacts."
+    required: false
+    default: "false"
+  push-filter:
+    description: "Regex to exclude paths from Cachix push, e.g. source tarballs and nixpkgs archives"
+    required: false
+    default: '(-source$|nixpkgs\.tar\.gz$|\.tar\.gz$|\.zip$)'
+
+runs:
+  using: composite
+  steps:
+    - id: free_disk_space
+      name: Free Disk Space
+      uses: ./.github/actions/free-disk-space
+
+    - id: install_nix
+      name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        github_access_token: ${{ inputs.github-token }}
+        enable_kvm: true
+        extra_nix_config: |
+          keep-outputs = true
+          keep-derivations = true
+
+    - id: enable_cachix
+      name: Enable Cachix
+      if: inputs.cachix-cache-name != ''
+      uses: cachix/cachix-action@v16
+      with:
+        name: ${{ inputs.cachix-cache-name }}
+        authToken: ${{ inputs.cachix-auth-token }}
+        useDaemon: true
+        skipPush: ${{ inputs.skip-push }}
+        pushFilter: ${{ inputs.push-filter }}
+
+    - id: nix_cache
+      name: Cache Nix Store
+      uses: nix-community/cache-nix-action@v7
+      with:
+        primary-key: ${{ runner.os }}-nix-${{ hashFiles('devenv.lock', 'devenv.nix') }}
+        restore-prefixes-first-match: ${{ runner.os }}-nix-
+        gc-max-store-size-linux: 5G
+        purge: true
+        purge-created: P7D
+        token: ${{ inputs.github-token }}
+
+    - id: install_devenv
+      name: Install Devenv
+      shell: bash
+      run: |
+        nix profile add --accept-flake-config nixpkgs#devenv
+
+    - id: version_check
+      name: Version Check
+      shell: bash
+      run: |
+        echo "Devenv version: $(devenv --version)"
+        echo "Cachix version: $(cachix --version)"
+
+    - id: warmup_devenv
+      name: Warm up Devenv shell
+      shell: bash
+      run: |
+        if [[ -f "devenv.nix" ]];
+        then
+          echo "Testing using native devenv"
+          devenv shell -- echo "Running native devenv"
+        elif [[ -f "flake.nix" ]];
+        then
+          echo "Testing using Nix flakes"
+          nix develop --impure --command echo "Running via Nix flakes"
+        else
+          echo "No devenv configuration found, why did you even set it up?"
+          exit 1
+        fi

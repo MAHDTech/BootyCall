@@ -98,6 +98,7 @@ async fn test_tftp_server_negotiation_and_transfer() {
         cache_dir: "./cache".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let host = HostConfig {
@@ -232,6 +233,7 @@ async fn test_tftp_file_not_found() {
         cache_dir: "./cache".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let config = Config {
@@ -297,6 +299,7 @@ async fn test_tftp_path_traversal_blocked() {
         cache_dir: "./cache".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let config = Config {

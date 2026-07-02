@@ -17,6 +17,7 @@ async fn test_dhcp_server_redirection() {
         cache_dir: "./cache".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
     };
 
     let host = HostConfig {

@@ -1,9 +1,8 @@
 use anyhow::Context;
+use bootycall_log::{error, info};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
 
 use bootycall_core::config::{Config, watch_config};
 use bootycall_core::state::StateStore;
@@ -22,13 +21,14 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // 1. Initialise logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    bootycall_log::init();
 
     info!("BootyCall starting up...");
+
+    let (led_stop_tx, led_stop_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        bootycall_led::run_boot_blink(led_stop_rx).await;
+    });
 
     // 2. Parse CLI arguments
     let args = Cli::parse();
@@ -117,10 +117,23 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     });
 
+    let oled_store = state_store.clone();
+    let oled_enabled = shared_config.read().unwrap().server.oled_enabled;
+    if oled_enabled {
+        tokio::spawn(async move {
+            if let Err(e) = bootycall_oled::run_oled_manager(oled_store).await {
+                error!("OLED Manager encountered a fatal error: {:?}", e);
+            }
+        });
+    }
+
     // 10. Wait for interrupt or termination signal
+    let _ = led_stop_tx.send(()).await;
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received. Cleaning up services...");
+            bootycall_led::activate_white_led();
         }
         _ = dhcp_handle => {
             error!("DHCP Server task exited unexpectedly.");

@@ -80,6 +80,13 @@ in
     hooks = {
       actionlint.enable = true;
       action-validator.enable = true;
+      check-version-bump = {
+        enable = true;
+        name = "Check Cargo.toml Version Bump";
+        entry = "./scripts/check-version-bump.sh";
+        files = "^Cargo\\.toml$";
+        pass_filenames = false;
+      };
       check-json.enable = true;
       check-merge-conflicts.enable = true;
       check-shebang-scripts-are-executable = {

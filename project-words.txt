@@ -122,3 +122,5 @@ endersonmenezes
 temurin
 secretspec
 elif
+versionrc
+alnum

@@ -14,10 +14,12 @@ jobs:
     name: Update flake.lock
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - id: checkout_repository
+        name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Update flake.lock
+      - id: update_flake_lock
+        name: Update flake.lock
         uses: DeterminateSystems/update-flake-lock@v24
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

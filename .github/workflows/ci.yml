@@ -36,12 +36,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
       - id: check_version_collision
         name: Check for version collision
+        shell: bash -c "nix develop --impure -c bash -- {0}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. Extract local version
+          # 1. Fetch tags so convco knows the history
+          git fetch --tags origin >/dev/null 2>&1 || true
+
+          # 2. Extract local version
           CURRENT_VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
           if [ -z "$CURRENT_VERSION" ]; then
             CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
@@ -51,7 +70,7 @@ jobs:
             exit 1
           fi
 
-          # 2. Determine default branch
+          # 3. Determine default branch
           DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || true)
           if [ -z "$DEFAULT_BRANCH" ]; then
             DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
@@ -69,7 +88,7 @@ jobs:
             exit 1
           fi
 
-          # 3. Extract version from base/default branch
+          # 4. Extract version from base/default branch
           TARGET="origin/$DEFAULT_BRANCH"
           TARGET_CARGO=$(git show "$TARGET:Cargo.toml" 2>/dev/null || true)
           if [ -z "$TARGET_CARGO" ]; then
@@ -87,13 +106,17 @@ jobs:
             exit 0
           fi
 
-          echo "Comparing PR version ($CURRENT_VERSION) against default branch ($DEFAULT_BRANCH) version ($BASE_VERSION)..."
-
-          if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
-            echo "No version bump detected in Cargo.toml. This is a non-release PR."
-            echo "Bypassing version collision check."
-            exit 0
+          # 5. Calculate expected version using convco
+          EXPECTED_VERSION=$(convco version --bump 2>/dev/null || echo "")
+          EXPECTED_VERSION="${EXPECTED_VERSION#v}"
+          if [ -z "$EXPECTED_VERSION" ]; then
+            EXPECTED_VERSION="$BASE_VERSION"
           fi
+
+          echo "Comparing versions:"
+          echo "  Base branch version:           $BASE_VERSION"
+          echo "  Expected version (by convco):  $EXPECTED_VERSION"
+          echo "  Actual PR version:             $CURRENT_VERSION"
 
           # Function to compare semver (returns 0 if arg1 > arg2)
           semver_gt() {
@@ -114,37 +137,37 @@ jobs:
             return 1
           }
 
-          if ! semver_gt "$CURRENT_VERSION" "$BASE_VERSION"; then
-            echo "Error: Version in Cargo.toml ($CURRENT_VERSION) is not greater than the default branch version ($BASE_VERSION)."
-            echo "Please ensure the version is strictly greater than the base branch when releasing."
-            exit 1
-          fi
+          if semver_gt "$EXPECTED_VERSION" "$BASE_VERSION"; then
+            # A bump is required!
+            if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+              echo "Error: This PR contains feature or fix commits that require a version bump."
+              echo "The expected version is v$EXPECTED_VERSION, but Cargo.toml is still at v$BASE_VERSION."
+              echo "Please run 'version' inside your devenv shell locally to bump the version, stage the changes, and push again."
+              exit 1
+            fi
 
-          # 4. Check tag collision on remote
-          TAG="v$CURRENT_VERSION"
-          echo "Checking if tag $TAG already exists on remote origin..."
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
-            echo "Error: Release/Tag $TAG already exists on the remote!"
-            echo "Please increment the version to a unique value under [workspace.package] in Cargo.toml."
-            exit 1
+            if ! semver_gt "$CURRENT_VERSION" "$BASE_VERSION"; then
+              echo "Error: PR version v$CURRENT_VERSION is not greater than base branch version v$BASE_VERSION."
+              exit 1
+            fi
+
+            # Verify tag collision
+            TAG="v$CURRENT_VERSION"
+            echo "Checking if tag $TAG already exists on remote origin..."
+            if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+              echo "Error: Release/Tag $TAG already exists on the remote!"
+              echo "Please increment the version to a unique value under [workspace.package] in Cargo.toml."
+              exit 1
+            else
+              echo "Version $TAG is valid and does not exist yet on the remote."
+            fi
           else
-            echo "Version $TAG is valid and does not exist yet on the remote."
+            # No bump required
+            if [ "$CURRENT_VERSION" != "$BASE_VERSION" ]; then
+              echo "Warning: Version was bumped in this PR even though convco calculated no bump is required."
+            fi
+            echo "No version bump required. Bypassing version collision check."
           fi
-
-      - id: get_repository_owner
-        name: Get lowercased repository owner
-        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
-        env:
-          OWNER: ${{ github.repository_owner }}
-
-      - id: setup_devenv
-        name: Setup Devenv
-        uses: ./.github/actions/setup-devenv
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
-          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skip-push: "true"
 
       - id: check_commit_messages
         name: Check Commit Messages

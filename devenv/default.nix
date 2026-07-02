@@ -82,13 +82,7 @@ in
     hooks = {
       actionlint.enable = true;
       action-validator.enable = true;
-      check-version-bump = {
-        enable = true;
-        name = "Check Cargo.toml Version Bump";
-        entry = "./scripts/check-version-bump.sh";
-        files = "^Cargo\\.toml$";
-        pass_filenames = false;
-      };
+
       check-json.enable = true;
       check-merge-conflicts.enable = true;
       check-shebang-scripts-are-executable = {
@@ -227,7 +221,15 @@ in
     };
   };
 
-  scripts = { };
+  scripts = {
+    version = {
+      package = pkgs.bash;
+      description = "Bump workspace version using conventional commits or explicit bump level (MAJOR/MINOR/PATCH)";
+      exec = ''
+        ./scripts/version.sh "$@"
+      '';
+    };
+  };
 
   enterTest = ''
     echo "Running devenv tests..."

@@ -162,42 +162,166 @@ pub async fn run_oled_manager(
     Ok(())
 }
 
-/// Dynamic OLED rendering test for testing font size and alignment.
-pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
+/// Layout helper for rendering a TTF/OTF font dynamically.
+fn render_ttf_text(
+    font_data: &[u8],
+    text: &str,
+    scale_px: f32,
+) -> Result<(usize, usize, Vec<(usize, usize, u8)>), anyhow::Error> {
+    use rusttype::{Font, Scale, point};
+
+    let font = Font::try_from_bytes(font_data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse font data"))?;
+    let scale = Scale::uniform(scale_px);
+    let v_metrics = font.v_metrics(scale);
+    let glyphs: Vec<_> = font.layout(text, scale, point(0.0, v_metrics.ascent)).collect();
+
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+
+    let mut pixels = Vec::new();
+
+    for glyph in &glyphs {
+        if let Some(bb) = glyph.pixel_bounding_box() {
+            if bb.min.x < min_x { min_x = bb.min.x; }
+            if bb.max.x > max_x { max_x = bb.max.x; }
+            if bb.min.y < min_y { min_y = bb.min.y; }
+            if bb.max.y > max_y { max_y = bb.max.y; }
+
+            glyph.draw(|x, y, v| {
+                let px = (bb.min.x + x as i32) as usize;
+                let py = (bb.min.y + y as i32) as usize;
+                let intensity = (v * 255.0) as u8;
+                if intensity > 16 {
+                    pixels.push((px, py, intensity));
+                }
+            });
+        }
+    }
+
+    if pixels.is_empty() {
+        return Ok((0, 0, Vec::new()));
+    }
+
+    let text_w = (max_x - min_x) as usize;
+    let text_h = (max_y - min_y) as usize;
+
+    let normalized_pixels = pixels
+        .into_iter()
+        .map(|(px, py, val)| {
+            let norm_x = (px as i32 - min_x) as usize;
+            let norm_y = (py as i32 - min_y) as usize;
+            (norm_x, norm_y, val)
+        })
+        .collect();
+
+    Ok((text_w, text_h, normalized_pixels))
+}
+
+/// Dynamic OLED rendering test for testing font size, family, and alignment.
+pub fn oled_test(
+    size: usize,
+    alignment: &str,
+    text: &str,
+    font_path: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
+    let parts: Vec<&str> = alignment.split('-').collect();
+    let horiz = parts.get(0).copied().unwrap_or("left");
+    let vert = parts.get(1).copied().unwrap_or("middle");
+
     let mut fb = Framebuffer::new();
     fb.clear();
+
     {
         let mut renderer = Renderer::new(&mut fb);
-        // If size <= 12, use small font (height 12), otherwise large font (height 16)
-        let use_large_font = size > 12;
 
-        let text_w = Renderer::measure_text(text, use_large_font);
-        let x = match alignment {
-            "center" => {
-                if text_w < WIDTH {
-                    (WIDTH - text_w) / 2
-                } else {
-                    0
+        if let Some(path) = font_path {
+            // Read and render custom TTF font
+            let font_data = std::fs::read(path)?;
+            let (text_w, text_h, pixels) = render_ttf_text(&font_data, text, size as f32)?;
+
+            // Calculate x based on horizontal alignment
+            let x = match horiz {
+                "center" => {
+                    if text_w < WIDTH {
+                        (WIDTH - text_w) / 2
+                    } else {
+                        0
+                    }
+                }
+                "right" => {
+                    if text_w < WIDTH {
+                        WIDTH - text_w - 5
+                    } else {
+                        0
+                    }
+                }
+                _ => 5, // left
+            };
+
+            // Calculate y based on vertical alignment
+            let y = match vert {
+                "top" => 5,
+                "bottom" => {
+                    if text_h < HEIGHT {
+                        HEIGHT - text_h - 5
+                    } else {
+                        0
+                    }
+                }
+                _ => {
+                    if text_h < HEIGHT {
+                        (HEIGHT - text_h) / 2
+                    } else {
+                        0
+                    }
+                } // middle
+            };
+
+            // Draw custom rendered pixels
+            for (px, py, intensity) in pixels {
+                if x + px < WIDTH && y + py < HEIGHT {
+                    fb.set_pixel(x + px, y + py, intensity);
                 }
             }
-            "right" => {
-                if text_w < WIDTH {
-                    WIDTH - text_w - 5
-                } else {
-                    0
+        } else {
+            // Use static built-in fonts (small: 12px, large: 16px)
+            let use_large_font = size > 12;
+            let line_height = if use_large_font { 16 } else { 12 };
+
+            let text_w = Renderer::measure_text(text, use_large_font);
+            let x = match horiz {
+                "center" => {
+                    if text_w < WIDTH {
+                        (WIDTH - text_w) / 2
+                    } else {
+                        0
+                    }
                 }
-            }
-            _ => 5, // left
-        };
+                "right" => {
+                    if text_w < WIDTH {
+                        WIDTH - text_w - 5
+                    } else {
+                        0
+                    }
+                }
+                _ => 5, // left
+            };
 
-        // Draw header with test metadata
-        let header = format!("Size: {} | Align: {}", size, alignment);
-        renderer.draw_text(5, 5, &header, false);
-        renderer.draw_line(5, 20, WIDTH - 5, 20, 128);
+            let y = match vert {
+                "top" => 5,
+                "bottom" => HEIGHT - line_height - 5,
+                _ => (HEIGHT - line_height) / 2, // middle
+            };
 
-        // Draw test text
-        renderer.draw_text(x, 30, text, use_large_font);
+            // Draw text using static fonts
+            renderer.draw_text(x, y, text, use_large_font);
+        }
     }
+
     fb.flush()?;
     Ok(())
 }

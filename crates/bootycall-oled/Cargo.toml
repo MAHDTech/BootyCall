@@ -10,3 +10,4 @@ bootycall-core = { path = "../bootycall-core" }
 bootycall-log = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
+rusttype = { workspace = true }

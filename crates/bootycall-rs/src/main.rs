@@ -23,20 +23,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Test OLED rendering
+    /// Test OLED rendering with custom text, size, and layout
     OledTest {
-        #[arg(long, default_value = "10")]
+        /// Font size in points. For built-in fonts, choose 12 (small) or 16 (large). For custom TTF/OTF fonts, choose a value between 6 and 60.
+        #[arg(long, default_value = "12")]
         size: usize,
+        /// Layout alignment. Options: left, center, right, left-top, left-bottom, center-top, center-bottom, right-top, right-bottom
         #[arg(long, default_value = "left")]
         alignment: String,
+        /// Text string to display on the screen
         #[arg(long, default_value = "Hello World")]
         text: String,
+        /// Path to a custom TrueType (.ttf/.otf) font file for dynamic rendering
+        #[arg(long)]
+        font: Option<String>,
     },
     /// Test LED control
     LedTest {
+        /// LED color: blue, white, off
         #[arg(long, default_value = "blue")]
         color: String,
-        #[arg(long, default_value = "false")]
+        /// Enable blinking loop for 10 seconds (flag only, e.g. --blinking)
+        #[arg(long)]
         blinking: bool,
     },
 }
@@ -58,9 +66,39 @@ async fn main() -> Result<(), anyhow::Error> {
     // If subcommands are passed, run them immediately and exit
     if let Some(cmd) = args.command {
         match cmd {
-            Commands::OledTest { size, alignment, text } => {
+            Commands::OledTest { size, alignment, text, font } => {
                 info!("Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)");
-                bootycall_oled::oled_test(size, &alignment, &text)?;
+
+                // Validate size based on custom font vs built-in font
+                if let Some(ref path) = font {
+                    if !(6..=60).contains(&size) {
+                        return Err(anyhow::anyhow!(
+                            "Error: Custom font size {} is out of range. Must be between 6 and 60.",
+                            size
+                        ));
+                    }
+                } else if size != 12 && size != 16 {
+                    return Err(anyhow::anyhow!(
+                        "Error: Built-in font size {} is not supported. Use 12 (small) or 16 (large).",
+                        size
+                    ));
+                }
+
+                // Validate alignment format
+                let valid_aligns = [
+                    "left", "center", "right",
+                    "left-top", "left-bottom",
+                    "center-top", "center-bottom",
+                    "right-top", "right-bottom"
+                ];
+                if !valid_aligns.contains(&alignment.as_str()) {
+                    return Err(anyhow::anyhow!(
+                        "Error: Invalid alignment '{}'. Valid options are: left, center, right, left-top, left-bottom, center-top, center-bottom, right-top, right-bottom",
+                        alignment
+                    ));
+                }
+
+                bootycall_oled::oled_test(size, &alignment, &text, font.as_deref())?;
                 return Ok(());
             }
             Commands::LedTest { color, blinking } => {

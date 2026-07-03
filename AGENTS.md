@@ -37,6 +37,11 @@ nix develop --impure --command prek run --all-files
 
 This runs check-yaml, typos, action-validator, cargo-check, clippy, rustfmt, etc., to verify code correctness and clean style.
 
+### Documentation & Link Standards
+
+- **Relative Paths Only**: Always use repository-relative URLs (e.g., `[default.nix](../packages/ipxe/default.nix)`) for all documentation links referencing repository files.
+- **No Absolute `file://` Links**: NEVER commit absolute `file://` links in repository markdown files (such as `docs/*.md` or `README.md`). They are not portable and will cause link-checking (`lychee`) failures in CI.
+
 ---
 
 ## 3. Crate Responsibilities

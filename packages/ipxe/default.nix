@@ -16,6 +16,21 @@
 }:
 
 let
+  # Create a dummy syslinux package that supports all platforms (including arm64 and darwin).
+  # We do this because we only compile UEFI targets and don't need syslinux, but standard
+  # nixpkgs ipxe depends on it, which causes evaluation failures on those architectures.
+  dummySyslinux = stdenv.mkDerivation {
+    name = "syslinux";
+    pname = "syslinux";
+    src = writeText "dummy" "";
+    dontUnpack = true;
+    installPhase = "mkdir -p $out/share/syslinux";
+    meta.platforms = lib.platforms.all;
+  };
+
+  # Override the base ipxe derivation to use our dummy syslinux
+  ipxeOverridden = ipxe.override { syslinux = dummySyslinux; };
+
   # Generate the embed script if not provided
   defaultEmbedScript =
     let
@@ -69,7 +84,7 @@ let
       );
 
 in
-ipxe.overrideAttrs (oldAttrs: {
+ipxeOverridden.overrideAttrs (oldAttrs: {
   inherit pname;
 
   # Override target binaries to build

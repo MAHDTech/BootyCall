@@ -40,6 +40,7 @@ in
     hello
     nil
     toml-cli
+    trivy
   ];
 
   enterShell = ''

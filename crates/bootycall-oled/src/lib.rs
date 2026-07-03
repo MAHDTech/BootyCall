@@ -20,7 +20,10 @@ enum DisplayMode {
     Metrics,
 }
 
-pub async fn run_oled_manager(state_store: StateStore) -> Result<(), anyhow::Error> {
+pub async fn run_oled_manager(
+    state_store: StateStore,
+    mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
+) -> Result<(), anyhow::Error> {
     info!("Starting OLED Manager Task...");
 
     let mut fb = Framebuffer::new();
@@ -146,8 +149,17 @@ pub async fn run_oled_manager(state_store: StateStore) -> Result<(), anyhow::Err
             error!("Failed to write to framebuffer: {:?}", e);
         }
 
-        sleep(Duration::from_millis(100)).await;
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                info!("OLED Manager shutting down. Blanking screen...");
+                fb.clear();
+                let _ = fb.flush();
+                break;
+            }
+            _ = sleep(Duration::from_millis(100)) => {}
+        }
     }
+    Ok(())
 }
 
 /// Dynamic OLED rendering test for testing font size and alignment.

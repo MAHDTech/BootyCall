@@ -167,12 +167,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let oled_store = state_store.clone();
     let oled_enabled = shared_config.read().unwrap().server.oled_enabled;
+    let (oled_shutdown_tx, oled_shutdown_rx) = tokio::sync::mpsc::channel(1);
+    let mut oled_manager_handle = None;
     if oled_enabled {
-        tokio::spawn(async move {
-            if let Err(e) = bootycall_oled::run_oled_manager(oled_store).await {
+        oled_manager_handle = Some(tokio::spawn(async move {
+            if let Err(e) = bootycall_oled::run_oled_manager(oled_store, oled_shutdown_rx).await {
                 error!("OLED Manager encountered a fatal error: {:?}", e);
             }
-        });
+        }));
     }
 
     // 10. Wait for interrupt or termination signal
@@ -194,7 +196,11 @@ async fn main() -> Result<(), anyhow::Error> {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received (SIGINT). Cleaning up services...");
             let _ = led_shutdown_tx.send(()).await;
+            let _ = oled_shutdown_tx.send(()).await;
             let _ = led_manager_handle.await;
+            if let Some(handle) = oled_manager_handle {
+                let _ = handle.await;
+            }
         }
         _ = async {
             #[cfg(unix)]
@@ -208,7 +214,11 @@ async fn main() -> Result<(), anyhow::Error> {
         } => {
             info!("Shutdown signal received (SIGTERM). Cleaning up services...");
             let _ = led_shutdown_tx.send(()).await;
+            let _ = oled_shutdown_tx.send(()).await;
             let _ = led_manager_handle.await;
+            if let Some(handle) = oled_manager_handle {
+                let _ = handle.await;
+            }
         }
         _ = dhcp_handle => {
             error!("DHCP Server task exited unexpectedly.");

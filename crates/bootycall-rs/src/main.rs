@@ -23,6 +23,12 @@ async fn main() -> Result<(), anyhow::Error> {
     // 1. Initialise logging
     bootycall_log::init();
 
+    // Register panic hook to turn LED Solid White on panic
+    std::panic::set_hook(Box::new(|info| {
+        bootycall_log::error!("Panic occurred: {:?}", info);
+        bootycall_led::activate_white_led();
+    }));
+
     info!("BootyCall starting up...");
 
     let (led_stop_tx, led_stop_rx) = tokio::sync::mpsc::channel(1);
@@ -130,10 +136,18 @@ async fn main() -> Result<(), anyhow::Error> {
     // 10. Wait for interrupt or termination signal
     let _ = led_stop_tx.send(()).await;
 
+    // Spawn regular LED manager task after boot blink stops
+    let led_store = state_store.clone();
+    let (led_shutdown_tx, led_shutdown_rx) = tokio::sync::mpsc::channel(1);
+    let led_manager_handle = tokio::spawn(async move {
+        bootycall_led::run_led_manager(led_store, led_shutdown_rx).await;
+    });
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received. Cleaning up services...");
-            bootycall_led::activate_white_led();
+            let _ = led_shutdown_tx.send(()).await;
+            let _ = led_manager_handle.await;
         }
         _ = dhcp_handle => {
             error!("DHCP Server task exited unexpectedly.");

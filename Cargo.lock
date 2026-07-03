@@ -222,6 +222,7 @@ name = "bootycall-led"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "bootycall-core",
  "bootycall-log",
  "tokio",
 ]

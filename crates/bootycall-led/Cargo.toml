@@ -7,3 +7,4 @@ edition.workspace = true
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
 anyhow = { workspace = true }
+bootycall-core = { path = "../bootycall-core" }

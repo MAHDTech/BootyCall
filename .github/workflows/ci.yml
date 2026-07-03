@@ -51,8 +51,8 @@ jobs:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skip-push: "true"
 
-      - id: check_version_collision
-        name: Check for version collision
+      - id: check_version
+        name: Check Version
         shell: bash -c "nix develop --impure -c bash -- {0}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

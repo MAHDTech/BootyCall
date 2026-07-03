@@ -101,8 +101,9 @@ jobs:
           steps.check_tag_existence.outputs.create_release == 'true'
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: |
+          TAG="${{ steps.read_cargo_version.outputs.tag }}"
           # Generate notes for the new version since the last tag
-          convco changelog --max-versions 1 > RELEASE_NOTES.md
+          convco changelog --max-versions 1 --unreleased "$TAG" > RELEASE_NOTES.md
 
       - id: create_github_release
         name: Push Tag and Create GitHub Release

@@ -125,3 +125,7 @@ elif
 versionrc
 alnum
 toplevel
+esac
+SARIF
+aquasec
+aquasecurity

@@ -1,0 +1,55 @@
+---
+name: Report Status
+description: Report CI status to the GitHub commit status API.
+
+inputs:
+  result:
+    description: "Outcome of the step to check (e.g. steps.build.outcome)"
+    required: true
+  success-message:
+    description: "Message when the step succeeded"
+    required: true
+  failure-message:
+    description: "Message when the step failed"
+    required: true
+  github-token:
+    description: "GitHub token for API calls"
+    required: true
+  workflow-name:
+    description: "Workflow name for the status context"
+    required: true
+  repository:
+    description: "Repository in owner/repo format"
+    required: true
+  sha:
+    description: "Commit SHA to report status on"
+    required: true
+  run-url:
+    description: "URL to the workflow run"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: report_status
+      name: Report Status
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        if [[ "${{ inputs.result }}" == "success" ]]; then
+          RESULT="success"
+          DESCRIPTION="${{ inputs.success-message }}"
+        else
+          RESULT="failure"
+          DESCRIPTION="${{ inputs.failure-message }}"
+        fi
+        gh api \
+          repos/${{ inputs.repository }}/statuses/${{ inputs.sha }} \
+          -f state=${RESULT} \
+          -f context="${{ inputs.workflow-name }}" \
+          -f description="${DESCRIPTION}" \
+          -f target_url="${{ inputs.run-url }}" || {
+            echo "Failed to report CI status!"
+            exit 1
+          }

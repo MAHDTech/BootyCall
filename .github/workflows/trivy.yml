@@ -1,0 +1,104 @@
+---
+name: Trivy
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - trunk
+
+  push:
+    branches:
+      - main
+      - master
+      - trunk
+
+  schedule:
+    - cron: "0 0 * * 0"
+
+permissions:
+  actions: write
+  contents: read
+  packages: read
+  pull-requests: read
+  security-events: write
+  statuses: write
+
+env:
+  NIXPKGS_ALLOW_UNFREE: 1
+  SECRETSPEC_PROVIDER: env
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ##################################################
+  # Scan repository with Trivy and upload SARIF
+  ##################################################
+  scan:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: false
+
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: cache_trivy_db
+        name: Cache Trivy DB
+        uses: ./.github/actions/cache-trivy
+
+      - id: trivy_scan
+        name: Trivy Filesystem Scan
+        shell: devenv shell --quiet bash -- -e {0}
+        env:
+          TRIVY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          trivy filesystem \
+            --config trivy.yaml \
+            --format sarif \
+            --output trivy-results.sarif \
+            --exit-code 0 \
+            .
+
+      - id: trivy_upload
+        name: Upload SARIF Results
+        if: always() && (steps.trivy_scan.outcome == 'success' || steps.trivy_scan.outcome == 'failure')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - id: report_status
+        name: Report Status
+        if: always()
+        uses: ./.github/actions/report-status
+        with:
+          result: ${{ steps.trivy_scan.outcome }}
+          success-message: "Trivy security scan passed"
+          failure-message: "Trivy security scan failed"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow-name: ${{ github.workflow }}
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

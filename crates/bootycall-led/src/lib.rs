@@ -7,8 +7,15 @@ const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
 const LED_WHITE_PATH: &str = "/sys/class/leds/white/brightness";
 
 fn set_led(path: &str, value: u8) {
-    if let Ok(mut file) = OpenOptions::new().write(true).open(path) {
-        let _ = write!(file, "{}", value);
+    match OpenOptions::new().write(true).open(path) {
+        Ok(mut file) => {
+            if let Err(e) = write!(file, "{}", value) {
+                bootycall_log::error!("Failed to write value {} to LED path {}: {:?}", value, path, e);
+            }
+        }
+        Err(e) => {
+            bootycall_log::error!("Failed to open LED path {}: {:?}", path, e);
+        }
     }
 }
 

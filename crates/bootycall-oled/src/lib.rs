@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const PAGE_DURATION: Duration = Duration::from_secs(3);
-const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(30);
+const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayMode {
@@ -27,7 +27,7 @@ pub async fn run_oled_manager(state_store: StateStore) -> Result<(), anyhow::Err
     let mut sys_metrics = SystemMetrics::new();
 
     let mut last_activity = Instant::now();
-    let mut current_mode = DisplayMode::Screensaver;
+    let mut current_mode = DisplayMode::Metrics;
     let mut page_index = 0;
     let mut last_page_flip = Instant::now();
     let mut ss_x = 0;

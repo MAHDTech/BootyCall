@@ -3,6 +3,10 @@ use bootycall_log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+fn default_oled_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub http_bind: String,
@@ -12,7 +16,7 @@ pub struct ServerConfig {
     pub cache_dir: PathBuf,
     pub default_bootloader_amd64: String,
     pub default_bootloader_arm64: String,
-    #[serde(default)]
+    #[serde(default = "default_oled_enabled")]
     pub oled_enabled: bool,
 }
 

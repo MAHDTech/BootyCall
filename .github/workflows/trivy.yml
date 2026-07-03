@@ -71,7 +71,7 @@ jobs:
 
       - id: trivy_scan
         name: Trivy Filesystem Scan
-        shell: devenv shell --quiet bash -- -e {0}
+        shell: bash -c "nix develop --impure -c bash -- {0}"
         env:
           TRIVY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

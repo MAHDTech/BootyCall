@@ -15,8 +15,6 @@ updates:
       timezone: "Australia/Sydney"
     assignees:
       - "MAHDTech"
-    reviewers:
-      - "MAHDTech"
     labels:
       - "dependencies"
       - "dependabot"
@@ -46,6 +44,7 @@ updates:
       prefix: "chore(deps)"
     rebase-strategy: "auto"
     open-pull-requests-limit: 5
+    versioning-strategy: "auto"
 
   #########################
   # Nix Flakes
@@ -58,8 +57,6 @@ updates:
       time: "00:00"
       timezone: "Australia/Sydney"
     assignees:
-      - "MAHDTech"
-    reviewers:
       - "MAHDTech"
     labels:
       - "dependencies"

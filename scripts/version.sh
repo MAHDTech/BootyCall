@@ -142,6 +142,33 @@ run_ci_check() {
 
 	log_debug "Target base branch: $target"
 
+	# Check if any Rust/Cargo source or config files changed
+	log_debug "Checking if Rust or Cargo files changed between $target and HEAD..."
+	local files_changed
+	files_changed=$(git diff --name-only "$target...HEAD" 2>/dev/null || echo "")
+
+	local rust_changes=false
+	while read -r file; do
+		if [ -z "$file" ]; then
+			continue
+		fi
+		# Only need to bump the version if these files were changed
+		if [[ $file =~ ^Cargo\.toml$ ]] ||
+			[[ $file =~ ^Cargo\.lock$ ]] ||
+			[[ $file =~ ^rust-toolchain\.toml$ ]] ||
+			[[ $file =~ ^crates/ ]] ||
+			[[ $file =~ ^static/ ]]; then
+			rust_changes=true
+			log_debug "Detected Rust/Cargo file change: $file"
+			break
+		fi
+	done <<<"$files_changed"
+
+	if [ "$rust_changes" = false ]; then
+		log_success "No Rust/Cargo source or configuration changes detected. Bypassing version collision check."
+		exit 0
+	fi
+
 	local target_cargo
 	target_cargo=$(git show "$target:Cargo.toml" 2>/dev/null || true)
 	if [ -z "$target_cargo" ]; then

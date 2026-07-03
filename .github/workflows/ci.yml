@@ -50,7 +50,7 @@ jobs:
 
       - id: nix_cache_lookup
         name: Lookup Nix Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /nix
           key: ${{ runner.os }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
@@ -58,7 +58,7 @@ jobs:
 
       - id: cargo_cache_lookup
         name: Lookup Cargo Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry

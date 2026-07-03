@@ -1,4 +1,4 @@
-# BootyCall 📞
+# 📞 BootyCall
 
 ![status](https://img.shields.io/badge/status-alpha-orange?style=for-the-badge)
 

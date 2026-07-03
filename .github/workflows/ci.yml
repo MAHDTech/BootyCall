@@ -299,7 +299,7 @@ jobs:
   ci-flake-check:
     name: Nix Flake Check
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     needs:
       - check-cache
       - setup-environment

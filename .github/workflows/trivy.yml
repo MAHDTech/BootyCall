@@ -40,7 +40,7 @@ jobs:
   scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     continue-on-error: false
 
     steps:

@@ -332,6 +332,7 @@ jobs:
         run: >-
           nix flake check
           --accept-flake-config
+          --no-eval-cache
           --all-systems
           --impure
           --keep-going

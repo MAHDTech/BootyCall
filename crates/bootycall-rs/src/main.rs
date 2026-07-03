@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bootycall_log::{error, info};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -16,6 +16,29 @@ use bootycall_core::state::StateStore;
 struct Cli {
     #[arg(short, long, default_value = "bootycall.yaml")]
     config: String,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Test OLED rendering
+    OledTest {
+        #[arg(long, default_value = "10")]
+        size: usize,
+        #[arg(long, default_value = "left")]
+        alignment: String,
+        #[arg(long, default_value = "Hello World")]
+        text: String,
+    },
+    /// Test LED control
+    LedTest {
+        #[arg(long, default_value = "blue")]
+        color: String,
+        #[arg(long, default_value = "false")]
+        blinking: bool,
+    },
 }
 
 #[tokio::main]
@@ -28,6 +51,25 @@ async fn main() -> Result<(), anyhow::Error> {
         bootycall_log::error!("Panic occurred: {:?}", info);
         bootycall_led::activate_white_led();
     }));
+
+    // 2. Parse CLI arguments
+    let args = Cli::parse();
+
+    // If subcommands are passed, run them immediately and exit
+    if let Some(cmd) = args.command {
+        match cmd {
+            Commands::OledTest { size, alignment, text } => {
+                info!("Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)");
+                bootycall_oled::oled_test(size, &alignment, &text)?;
+                return Ok(());
+            }
+            Commands::LedTest { color, blinking } => {
+                info!("Running LED test... (Note: stop the bootycall service to prevent overwriting)");
+                bootycall_led::led_test(&color, blinking)?;
+                return Ok(());
+            }
+        }
+    }
 
     info!("BootyCall starting up...");
 

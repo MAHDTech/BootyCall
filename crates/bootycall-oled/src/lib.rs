@@ -149,3 +149,43 @@ pub async fn run_oled_manager(state_store: StateStore) -> Result<(), anyhow::Err
         sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// Dynamic OLED rendering test for testing font size and alignment.
+pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
+    let mut fb = Framebuffer::new();
+    fb.clear();
+    {
+        let mut renderer = Renderer::new(&mut fb);
+        // If size <= 12, use small font (height 12), otherwise large font (height 16)
+        let use_large_font = size > 12;
+
+        let text_w = Renderer::measure_text(text, use_large_font);
+        let x = match alignment {
+            "center" => {
+                if text_w < WIDTH {
+                    (WIDTH - text_w) / 2
+                } else {
+                    0
+                }
+            }
+            "right" => {
+                if text_w < WIDTH {
+                    WIDTH - text_w - 5
+                } else {
+                    0
+                }
+            }
+            _ => 5, // left
+        };
+
+        // Draw header with test metadata
+        let header = format!("Size: {} | Align: {}", size, alignment);
+        renderer.draw_text(5, 5, &header, false);
+        renderer.draw_line(5, 20, WIDTH - 5, 20, 128);
+
+        // Draw test text
+        renderer.draw_text(x, 30, text, use_large_font);
+    }
+    fb.flush()?;
+    Ok(())
+}

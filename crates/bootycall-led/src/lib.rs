@@ -111,3 +111,56 @@ pub async fn run_led_manager(
     // Set to solid white on clean shutdown
     activate_white_led();
 }
+
+/// Dynamic LED testing for testing color and blinking states.
+pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
+    match color {
+        "blue" => {
+            if blinking {
+                info!("Testing Blinking Blue LED for 10 seconds...");
+                for _ in 0..10 {
+                    set_led(LED_BLUE_PATH, 255);
+                    set_led(LED_WHITE_PATH, 0);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    set_led(LED_BLUE_PATH, 0);
+                    set_led(LED_WHITE_PATH, 0);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            } else {
+                info!("Testing Solid Blue LED");
+                set_led(LED_BLUE_PATH, 255);
+                set_led(LED_WHITE_PATH, 0);
+            }
+        }
+        "white" => {
+            if blinking {
+                info!("Testing Blinking White LED for 10 seconds...");
+                for _ in 0..10 {
+                    set_led(LED_WHITE_PATH, 255);
+                    set_led(LED_BLUE_PATH, 0);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    set_led(LED_WHITE_PATH, 0);
+                    set_led(LED_BLUE_PATH, 0);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            } else {
+                info!("Testing Solid White LED");
+                set_led(LED_WHITE_PATH, 255);
+                set_led(LED_BLUE_PATH, 0);
+            }
+        }
+        "off" => {
+            info!("Testing LEDs Off");
+            set_led(LED_BLUE_PATH, 0);
+            set_led(LED_WHITE_PATH, 0);
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unknown LED color: {}. Valid colors are blue, white, off.",
+                color
+            ));
+        }
+    }
+    info!("LED test complete");
+    Ok(())
+}

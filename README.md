@@ -1,6 +1,8 @@
 # BootyCall 🦾
 
-`bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite written in Rust. It serves as a modern replacement for the legacy stack of Caddy, TFTPd, and Shoelaces.
+`bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite written in Rust.
+
+It serves as a modern replacement for the legacy stack of Caddy, TFTPd, and iPXE.
 
 It hosts three core protocols (Proxy DHCP, TFTP, and HTTP) on a single asynchronous Tokio runtime, working alongside your existing primary DHCP server.
 
@@ -52,14 +54,14 @@ sequenceDiagram
 
 ### 1. Build and Run via Devenv
 
-We use [devenv](https://devenv.sh) for our development workspace:
+We use [devenv](https://devenv.sh) integrated with Nix flakes for our development workspace:
 
 ```bash
-devenv shell
+nix develop --impure
 cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
-_The binary is automatically compiled and added to your shell path when entering `devenv shell`._
+_The binary is automatically compiled and added to your shell path when entering the shell._
 
 ### 2. Run Tests
 
@@ -75,4 +77,3 @@ cargo test --all
 
 - [Specification Guide](docs/spec.md) - Deep architectural and schema details.
 - [Development Usage Guide](docs/usage.md) - How to setup directory trees, configure yaml, and bind privileged ports.
-- [Systemd Example](docs/examples/bootycall.service) - Running BootyCall securely in production environments.

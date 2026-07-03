@@ -1,0 +1,20 @@
+---
+name: Cache Trivy DB
+description: Caches the Trivy vulnerability database to speed up security scans and avoid rate limits.
+
+runs:
+  using: composite
+  steps:
+    - id: cache_trivy
+      name: Compute Trivy Cache
+      shell: bash
+      run: echo "TRIVY_CACHE=$(date +%Y%W)" >> "$GITHUB_ENV"
+
+    - id: cache_trivy_db
+      name: Cache Trivy DB
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/trivy
+        key: ${{ runner.os }}-trivy-db-${{ env.TRIVY_CACHE }}
+        restore-keys: |
+          ${{ runner.os }}-trivy-db-

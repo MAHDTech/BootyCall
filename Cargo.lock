@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bootycall-log",
  "notify",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-dhcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bootycall-core",
  "bootycall-log",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-extractor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bootycall-core",
  "bootycall-log",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-http"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "bootycall-core",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-led"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bootycall-log",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-log"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-oled"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bootycall-core",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-rs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bootycall-core",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "bootycall-tftp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bootycall-core",
  "bootycall-log",

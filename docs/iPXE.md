@@ -1,434 +1,124 @@
-# Readme
+# iPXE Binary Build & Automation Guide
 
-Notes on building custom ipxe files.
+This document describes how BootyCall builds and manages custom iPXE binaries. Build automation is fully integrated into the repository using **Nix Flakes** for both native AMD64 (x86_64) builds and cross-compiled ARM64 (aarch64) builds.
 
-## Part 0: Preparation
+---
 
-Prepare to build iPXE.
+## 1. How it Works
 
-- Clone the repo
+iPXE builds are parameterized and packaged in the repository under [packages/ipxe/default.nix](../packages/ipxe/default.nix).
 
-```bash
-git clone https://github.com/ipxe/ipxe.git --depth 1 --branch master
-```
+The builder:
 
-- Change into the right directory
+- Downloads/resolves the iPXE source.
+- Patches Makefile files to ensure compatibility with Nix/NixOS environments.
+- Inject customizable compile-time macros into `src/config/general.h` (e.g., console formatting, network protocols, interactive commands).
+- Embeds a parameterized boot script to chainload the main configurations.
+- Compiles the target firmware binaries (e.g., `ipxe.efi` and `snponly.efi`).
+- Cross-compiles using Nix cross-toolchains (`pkgsCross`) when targeting alternative CPU architectures.
 
-```bash
-cd ipxe/src
-```
+---
 
-- Patch the Makefiles for NixOS compatibility
+## 2. Default Compile-Time Options
 
-```bash
-sed -i 's|/bin/echo|echo|g' Makefile Makefile.housekeeping
-sed -i 's|-mlittle-endian||g' arch/arm64/Makefile
-```
+The following options are enabled by default in our automated builds (defined in [flake.nix](../flake.nix)):
 
-- Enable options for additional feature support;
+- `CONSOLE_CMD` - Interactive console commands, colors, and console pairing.
+- `CONSOLE_FRAMEBUFFER` - Framebuffer console display.
+- `IMAGE_PNG` - PNG wallpaper background support.
+- `REBOOT_CMD` / `POWEROFF_CMD` - Allow machine reboot and power-off from shell/scripts.
+- `PING_CMD` - Enable network reachability check inside the shell.
+- `NTP_CMD` - Network time synchronization.
+- `NSLOOKUP_CMD` - DNS lookup diagnostics.
+- `DOWNLOAD_PROTO_TFTP` / `DOWNLOAD_PROTO_HTTP` / `DOWNLOAD_PROTO_HTTPS` - Core TFTP, HTTP, and secure HTTPS boot.
 
-```bash
-# Enable CONSOLE_CMD for console, colour, and cpair support
-sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_CMD|#define CONSOLE_CMD|' config/general.h
+---
 
-# Enable CONSOLE_FRAMEBUFFER for framebuffer support
-sed -i 's|//[[:space:]]*#define[[:space:]]\+CONSOLE_FRAMEBUFFER|#define CONSOLE_FRAMEBUFFER|' config/console.h
+## 3. Parameterized Embed Script
 
-# Enable IMAGE_PNG for PNG image support
-sed -i 's|//[[:space:]]*#define[[:space:]]\+IMAGE_PNG|#define IMAGE_PNG|' config/general.h
+The embedded bootstrap script resolves the BootyCall server configuration dynamically:
 
-# Enable reboot and poweroff support
-sed -i 's|//[[:space:]]*#define[[:space:]]\+REBOOT_CMD|#define REBOOT_CMD|' config/general.h
-sed -i 's|//[[:space:]]*#define[[:space:]]\+POWEROFF_CMD|#define POWEROFF_CMD|' config/general.h
+- **Dynamic DHCP Resolution**: If no hardcoded IP is provided, it tries to chainload using the DHCP-provided `next-server` variable over TFTP, standard HTTP (port 80), and then HTTP on port `8080` (BootyCall HTTP default).
+- **Static Hardcoding**: Allows defining a custom server IP/hostname and custom HTTP port at build-time.
 
-# Enable ping command in the iPXE shell.
-sed -i 's|//[[:space:]]*#define[[:space:]]\+PING_CMD|#define PING_CMD|' config/general.h
-
-# Enable NTP
-sed -i 's|//[[:space:]]*#define[[:space:]]\+NTP_CMD|#define NTP_CMD|' config/general.h
-
-# Enable NSLOOKUP command
-sed -i 's|//[[:space:]]*#define[[:space:]]\+NSLOOKUP_CMD|#define NSLOOKUP_CMD|' config/general.h
-
-# Enable download protocols
-sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_TFTP|#define DOWNLOAD_PROTO_TFTP|' config/general.h
-sed -i 's|//[[:space:]]*#define[[:space:]]\+DOWNLOAD_PROTO_HTTP|#define DOWNLOAD_PROTO_HTTP|' config/general.h
-```
-
-- Make the embed script (amd64)
-
-```bash
-cat > embed-amd64.ipxe <<'EOF'
+```ipxe
 #!ipxe
 
-#########################
-# Initialisation
-#########################
-
-set timeout 10000
+# Ensure the interface is up and DHCP is run
 ifopen || goto fail
 dhcp || goto fail
 
-goto config
+echo "Booting from BootyCall server: ${server}"
 
-#########################
-:config
-#########################
-
-echo Loading iPXE configuration ...
-sleep 1
-
-chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
+# Try loading config via TFTP, then standard HTTP, then custom HTTP port
+chain --autofree tftp://${server}/ipxe/config.ipxe || \
+chain --autofree http://${server}/ipxe/config.ipxe || \
+chain --autofree http://${server}:${portStr}/ipxe/config.ipxe || \
 goto fail
 
-#########################
-# Fail
-#########################
 :fail
-
-echo iPXE boot has failed, dropping to shell...
+echo "BootyCall boot failed. Dropping to interactive iPXE shell..."
 shell
 reboot
-EOF
 ```
 
-## Part 1: Native AMD64 Builds
+---
 
-Build the x86_64 EFI and legacy BIOS iPXE images using native tools.
+## 4. Local Development and Testing
 
-- Create a nix shell config for native builds
+The built binaries are ignored in git via [.gitignore](../.gitignore) so they do not pollute source control, but you can build and place them locally for testing.
+
+### Command-Line Compilation
+
+- **Build AMD64 UEFI binaries (`ipxe.efi` and `snponly.efi`)**:
+
+  ```bash
+  nix build .#ipxe-amd64
+  ```
+
+- **Build ARM64 UEFI binaries (`ipxe.efi` and `snponly.efi`)**:
+
+  ```bash
+  nix build .#ipxe-arm64
+  ```
+
+- **Build the full assets bundle (places binaries under `tftpboot/boot/x64` and `tftpboot/boot/arm64`)**:
+
+  ```bash
+  nix build .#assets
+  ```
+
+### Populating Workspace for Local Runs
+
+For ease of testing, a devenv helper script is provided. Simply run:
 
 ```bash
-cat > shell-amd64.nix <<'EOF'
-let
-  pkgs = import <nixpkgs> { };
-
-  # Include the required perl dependencies
-  perlEnv = with pkgs.perlPackages; perl.withPackages (ps: with ps; [
-    ExtUtilsMakeMaker
-    IOCompress DigestSHA ArchiveZip
-    CryptOpenSSLRSA CryptX509 CryptOpenSSLX509
-  ]);
-
-in pkgs.mkShell {
-
-  # Native build tools
-  nativeBuildInputs = with pkgs; [
-    git
-    gnumake
-    gcc
-    binutils-unwrapped
-    xz
-    zlib
-    mtools
-    cdrtools
-    syslinux
-    gawk
-    bison
-    flex
-    libusb1
-    openssl
-    bc
-    cdrkit
-    python3
-    perlEnv
-  ];
-
-  shellHook = ''
-    echo "≈≈≈≈≈ iPXE native build environment ready ≈≈≈≈≈"
-    echo "Native arch: $(uname -m)"
-    echo "gcc → $(which gcc)"
-  '';
-}
-EOF
+nix develop --impure --command build-ipxe-local
 ```
 
-- Launch the nix shell for native builds
+This script will build both AMD64 and ARM64 binaries and copy them into your local [tftpboot/boot/](../tftpboot/boot/) folder structure.
 
-```bash
-nix-shell shell-amd64.nix
-```
+---
 
-- Build the native images
+## 5. CI/CD Release Assets
 
-```bash
-# x86_64 UEFI
-make -j$(nproc) bin-x86_64-efi/ipxe.efi \
-    EMBED=embed-amd64.ipxe \
-    CONFIG=console \
-    CONFIG=image \
-    CONFIG=pci \
-    CONFIG=usb \
-    VERSION_MAJOR=1 \
-    VERSION_MINOR=0 \
-    VERSION_PATCH=0
+When a new version is tagged and released, the GitHub Action release pipeline:
 
-# Legacy BIOS
-make -j$(nproc) bin/undionly.kpxe \
-    EMBED=embed-amd64.ipxe \
-    CONFIG=console \
-    CONFIG=image \
-    CONFIG=pci \
-    CONFIG=usb \
-    VERSION_MAJOR=1 \
-    VERSION_MINOR=0 \
-    VERSION_PATCH=0
+1. Compiles `ipxe-amd64` and `ipxe-arm64` from source via Nix.
+2. Automatically attaches the built binaries to the GitHub Release:
+   - `ipxe-amd64.efi`
+   - `snponly-amd64.efi`
+   - `ipxe-arm64.efi`
+   - `snponly-arm64.efi`
 
-# SNPOnly version
-make bin-x86_64-efi/snponly.efi \
-    EMBED=embed-amd64.ipxe \
-    CONFIG=console \
-    CONFIG=image \
-    CONFIG=pci \
-    CONFIG=usb \
-    VERSION_MAJOR=1 \
-    VERSION_MINOR=0 \
-    VERSION_PATCH=0
-```
+---
 
-- Exit the shell
+## 6. NixOS Deployment Integration
 
-```bash
-exit
-```
+When deploying via the BootyCall NixOS service, the system automatically builds these packages from the flake and seeds them into the TFTP server's directory on startup (if `services.bootycall.seedDefaultAssets` is set to `true`).
 
-## Part 2: Cross-compiled ARM64 Builds
+---
 
-Build the ARM64 UEFI iPXE image using cross-compilation tools.
+## 7. Legacy Manual Reference (Archived)
 
-- Create a nix shell config for cross-compilation
-
-```bash
-cat > shell-arm64.nix <<'EOF'
-let
-
-  pkgs = import <nixpkgs> { };
-  # Cross toolchain for aarch64
-
-  crossPkgs = pkgs.pkgsCross.aarch64-multiplatform;
-  # Include the required perl dependencies
-
-  perlEnv = with pkgs.perlPackages; perl.withPackages (ps: with ps; [
-    ExtUtilsMakeMaker
-    IOCompress DigestSHA ArchiveZip
-    CryptOpenSSLRSA CryptX509 CryptOpenSSLX509
-  ]);
-
-in pkgs.mkShell {
-
-  # Native build tools
-  nativeBuildInputs = with pkgs; [
-    git
-    gnumake
-    xz
-    zlib
-    gawk
-    bison
-    flex
-    libusb1
-    bc
-    python3
-    perlEnv
-  ];
-
-  # Cross-compiling build tools
-  buildInputs = with crossPkgs; [
-    stdenv.cc
-    binutils
-  ];
-
-  shellHook = ''
-    # Create a temporary bin directory for symlinks
-    IPXE_BIN="/tmp/ipxe-bin"
-    mkdir -p "$IPXE_BIN"
-    TOOLS=(
-      gcc
-      g++
-      as
-      ld
-      objcopy
-      objdump
-      ar
-      strip
-      ranlib
-    )
-
-    # Add native build tools to temp bin
-    for tool in ''${TOOLS[@]};
-    do
-      if command -v "$tool" >/dev/null 2>&1;
-      then
-        ln -sf "$(which "$tool")" "$IPXE_BIN/$tool"
-      fi
-    done
-
-    # Symlink unprefixed cross tools to prefixed versions (Nix uses 'unknown')
-    for tool in ''${TOOLS[@]};
-    do
-      full_prefixed="aarch64-unknown-linux-gnu-$tool"
-      if command -v "$full_prefixed" >/dev/null 2>&1;
-      then
-        ln -sf "$(which "$full_prefixed")" "$IPXE_BIN/$tool"
-      fi
-    done
-
-    # Also create symlinks for the shorter prefix expected by iPXE
-    for tool in ''${TOOLS[@]};
-    do
-      prefixed="aarch64-linux-gnu-$tool"
-      full_prefixed="aarch64-unknown-linux-gnu-$tool"
-      if command -v "$full_prefixed" >/dev/null 2>&1;
-      then
-        ln -sf "$(which "$full_prefixed")" "$IPXE_BIN/$prefixed"
-      fi
-    done
-
-    export PATH="$IPXE_BIN:$PATH:${crossPkgs.stdenv.cc}/bin:${crossPkgs.binutils}/bin"
-    # Use the shorter prefix for iPXE compatibility
-    export CROSS="aarch64-linux-gnu-"
-
-    echo "≈≈≈≈≈ iPXE cross-compilation build environment ready ≈≈≈≈≈"
-    echo "Native arch: $(uname -m)"
-    echo "aarch64-linux-gnu-gcc → $(which aarch64-linux-gnu-gcc || echo MISSING)"
-    echo "aarch64-unknown-linux-gnu-gcc → $(which aarch64-unknown-linux-gnu-gcc || echo MISSING)"
-    echo "as → $(which as)"
-    echo "CROSS = $CROSS"
-  '';
-}
-EOF
-```
-
-- Launch the nix shell for cross-compilation
-
-```bash
-nix-shell shell-arm64.nix
-```
-
-- Make the embed script (arm64)
-
-```bash
-cat > embed-arm64.ipxe <<'EOF'
-#!ipxe
-
-#########################
-# Initialisation
-#########################
-
-set timeout 10000
-ifopen net0 || goto snponly
-dhcp net0 || goto snponly
-goto ipxe
-
-#########################
-:ipxe
-#########################
-
-echo Loading iPXE configuration (ipxe.efi) ...
-sleep 1
-
-goto config_ipxe
-
-#########################
-:snponly
-#########################
-
-echo Failed to configure network using ipxe.efi, falling back to snponly.efi ...
-sleep 1
-
-chain --autofree tftp://${next-server}/boot/x64/snponly.efi ||
-chain --autofree http://${next-server}/boot/x64/snponly.efi ||
-chain --autofree http://${next-server}:8080/boot/x64/snponly.efi ||
-goto fail
-
-goto config_snponly
-
-#########################
-:config_ipxe
-#########################
-
-echo Loading iPXE configuration (ipxe.efi) ...
-sleep 1
-
-chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
-goto fail
-
-#########################
-:config_snponly
-#########################
-
-echo Loading iPXE configuration (snmponly.efi) ...
-sleep 1
-
-# TODO: Create a non-menu failback for snponly.
-
-chain --autofree tftp://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}/ipxe/config.ipxe ||
-chain --autofree http://${next-server}:8080/ipxe/config.ipxe ||
-goto fail
-
-#########################
-# Fail
-#########################
-:fail
-
-echo iPXE boot has failed, dropping to shell...
-shell
-reboot
-EOF
-```
-
-- Build the ARM64 image
-
-```bash
-make -j$(nproc) bin-arm64-efi/ipxe.efi \
-    EMBED=embed-arm64.ipxe \
-    CROSS=aarch64-linux-gnu- \
-    CONFIG=console \
-    CONFIG=image \
-    CONFIG=pci \
-    CONFIG=usb \
-    VERSION_MAJOR=1 \
-    VERSION_MINOR=0 \
-    VERSION_PATCH=0
-```
-
-- Exit the shell
-
-```bash
-exit
-```
-
-## Part 3: Transfer the files
-
-- Transfer the files to the iPXE server
-
-```bash
-# BootyCall project
-BOOTYCALL_HOME="${HOME}/Projects/syncthing/GitHub/MAHDTech/BootyCall"
-
-# Legacy BIOS must be in root.
-cp -f bin/undionly.kpxe "${BOOTYCALL_HOME}/tftpboot/undionly.kpxe"
-
-# AMD64 UEFI ipxe.efi
-cp -f bin-x86_64-efi/ipxe.efi "${BOOTYCALL_HOME}/tftpboot/boot/x64/ipxe.efi"
-
-# AMD64 UEFI snponly.efi
-cp -f bin-x86_64-efi/snponly.efi "${BOOTYCALL_HOME}/tftpboot/boot/x64/snponly.efi"
-
-# ARM64
-cp -f bin-arm64-efi/ipxe.efi "${BOOTYCALL_HOME}/tftpboot/boot/arm64/ipxe.efi"
-```
-
-- Don't forget to change the permissions on the iPXE server!
-
-```bash
-chown -R tftp:tftp /mnt/hdd/tftpboot
-```
-
-## Part 4: iPXE Wallpaper fun
-
-See [iPXE Wallpapers](./iPXE_wallpapers.md)
+For details on manual dependencies, symlinking toolchains, and manually compiling before this automation, please refer to the Git history or run commands inside a standard cross-compilation shell (`shell-arm64.nix`/`shell-amd64.nix`).

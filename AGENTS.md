@@ -9,7 +9,6 @@ Welcome! This document outlines code standards, architectural constraints, and d
 ## 1. Project Specifications & Rules
 
 - **Specifications**: See [spec](./docs/spec.md) for architecture, configuration formats, and dynamic features.
-- **Development Backlog**: Track and update tasks in [backlog](./docs/backlog.md). Mark tasks complete after code validation.
 - **Style and Integrity**: Maintain all documentation, comments, and docstrings. Write idiomatic, readable, and highly performant Rust code with minimum dependencies.
 
 ---
@@ -29,15 +28,19 @@ Welcome! This document outlines code standards, architectural constraints, and d
 Before committing code, make sure to execute:
 
 ```bash
-devenv shell
-prek run --all-files
+nix develop --impure --command prek run --all-files
 ```
 
 > [!IMPORTANT]
-> To run commands inside the `devenv` shell non-interactively, always prefix them with `devenv shell --`, for example:
-> `devenv shell -- cargo init` or `devenv shell -- cargo check`.
+> To run commands inside the development shell non-interactively, always prefix them with `nix develop --impure --command`, for example:
+> `nix develop --impure --command cargo init` or `nix develop --impure --command cargo check`.
 
 This runs check-yaml, typos, action-validator, cargo-check, clippy, rustfmt, etc., to verify code correctness and clean style.
+
+### Documentation & Link Standards
+
+- **Relative Paths Only**: Always use repository-relative URLs (e.g., `[default.nix](../packages/ipxe/default.nix)`) for all documentation links referencing repository files.
+- **No Absolute `file://` Links**: NEVER commit absolute `file://` links in repository markdown files (such as `docs/*.md` or `README.md`). They are not portable and will cause link-checking (`lychee`) failures in CI.
 
 ---
 

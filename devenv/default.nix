@@ -39,6 +39,8 @@ in
     gh
     hello
     nil
+    toml-cli
+    trivy
   ];
 
   enterShell = ''
@@ -81,13 +83,7 @@ in
     hooks = {
       actionlint.enable = true;
       action-validator.enable = true;
-      check-version-bump = {
-        enable = true;
-        name = "Check Cargo.toml Version Bump";
-        entry = "./scripts/check-version-bump.sh";
-        files = "^Cargo\\.toml$";
-        pass_filenames = false;
-      };
+
       check-json.enable = true;
       check-merge-conflicts.enable = true;
       check-shebang-scripts-are-executable = {
@@ -100,7 +96,12 @@ in
       check-symlinks.enable = true;
       check-yaml.enable = true;
       commitizen.enable = true;
-      cspell.enable = true;
+      cspell = {
+        enable = true;
+        args = [
+          "--no-must-find-files"
+        ];
+      };
       cargo-check = {
         enable = true;
         package = config.languages.rust.toolchainPackage;
@@ -226,7 +227,27 @@ in
     };
   };
 
-  scripts = { };
+  scripts = {
+    version = {
+      package = pkgs.bash;
+      description = "Bump workspace version using conventional commits or explicit bump level (MAJOR/MINOR/PATCH)";
+      exec = ''
+        ./scripts/version.sh "$@"
+      '';
+    };
+    build-ipxe-local = {
+      package = pkgs.bash;
+      description = "Build and populate local tftpboot/boot/ with compiled iPXE binaries";
+      exec = ''
+        echo "Building BootyCall assets (including iPXE binaries)..."
+        nix build .#assets --out-link result-assets
+        mkdir -p tftpboot/boot
+        cp -fvR result-assets/tftpboot/boot/* tftpboot/boot/
+        rm -f result-assets
+        echo "Done! Populated local tftpboot/boot/ directory with compiled iPXE binaries."
+      '';
+    };
+  };
 
   enterTest = ''
     echo "Running devenv tests..."

@@ -1,0 +1,61 @@
+---
+# Global
+
+debug: false
+quiet: false
+insecure: false
+timeout: 10m
+
+# Database
+db:
+  skip-update: false
+  no-progress: true
+  repository:
+    - "public.ecr.aws/aquasecurity/trivy-db:2"
+    - "ghcr.io/aquasecurity/trivy-db:2"
+    - "aquasec/trivy-db:2"
+  java-repository:
+    - "public.ecr.aws/aquasecurity/trivy-java-db:1"
+    - "ghcr.io/aquasecurity/trivy-java-db:1"
+    - "aquasec/trivy-java-db:1"
+
+# Report
+exit-code: 1
+format: table
+report: all
+dependency-tree: true
+list-all-pkgs: true
+severity:
+  - UNKNOWN
+  - LOW
+  - MEDIUM
+  - HIGH
+  - CRITICAL
+
+# Scan
+scan:
+  show-suppressed: false
+  detection-priority: precise
+  scanners:
+    - vuln
+    - secret
+  skip-files:
+    - .env
+  skip-dirs:
+    - .devenv
+    - .direnv
+    - .git
+    - target
+
+# Package
+pkg:
+  include-dev-deps: true
+  types:
+    - os
+    - library
+
+# Misconfiguration
+misconfiguration:
+  terraform:
+    exclude-downloaded-modules: false
+  checks-bundle-repository: "ghcr.io/aquasecurity/trivy-checks:1"

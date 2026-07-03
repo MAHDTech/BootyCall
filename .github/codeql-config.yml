@@ -1,0 +1,16 @@
+---
+##################################################
+# Name: codeql-config.yml
+# Description: Custom CodeQL configuration for BootyCall
+#
+# Excludes test code paths and build directories from analysis.
+##################################################
+
+name: "BootyCall CodeQL Configuration"
+
+paths-ignore:
+  - "**/tests/**"
+  - "**/test_*/**"
+  - "target/**"
+  - ".devenv/**"
+  - ".direnv/**"

@@ -59,7 +59,7 @@ To run on standard ports (69/UDP, 67/UDP) without using `sudo` or `root`:
 1. Build the binary:
 
    ```bash
-   devenv shell -- cargo build
+   nix develop --impure --command cargo build
    ```
 
 2. Grant bind capabilities:
@@ -81,23 +81,23 @@ To run on standard ports (69/UDP, 67/UDP) without using `sudo` or `root`:
 ### Build Crate
 
 ```bash
-devenv shell -- cargo build
+nix develop --impure --command cargo build
 ```
 
 ### Run Server Loop
 
 ```bash
-devenv shell -- cargo run -p bootycall-rs -- --config bootycall.yaml
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
 ### Run Tests
 
 ```bash
-devenv shell -- cargo test --all
+nix develop --impure --command cargo test --all
 ```
 
 ### Run Linter Checks
 
 ```bash
-devenv shell -- pre-commit run --all-files
+nix develop --impure --command pre-commit run --all-files
 ```

@@ -1,0 +1,149 @@
+---
+name: CodeQL
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - trunk
+
+  push:
+    branches:
+      - main
+      - master
+      - trunk
+
+  schedule:
+    - cron: "0 0 * * 0"
+
+permissions:
+  contents: read
+  packages: read
+  actions: write
+  security-events: write
+  statuses: write
+
+env:
+  NIXPKGS_ALLOW_UNFREE: 1
+  SECRETSPEC_PROVIDER: env
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ##################################################
+  # Run CodeQL analysis per language
+  ##################################################
+  analyze:
+    name: CodeQL Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: false
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: rust
+            build-mode: none
+
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: init_codeql
+        name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: .github/codeql-config.yml
+
+      - id: analyze_codeql
+        name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  ##################################################
+  # CI Status Aggregator
+  ##################################################
+  status:
+    name: Status
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - id: write_summary
+        name: Write Results Summary
+        run: |
+          status_emoji() {
+            case "$1" in
+              success)   echo "✅" ;;
+              failure)   echo "❌" ;;
+              cancelled) echo "⛔" ;;
+              skipped)   echo "⏭️" ;;
+              *)         echo "⏳" ;;
+            esac
+          }
+
+          {
+            echo "## CodeQL Analysis Results"
+            echo ""
+            echo "The CodeQL static analysis matrix has completed."
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| CodeQL Analyze Matrix | $(status_emoji '${{ needs.analyze.result }}') ${{ needs.analyze.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: check_failures
+        name: Check for Failures
+        run: |
+          if [[ "${{ needs.analyze.result }}" != "success" ]]; then
+            echo "::error::CodeQL matrix analysis failed"
+            exit 1
+          fi
+          echo "CodeQL analysis passed!"
+
+      - id: report_status
+        name: Report Status
+        if: always()
+        uses: ./.github/actions/report-status
+        with:
+          result: ${{ steps.check_failures.outcome }}
+          success-message: "CodeQL analysis passed!"
+          failure-message: "CodeQL analysis failed!"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow-name: "CodeQL Status"
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

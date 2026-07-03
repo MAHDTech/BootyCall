@@ -8,17 +8,22 @@ on:
       - trunk
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
   pull-requests: read
+  statuses: write
 
 jobs:
+  ##################################################
+  # Validate PR - Title check for Conventional Commits
+  ##################################################
   validate-pr:
     name: Conventional Commit
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - id: validate_pr_title
         name: Validate Conventional Commit
@@ -26,56 +31,135 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  test:
-    name: Lint & Test
+  ##################################################
+  # Check Cache - Lookup Nix and Cargo caches
+  ##################################################
+  check-cache:
+    name: Check Cache
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      nix-cache-hit: ${{ steps.nix_cache_lookup.outputs.cache-hit }}
+      cargo-cache-hit: ${{ steps.cargo_cache_lookup.outputs.cache-hit }}
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: nix_cache_lookup
+        name: Lookup Nix Cache
+        uses: actions/cache@v4
+        with:
+          path: /nix
+          key: ${{ runner.os }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+          lookup-only: true
+
+      - id: cargo_cache_lookup
+        name: Lookup Cargo Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          lookup-only: true
+
+  ##################################################
+  # Setup Environment - Warm caches if missed
+  ##################################################
+  setup-environment:
+    name: Setup Environment
+    needs: check-cache
+    if: needs.check-cache.outputs.nix-cache-hit != 'true' || needs.check-cache.outputs.cargo-cache-hit != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: ${{ secrets.CACHIX_AUTH_TOKEN == '' }}
+
+      - id: cache_cargo
+        name: Cache Cargo
+        uses: ./.github/actions/cache-cargo
+
+      - id: warm_cargo
+        name: Warm Cargo Cache
+        if: needs.check-cache.outputs.cargo-cache-hit != 'true'
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo test --no-run --workspace
+
+  ##################################################
+  # Downstream Granular Parallel Check Jobs
+  ##################################################
+  ci-version:
+    name: Check Version
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: check_version
+        name: Check Version
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: version --verbose ci
+
+  ci-commit-msg:
+    name: Check Commit Messages
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
     steps:
       - id: checkout_repository
         name: Checkout Repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      - id: check_version_collision
-        name: Check for version collision
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || true)
-          if [ -z "$DEFAULT_BRANCH" ]; then
-            DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)
-          fi
-          if [ -z "$DEFAULT_BRANCH" ]; then
-            for b in trunk main master; do
-              if git rev-parse --verify "origin/$b" &>/dev/null || git rev-parse --verify "$b" &>/dev/null; then
-                DEFAULT_BRANCH="$b"
-                break
-              fi
-            done
-          fi
-          if [ -z "$DEFAULT_BRANCH" ]; then
-            echo "Error: Could not determine default branch"
-            exit 1
-          fi
-
-          VERSION=$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | grep '^version =' | head -n1 | cut -d'"' -f2 || true)
-          if [ -z "$VERSION" ]; then
-            VERSION=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2 || true)
-          fi
-          if [ -z "$VERSION" ]; then
-            echo "Error: Could not extract version from Cargo.toml"
-            exit 1
-          fi
-          TAG="v$VERSION"
-          echo "Checking if tag $TAG already exists on remote origin..."
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
-            echo "Error: Release/Tag $TAG already exists on the remote!"
-            echo "It looks like you forgot to bump the version in Cargo.toml."
-            echo "Please increment the version under [workspace.package] in Cargo.toml."
-            exit 1
-          else
-            echo "Version $TAG is valid and does not exist yet on the remote."
-          fi
 
       - id: get_repository_owner
         name: Get lowercased repository owner
@@ -102,24 +186,145 @@ jobs:
           git fetch origin "$DEFAULT_BRANCH" --depth=1
           convco check "origin/$DEFAULT_BRANCH..HEAD"
 
-      - id: cache_cargo
-        name: Cache Cargo
-        uses: ./.github/actions/cache-cargo
+  ci-devenv-test:
+    name: Devenv Test
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
 
       - id: run_devenv_tests
         name: Run Devenv Tests
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: devenv test
 
+  ci-cargo-test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: cache_cargo
+        name: Cache Cargo
+        uses: ./.github/actions/cache-cargo
+
       - id: run_cargo_tests
         name: Cargo Test
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: cargo test --workspace
 
+  ci-cargo-clippy:
+    name: Cargo Clippy
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: cache_cargo
+        name: Cache Cargo
+        uses: ./.github/actions/cache-cargo
+
       - id: run_cargo_clippy
         name: Cargo Clippy
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: cargo clippy --workspace
+
+  ci-flake-check:
+    name: Nix Flake Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
 
       - id: check_flake
         name: Nix Flake Check
@@ -133,6 +338,166 @@ jobs:
           --refresh
           --verbose
 
+  ci-build-assets:
+    name: Build Assets & iPXE
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: build_assets
+        name: Build Assets & iPXE
+        run: nix build .#assets --no-link
+
+  ci-statix:
+    name: Check Statix
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
       - id: check_statix
         name: Check Statix
         run: nix run nixpkgs#statix -- check
+
+  ##################################################
+  # CI Status Aggregator
+  ##################################################
+  status:
+    name: CI Status
+    needs:
+      - check-cache
+      - validate-pr
+      - ci-version
+      - ci-commit-msg
+      - ci-devenv-test
+      - ci-cargo-test
+      - ci-cargo-clippy
+      - ci-flake-check
+      - ci-statix
+      - ci-build-assets
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - id: write_summary
+        name: Write Results Summary
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD: ${{ github.head_ref }}
+          PR_BASE: ${{ github.base_ref }}
+        run: |
+          status_emoji() {
+            case "$1" in
+              success)   echo "✅" ;;
+              failure)   echo "❌" ;;
+              cancelled) echo "⛔" ;;
+              skipped)   echo "⏭️" ;;
+              *)         echo "⏳" ;;
+            esac
+          }
+
+          {
+            echo "## CI Results"
+            echo ""
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              echo "> **PR #${PR_NUMBER}** — ${PR_TITLE}"
+              echo "> _${PR_HEAD} → ${PR_BASE}_"
+              echo ""
+            fi
+            if [ "${{ needs.check-cache.outputs.nix-cache-hit }}" == "true" ] && [ "${{ needs.check-cache.outputs.cargo-cache-hit }}" == "true" ]; then
+              echo "💚 **Nix & Cargo Caches: HIT** — setup-environment was skipped"
+            else
+              echo "🔴 **Cache Status:**"
+              echo "- Nix Cache: ${{ needs.check-cache.outputs.nix-cache-hit == 'true' && 'HIT 💚' || 'MISS 🔴' }}"
+              echo "- Cargo Cache: ${{ needs.check-cache.outputs.cargo-cache-hit == 'true' && 'HIT 💚' || 'MISS 🔴' }}"
+              echo "setup-environment warmed any missing caches."
+            fi
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              echo "| PR Title | $(status_emoji '${{ needs.validate-pr.result }}') ${{ needs.validate-pr.result }} |"
+            fi
+            echo "| Version Check | $(status_emoji '${{ needs.ci-version.result }}') ${{ needs.ci-version.result }} |"
+            echo "| Commit Messages | $(status_emoji '${{ needs.ci-commit-msg.result }}') ${{ needs.ci-commit-msg.result }} |"
+            echo "| Devenv Test | $(status_emoji '${{ needs.ci-devenv-test.result }}') ${{ needs.ci-devenv-test.result }} |"
+            echo "| Cargo Test | $(status_emoji '${{ needs.ci-cargo-test.result }}') ${{ needs.ci-cargo-test.result }} |"
+            echo "| Cargo Clippy | $(status_emoji '${{ needs.ci-cargo-clippy.result }}') ${{ needs.ci-cargo-clippy.result }} |"
+            echo "| Nix Flake Check | $(status_emoji '${{ needs.ci-flake-check.result }}') ${{ needs.ci-flake-check.result }} |"
+            echo "| Statix Check | $(status_emoji '${{ needs.ci-statix.result }}') ${{ needs.ci-statix.result }} |"
+            echo "| Build Assets & iPXE | $(status_emoji '${{ needs.ci-build-assets.result }}') ${{ needs.ci-build-assets.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: check_failures
+        name: Check for Failures
+        run: |
+          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }}"
+          if echo "${ALL_JOBS}" | grep -qE "(failure|cancelled)"; then
+            echo "::error::One or more CI jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"
+
+      - id: report_status
+        name: Report Status
+        if: always()
+        uses: ./.github/actions/report-status
+        with:
+          result: ${{ steps.check_failures.outcome }}
+          success-message: "All CI checks passed!"
+          failure-message: "One or more CI checks failed!"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow-name: "CI Status"
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

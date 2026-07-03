@@ -15,4 +15,5 @@
 
 # Static wallpapers
 static/wallpapers/*.png filter=lfs diff=lfs merge=lfs -text
+docs/images/*.png filter=lfs diff=lfs merge=lfs -text
 

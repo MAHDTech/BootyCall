@@ -1,14 +1,14 @@
-# BootyCall 🦾
+# BootyCall 📞
 
 ![status](https://img.shields.io/badge/status-alpha-orange?style=for-the-badge)
 
 `bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite.
 
-It serves as a modern replacement for the legacy stack of Caddy, TFTPd, and iPXE.
+It serves as a modern replacement for the legacy stack of TFTPd, iPXE and integrates HTTP.
 
 It hosts three core protocols (Proxy DHCP, TFTP, and HTTP) on a single asynchronous Tokio runtime, working alongside your existing primary DHCP server.
 
-It was originally written to run on a UniFi CloudKey Gen2 Plus so is built to be as lightweight as possible with a single goal, _always answer the call_ to boot your servers.
+It was originally written to run on a _UniFi CloudKey Gen2 Plus_ so is built to be as lightweight as possible with a single goal, to _always answer the call_ to boot your servers.
 
 ![teaser](./docs/images/teaser.png)
 

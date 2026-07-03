@@ -96,7 +96,9 @@ jobs:
 
       - id: generate_release_notes
         name: Generate Release Notes
-        if: steps.check_default_branch.outputs.is_default == 'true' && steps.check_tag_existence.outputs.create_release == 'true'
+        if: >-
+          steps.check_default_branch.outputs.is_default == 'true' &&
+          steps.check_tag_existence.outputs.create_release == 'true'
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: |
           # Generate notes for the new version since the last tag
@@ -104,7 +106,9 @@ jobs:
 
       - id: create_github_release
         name: Push Tag and Create GitHub Release
-        if: steps.check_default_branch.outputs.is_default == 'true' && steps.check_tag_existence.outputs.create_release == 'true'
+        if: >-
+          steps.check_default_branch.outputs.is_default == 'true' &&
+          steps.check_tag_existence.outputs.create_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

@@ -134,6 +134,8 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // 10. Wait for interrupt or termination signal
+    // Keep boot blink running for at least 3 seconds so the transition pattern is visible
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     let _ = led_stop_tx.send(()).await;
 
     // Spawn regular LED manager task after boot blink stops
@@ -143,9 +145,26 @@ async fn main() -> Result<(), anyhow::Error> {
         bootycall_led::run_led_manager(led_store, led_shutdown_rx).await;
     });
 
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            info!("Shutdown signal received. Cleaning up services...");
+            info!("Shutdown signal received (SIGINT). Cleaning up services...");
+            let _ = led_shutdown_tx.send(()).await;
+            let _ = led_manager_handle.await;
+        }
+        _ = async {
+            #[cfg(unix)]
+            {
+                sigterm.recv().await;
+            }
+            #[cfg(not(unix))]
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(315360000)).await; // 10 years
+            }
+        } => {
+            info!("Shutdown signal received (SIGTERM). Cleaning up services...");
             let _ = led_shutdown_tx.send(()).await;
             let _ = led_manager_handle.await;
         }

@@ -39,6 +39,8 @@ runs:
         extra_nix_config: |
           keep-outputs = true
           keep-derivations = true
+          extra-substituters = https://devenv.cachix.org
+          extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
 
     - id: enable_cachix
       name: Enable Cachix
@@ -66,7 +68,7 @@ runs:
       name: Install Devenv
       shell: bash
       run: |
-        nix profile add --accept-flake-config nixpkgs#devenv
+        nix profile install --accept-flake-config github:cachix/devenv
 
     - id: version_check
       name: Version Check

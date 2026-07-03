@@ -105,6 +105,15 @@ jobs:
           # Generate notes for the new version since the last tag
           convco changelog --max-versions 1 --unreleased "$TAG" > RELEASE_NOTES.md
 
+      - id: build_ipxe_binaries
+        name: Build iPXE Binaries
+        if: >-
+          steps.check_default_branch.outputs.is_default == 'true' &&
+          steps.check_tag_existence.outputs.create_release == 'true'
+        run: |
+          nix build .#ipxe-amd64 --out-link result-amd64
+          nix build .#ipxe-arm64 --out-link result-arm64
+
       - id: create_github_release
         name: Push Tag and Create GitHub Release
         if: >-
@@ -119,7 +128,11 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
 
-          # Create the GitHub Release
+          # Create the GitHub Release and attach the compiled binaries
           gh release create "$TAG" \
             --title "$TAG" \
-            --notes-file RELEASE_NOTES.md
+            --notes-file RELEASE_NOTES.md \
+            result-amd64/ipxe.efi#ipxe-amd64.efi \
+            result-amd64/snponly.efi#snponly-amd64.efi \
+            result-arm64/ipxe.efi#ipxe-arm64.efi \
+            result-arm64/snponly.efi#snponly-arm64.efi

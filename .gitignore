@@ -28,6 +28,11 @@ tftpboot/images/nixos/
 result-*
 *.drv
 
+# Built iPXE binaries
+tftpboot/boot/x64/*.efi
+tftpboot/boot/arm64/*.efi
+tftpboot/undionly.kpxe
+
 # iVentoy
 tftpboot/tools/iventoy/log/log.txt
 tftpboot/tools/iventoy/iso/

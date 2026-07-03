@@ -234,6 +234,18 @@ in
         ./scripts/version.sh "$@"
       '';
     };
+    build-ipxe-local = {
+      package = pkgs.bash;
+      description = "Build and populate local tftpboot/boot/ with compiled iPXE binaries";
+      exec = ''
+        echo "Building BootyCall assets (including iPXE binaries)..."
+        nix build .#assets --out-link result-assets
+        mkdir -p tftpboot/boot
+        cp -fvR result-assets/tftpboot/boot/* tftpboot/boot/
+        rm -f result-assets
+        echo "Done! Populated local tftpboot/boot/ directory with compiled iPXE binaries."
+      '';
+    };
   };
 
   enterTest = ''

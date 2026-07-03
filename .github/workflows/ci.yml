@@ -338,6 +338,39 @@ jobs:
           --refresh
           --verbose
 
+  ci-build-assets:
+    name: Build Assets & iPXE
+    runs-on: ubuntu-latest
+    needs:
+      - check-cache
+      - setup-environment
+    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: build_assets
+        name: Build Assets & iPXE
+        run: nix build .#assets --no-link
+
   ci-statix:
     name: Check Statix
     runs-on: ubuntu-latest
@@ -386,6 +419,7 @@ jobs:
       - ci-cargo-clippy
       - ci-flake-check
       - ci-statix
+      - ci-build-assets
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -441,12 +475,13 @@ jobs:
             echo "| Cargo Clippy | $(status_emoji '${{ needs.ci-cargo-clippy.result }}') ${{ needs.ci-cargo-clippy.result }} |"
             echo "| Nix Flake Check | $(status_emoji '${{ needs.ci-flake-check.result }}') ${{ needs.ci-flake-check.result }} |"
             echo "| Statix Check | $(status_emoji '${{ needs.ci-statix.result }}') ${{ needs.ci-statix.result }} |"
+            echo "| Build Assets & iPXE | $(status_emoji '${{ needs.ci-build-assets.result }}') ${{ needs.ci-build-assets.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - id: check_failures
         name: Check for Failures
         run: |
-          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }}"
+          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }}"
           if echo "${ALL_JOBS}" | grep -qE "(failure|cancelled)"; then
             echo "::error::One or more CI jobs failed"
             exit 1

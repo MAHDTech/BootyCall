@@ -184,7 +184,7 @@ fn render_ttf_text(
         let scaled = base_glyph.scaled(scale);
         let h_metrics = scaled.h_metrics();
         let positioned = scaled.positioned(point(caret.round(), v_metrics.ascent.round()));
-        caret += h_metrics.advance_width;
+        caret += h_metrics.advance_width + 1.0;
         glyphs.push(positioned);
     }
 

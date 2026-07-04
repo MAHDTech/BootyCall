@@ -345,8 +345,6 @@ jobs:
           --no-eval-cache
           --impure
           --keep-going
-          --refresh
-          --verbose
 
   ci-build-assets:
     name: Build Assets & iPXE (${{ matrix.arch }})

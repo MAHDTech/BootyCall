@@ -1,5 +1,6 @@
+use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 
 pub const WIDTH: usize = 160;
@@ -11,6 +12,8 @@ pub struct Framebuffer {
     buffer: [u8; WIDTH * HEIGHT],
     // LUT to convert grayscale to RGB565
     lut: [u16; 256],
+    // Cached file descriptor to the framebuffer
+    file: Option<File>,
 }
 
 impl Default for Framebuffer {
@@ -31,9 +34,16 @@ impl Framebuffer {
             *lut_entry = ((val as u16 & 0xFF) << 8) | ((val as u16 >> 8) & 0xFF);
         }
 
+        let file = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_SYNC)
+            .open(FB_PATH)
+            .ok();
+
         Self {
             buffer: [0; WIDTH * HEIGHT],
             lut,
+            file,
         }
     }
 
@@ -47,7 +57,7 @@ impl Framebuffer {
         }
     }
 
-    pub fn flush(&self) -> std::io::Result<()> {
+    pub fn flush(&mut self) -> std::io::Result<()> {
         let mut packed = Vec::with_capacity(WIDTH * HEIGHT * 2);
         for &gray in self.buffer.iter() {
             let rgb565 = self.lut[gray as usize];
@@ -55,12 +65,23 @@ impl Framebuffer {
             packed.push((rgb565 >> 8) as u8);
         }
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_SYNC)
-            .open(FB_PATH)?;
+        if self.file.is_none() {
+            self.file = OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_SYNC)
+                .open(FB_PATH)
+                .ok();
+        }
 
-        file.write_all(&packed)?;
+        if let Some(ref mut file) = self.file {
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&packed)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Framebuffer device file not available",
+            ));
+        }
         Ok(())
     }
 }

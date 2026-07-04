@@ -118,6 +118,10 @@ impl StateStore {
             mac: mac.map(|m| m.to_ascii_lowercase().replace('-', ":")),
             message: message.to_string(),
         });
+        let len = logs.len();
+        if len > 200 {
+            logs.drain(0..len - 200);
+        }
     }
 
     pub fn list_logs(&self) -> Vec<LogEvent> {

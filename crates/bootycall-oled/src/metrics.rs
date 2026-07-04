@@ -1,4 +1,4 @@
-use sysinfo::{Components, Disks, System};
+use sysinfo::{Components, Disks, ProcessesToUpdate, System};
 
 pub struct SystemMetrics {
     sys: System,
@@ -22,9 +22,27 @@ impl SystemMetrics {
     }
 
     pub fn refresh(&mut self) {
-        self.sys.refresh_all();
+        // Deprecated, use targeted refresh methods instead.
+    }
+
+    pub fn refresh_cpu(&mut self) {
+        self.sys.refresh_cpu_all();
+    }
+
+    pub fn refresh_memory(&mut self) {
+        self.sys.refresh_memory();
+    }
+
+    pub fn refresh_components(&mut self) {
         self.components.refresh(true);
+    }
+
+    pub fn refresh_disks(&mut self) {
         self.disks.refresh(true);
+    }
+
+    pub fn refresh_processes(&mut self) {
+        self.sys.refresh_processes(ProcessesToUpdate::All, true);
     }
 
     pub fn get_hostname(&self) -> String {

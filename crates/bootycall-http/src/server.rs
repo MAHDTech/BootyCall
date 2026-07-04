@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 
 use bootycall_core::config::{Config, HostConfig};
 use bootycall_core::state::{HostStatus, StateStore};
@@ -92,15 +91,10 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let mut file = match tokio::fs::File::open(&full_path).await {
+    let file = match tokio::fs::File::open(&full_path).await {
         Ok(f) => f,
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
-
-    let mut contents = Vec::new();
-    if file.read_to_end(&mut contents).await.is_err() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let content_type = match ext.to_lowercase().as_str() {
@@ -114,7 +108,10 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
         _ => "application/octet-stream",
     };
 
-    Ok(([(header::CONTENT_TYPE, content_type)], contents).into_response())
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = axum::body::Body::from_stream(stream);
+
+    Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
 async fn serve_asset(path: &str) -> Response {

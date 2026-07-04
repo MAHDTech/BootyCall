@@ -41,18 +41,44 @@ pub async fn run_oled_manager(
     let mut ss_dx = 1;
     let mut ss_dy = 1;
 
-    loop {
-        sys_metrics.refresh();
+    let mut last_ssh_check = Instant::now() - Duration::from_secs(10);
+    let mut active_ssh = false;
 
-        // 1. Check for activity triggers
-        let active_ssh = sys_metrics.active_ssh_sessions() > 0;
-        let active_pxe = state_store.has_recent_activity(Duration::from_secs(30)); // Assuming this method exists or we track it
+    loop {
+        let now = Instant::now();
+
+        // 1. Only poll active SSH sessions every 5 seconds to prevent procfs spam
+        if now.duration_since(last_ssh_check) >= Duration::from_secs(5) {
+            sys_metrics.refresh_processes();
+            active_ssh = sys_metrics.active_ssh_sessions() > 0;
+            last_ssh_check = now;
+        }
+
+        // 2. Check for activity triggers
+        let active_pxe = state_store.has_recent_activity(Duration::from_secs(30));
 
         if active_ssh || active_pxe {
-            last_activity = Instant::now();
+            last_activity = now;
             current_mode = DisplayMode::Metrics;
         } else if last_activity.elapsed() > SCREENSAVER_TIMEOUT {
             current_mode = DisplayMode::Screensaver;
+        }
+
+        // 3. Only refresh display-specific metrics if we are in Metrics mode
+        if current_mode == DisplayMode::Metrics {
+            if last_page_flip.elapsed() > PAGE_DURATION {
+                page_index = (page_index + 1) % 8; // 8 pages
+                last_page_flip = now;
+            }
+
+            // Only refresh the subsystem that is currently being displayed!
+            match page_index {
+                3 => sys_metrics.refresh_components(), // CPU Temp
+                4 => sys_metrics.refresh_cpu(),        // CPU Usage
+                5 => sys_metrics.refresh_memory(),     // RAM Usage
+                6 => sys_metrics.refresh_disks(),      // Disk Usage
+                _ => {}                                // Others don't need refresh
+            }
         }
 
         fb.clear();
@@ -62,9 +88,9 @@ pub async fn run_oled_manager(
 
             match current_mode {
                 DisplayMode::Screensaver => {
-                    // Update bounce logic
-                    let width_tars = 29; // 4 characters * 8px = 32px (actual bounds: 29px)
-                    let height_tars = 21; // 12px 'TARS' + 8px braille + 1px gap = 21px
+                    // Update bounce logic (TARS text moves every 1 second)
+                    let width_tars = 29;
+                    let height_tars = 21;
 
                     let min_y = VISIBLE_Y_START as isize;
                     let max_y = (HEIGHT - height_tars) as isize;
@@ -86,11 +112,6 @@ pub async fn run_oled_manager(
                     renderer.draw_braille(ss_x as usize + 3, ss_y as usize + 13, 3, 3, 8);
                 }
                 DisplayMode::Metrics => {
-                    if last_page_flip.elapsed() > PAGE_DURATION {
-                        page_index = (page_index + 1) % 8; // 8 pages
-                        last_page_flip = Instant::now();
-                    }
-
                     let (label, value, icon) = match page_index {
                         0 => (
                             "HOSTNAME",
@@ -176,7 +197,7 @@ pub async fn run_oled_manager(
                 let _ = fb.flush();
                 break;
             }
-            _ = sleep(Duration::from_millis(100)) => {}
+            _ = sleep(Duration::from_millis(1000)) => {}
         }
     }
     Ok(())

@@ -24,6 +24,13 @@ fn set_led(path: &str, value: u8) {
     }
 }
 
+fn set_led_cached(path: &str, value: u8, last_value: &mut Option<u8>) {
+    if Some(value) != *last_value {
+        set_led(path, value);
+        *last_value = Some(value);
+    }
+}
+
 pub fn activate_blue_led() {
     set_led(LED_BLUE_PATH, 255);
     set_led(LED_WHITE_PATH, 0);
@@ -70,6 +77,8 @@ pub async fn run_led_manager(
 ) {
     let mut state = false;
     let mut was_active = false;
+    let mut last_blue = None;
+    let mut last_white = None;
     info!("Starting LED Manager Task...");
 
     loop {
@@ -92,16 +101,16 @@ pub async fn run_led_manager(
             _ = sleep(Duration::from_millis(500)) => {
                 if active {
                     if state {
-                        set_led(LED_BLUE_PATH, 255);
-                        set_led(LED_WHITE_PATH, 0);
+                        set_led_cached(LED_BLUE_PATH, 255, &mut last_blue);
+                        set_led_cached(LED_WHITE_PATH, 0, &mut last_white);
                     } else {
-                        set_led(LED_BLUE_PATH, 0);
-                        set_led(LED_WHITE_PATH, 0);
+                        set_led_cached(LED_BLUE_PATH, 0, &mut last_blue);
+                        set_led_cached(LED_WHITE_PATH, 0, &mut last_white);
                     }
                     state = !state;
                 } else {
-                    set_led(LED_BLUE_PATH, 255);
-                    set_led(LED_WHITE_PATH, 0);
+                    set_led_cached(LED_BLUE_PATH, 255, &mut last_blue);
+                    set_led_cached(LED_WHITE_PATH, 0, &mut last_white);
                     state = true;
                 }
             }
@@ -109,7 +118,9 @@ pub async fn run_led_manager(
     }
 
     // Set to solid white on clean shutdown
-    activate_white_led();
+    set_led_cached(LED_WHITE_PATH, 255, &mut last_white);
+    set_led_cached(LED_BLUE_PATH, 0, &mut last_blue);
+    info!("LED set to solid White (Service Stopped)");
 }
 
 /// Dynamic LED testing for testing color and blinking states.

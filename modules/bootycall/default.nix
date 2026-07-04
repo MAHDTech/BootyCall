@@ -19,30 +19,28 @@ let
     lib.toInt (lib.last parts);
 
   # Generate the bootycall.yaml configuration file from Nix options
-  generatedConfigFile = pkgs.writeText "bootycall.yaml" (
-    builtins.toJSON {
-      server = {
-        http_bind = cfg.server.httpBind;
-        tftp_bind = cfg.server.tftpBind;
-        tftp_root = cfg.server.tftpRoot;
-        proxy_dhcp_bind = cfg.server.proxyDhcpBind;
-        cache_dir = cfg.server.cacheDir;
-        default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
-        default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
-      };
-      hosts = map (
-        h:
-        {
-          inherit (h) mac name;
-          image_path = h.imagePath;
-        }
-        // lib.optionalAttrs (h.bootloader != null) { inherit (h) bootloader; }
-        // lib.optionalAttrs (h.kernelPath != null) { kernel_path = h.kernelPath; }
-        // lib.optionalAttrs (h.initrdPath != null) { initrd_path = h.initrdPath; }
-        // lib.optionalAttrs (h.cmdline != null) { inherit (h) cmdline; }
-      ) cfg.hosts;
-    }
-  );
+  generatedConfigFile = (pkgs.formats.yaml { }).generate "bootycall.yaml" {
+    server = {
+      http_bind = cfg.server.httpBind;
+      tftp_bind = cfg.server.tftpBind;
+      tftp_root = cfg.server.tftpRoot;
+      proxy_dhcp_bind = cfg.server.proxyDhcpBind;
+      cache_dir = cfg.server.cacheDir;
+      default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
+      default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
+    };
+    hosts = map (
+      h:
+      {
+        inherit (h) mac name;
+        image_path = h.imagePath;
+      }
+      // lib.optionalAttrs (h.bootloader != null) { inherit (h) bootloader; }
+      // lib.optionalAttrs (h.kernelPath != null) { kernel_path = h.kernelPath; }
+      // lib.optionalAttrs (h.initrdPath != null) { initrd_path = h.initrdPath; }
+      // lib.optionalAttrs (h.cmdline != null) { inherit (h) cmdline; }
+    ) cfg.hosts;
+  };
 
   # The config file to use: either user-provided or generated from options
   configFile = if cfg.configFile != null then cfg.configFile else generatedConfigFile;

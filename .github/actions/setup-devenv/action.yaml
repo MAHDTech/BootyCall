@@ -45,7 +45,7 @@ runs:
     - id: enable_cachix
       name: Enable Cachix
       if: inputs.cachix-cache-name != ''
-      uses: cachix/cachix-action@v16
+      uses: cachix/cachix-action@v17
       with:
         name: ${{ inputs.cachix-cache-name }}
         authToken: ${{ inputs.cachix-auth-token }}

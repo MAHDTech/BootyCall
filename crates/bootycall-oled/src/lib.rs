@@ -177,7 +177,16 @@ fn render_ttf_text(
         .ok_or_else(|| anyhow::anyhow!("Failed to parse font data"))?;
     let scale = Scale::uniform(scale_px);
     let v_metrics = font.v_metrics(scale);
-    let glyphs: Vec<_> = font.layout(text, scale, point(0.0, v_metrics.ascent)).collect();
+    let mut glyphs = Vec::new();
+    let mut caret = 0.0;
+    for c in text.chars() {
+        let base_glyph = font.glyph(c);
+        let scaled = base_glyph.scaled(scale);
+        let h_metrics = scaled.h_metrics();
+        let positioned = scaled.positioned(point(caret.round(), v_metrics.ascent.round()));
+        caret += h_metrics.advance_width;
+        glyphs.push(positioned);
+    }
 
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
@@ -197,7 +206,7 @@ fn render_ttf_text(
                 let px = (bb.min.x + x as i32) as usize;
                 let py = (bb.min.y + y as i32) as usize;
                 let intensity = (v * 255.0) as u8;
-                if intensity > 127 {
+                if intensity > 64 {
                     pixels.push((px, py, 255));
                 }
             });

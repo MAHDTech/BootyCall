@@ -197,8 +197,8 @@ fn render_ttf_text(
                 let px = (bb.min.x + x as i32) as usize;
                 let py = (bb.min.y + y as i32) as usize;
                 let intensity = (v * 255.0) as u8;
-                if intensity > 16 {
-                    pixels.push((px, py, intensity));
+                if intensity > 127 {
+                    pixels.push((px, py, 255));
                 }
             });
         }

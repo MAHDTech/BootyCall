@@ -20,8 +20,8 @@ enum DisplayMode {
     Metrics,
 }
 
-const VISIBLE_Y_START: usize = 20;
-const VISIBLE_HEIGHT: usize = 40;
+const VISIBLE_Y_START: usize = 28;
+const VISIBLE_HEIGHT: usize = 32;
 
 pub async fn run_oled_manager(
     state_store: StateStore,
@@ -131,10 +131,10 @@ pub async fn run_oled_manager(
 
                     // Draw label (top aligned inside visible window)
                     renderer.draw_bitmap(12, VISIBLE_Y_START, icon, 16, 16);
-                    renderer.draw_text(32, VISIBLE_Y_START + 2, label, true);
+                    renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
 
                     // Draw separator in the middle of visible window
-                    renderer.draw_line(12, VISIBLE_Y_START + 18, WIDTH - 12, VISIBLE_Y_START + 18, 128);
+                    renderer.draw_line(12, VISIBLE_Y_START + 15, WIDTH - 12, VISIBLE_Y_START + 15, 128);
 
                     // Draw metric value (bottom aligned inside visible window)
                     let text_w = Renderer::measure_text(&value, true);
@@ -143,7 +143,7 @@ pub async fn run_oled_manager(
                     } else {
                         0
                     };
-                    renderer.draw_text(val_x, VISIBLE_Y_START + 22, &value, true);
+                    renderer.draw_text(val_x, VISIBLE_Y_START + 16, &value, true);
                 }
             }
         }
@@ -267,10 +267,10 @@ pub fn oled_test(
 
             // Calculate y based on vertical alignment inside the visible window
             let y = match vert {
-                "top" => VISIBLE_Y_START + 2,
+                "top" => VISIBLE_Y_START,
                 "bottom" => {
                     if text_h < VISIBLE_HEIGHT {
-                        VISIBLE_Y_START + VISIBLE_HEIGHT - text_h - 2
+                        VISIBLE_Y_START + VISIBLE_HEIGHT - text_h
                     } else {
                         VISIBLE_Y_START
                     }
@@ -315,8 +315,8 @@ pub fn oled_test(
             };
 
             let y = match vert {
-                "top" => VISIBLE_Y_START + 2,
-                "bottom" => VISIBLE_Y_START + VISIBLE_HEIGHT - line_height - 2,
+                "top" => VISIBLE_Y_START,
+                "bottom" => VISIBLE_Y_START + VISIBLE_HEIGHT - line_height,
                 _ => VISIBLE_Y_START + (VISIBLE_HEIGHT - line_height) / 2, // middle
             };
 

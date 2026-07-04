@@ -70,7 +70,7 @@ impl SystemMetrics {
                     if path.file_name().and_then(|s| s.to_str()).map_or(false, |s| s.starts_with("thermal_zone")) {
                         let temp_file = path.join("temp");
                         if let Ok(content) = std::fs::read_to_string(temp_file) {
-                            if let Ok(temp_raw) = content.trim().parse::<f64>() {
+                            if let Ok(temp_raw) = content.trim().parse::<f32>() {
                                 let temp_c = temp_raw / 1000.0;
                                 if temp_c > max_temp && temp_c < 150.0 {
                                     max_temp = temp_c;

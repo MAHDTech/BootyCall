@@ -66,11 +66,18 @@ async fn main() -> Result<(), anyhow::Error> {
     // If subcommands are passed, run them immediately and exit
     if let Some(cmd) = args.command {
         match cmd {
-            Commands::OledTest { size, alignment, text, font } => {
-                info!("Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)");
+            Commands::OledTest {
+                size,
+                alignment,
+                text,
+                font,
+            } => {
+                info!(
+                    "Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)"
+                );
 
                 // Validate size based on custom font vs built-in font
-                if let Some(ref path) = font {
+                if font.is_some() {
                     if !(6..=60).contains(&size) {
                         return Err(anyhow::anyhow!(
                             "Error: Custom font size {} is out of range. Must be between 6 and 60.",
@@ -86,10 +93,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 // Validate alignment format
                 let valid_aligns = [
-                    "left", "center", "right",
-                    "left-top", "left-bottom",
-                    "center-top", "center-bottom",
-                    "right-top", "right-bottom"
+                    "left",
+                    "center",
+                    "right",
+                    "left-top",
+                    "left-bottom",
+                    "center-top",
+                    "center-bottom",
+                    "right-top",
+                    "right-bottom",
                 ];
                 if !valid_aligns.contains(&alignment.as_str()) {
                     return Err(anyhow::anyhow!(
@@ -102,7 +114,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 return Ok(());
             }
             Commands::LedTest { color, blinking } => {
-                info!("Running LED test... (Note: stop the bootycall service to prevent overwriting)");
+                info!(
+                    "Running LED test... (Note: stop the bootycall service to prevent overwriting)"
+                );
                 bootycall_led::led_test(&color, blinking)?;
                 return Ok(());
             }
@@ -228,7 +242,8 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {

@@ -134,7 +134,13 @@ pub async fn run_oled_manager(
                     renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
 
                     // Draw separator in the middle of visible window
-                    renderer.draw_line(12, VISIBLE_Y_START + 15, WIDTH - 12, VISIBLE_Y_START + 15, 128);
+                    renderer.draw_line(
+                        12,
+                        VISIBLE_Y_START + 15,
+                        WIDTH - 12,
+                        VISIBLE_Y_START + 15,
+                        128,
+                    );
 
                     // Draw metric value (bottom aligned inside visible window)
                     let text_w = Renderer::measure_text(&value, true);
@@ -165,12 +171,18 @@ pub async fn run_oled_manager(
     Ok(())
 }
 
+/// A pixel representation containing (x, y, intensity)
+type TextPixel = (usize, usize, u8);
+
+/// A text rendering result containing (width, height, pixels)
+type RenderedText = (usize, usize, Vec<TextPixel>);
+
 /// Layout helper for rendering a TTF/OTF font dynamically.
 fn render_ttf_text(
     font_data: &[u8],
     text: &str,
     scale_px: f32,
-) -> Result<(usize, usize, Vec<(usize, usize, u8)>), anyhow::Error> {
+) -> Result<RenderedText, anyhow::Error> {
     use rusttype::{Font, Scale, point};
 
     let font = Font::try_from_bytes(font_data)
@@ -197,10 +209,18 @@ fn render_ttf_text(
 
     for glyph in &glyphs {
         if let Some(bb) = glyph.pixel_bounding_box() {
-            if bb.min.x < min_x { min_x = bb.min.x; }
-            if bb.max.x > max_x { max_x = bb.max.x; }
-            if bb.min.y < min_y { min_y = bb.min.y; }
-            if bb.max.y > max_y { max_y = bb.max.y; }
+            if bb.min.x < min_x {
+                min_x = bb.min.x;
+            }
+            if bb.max.x > max_x {
+                max_x = bb.max.x;
+            }
+            if bb.min.y < min_y {
+                min_y = bb.min.y;
+            }
+            if bb.max.y > max_y {
+                max_y = bb.max.y;
+            }
 
             glyph.draw(|x, y, v| {
                 let px = (bb.min.x + x as i32) as usize;
@@ -241,7 +261,7 @@ pub fn oled_test(
 ) -> Result<(), anyhow::Error> {
     // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
     let parts: Vec<&str> = alignment.split('-').collect();
-    let horiz = parts.get(0).copied().unwrap_or("left");
+    let horiz = parts.first().copied().unwrap_or("left");
     let vert = parts.get(1).copied().unwrap_or("middle");
 
     let mut fb = Framebuffer::new();

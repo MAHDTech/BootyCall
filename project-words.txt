@@ -131,3 +131,4 @@ wakatime
 yzhang
 dont
 rusttype
+horiz

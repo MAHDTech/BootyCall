@@ -1,4 +1,3 @@
-use crate::assets::{FONT_LARGE, FONT_SMALL};
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 
 pub struct Renderer<'a> {

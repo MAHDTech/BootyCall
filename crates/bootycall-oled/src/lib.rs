@@ -268,8 +268,6 @@ pub fn oled_test(
     fb.clear();
 
     {
-        let mut renderer = Renderer::new(&mut fb);
-
         if let Some(path) = font_path {
             // Read and render custom TTF font
             let font_data = std::fs::read(path)?;
@@ -323,7 +321,7 @@ pub fn oled_test(
             use embedded_graphics::{
                 mono_font::{ascii::{
                     FONT_4X6, FONT_5X7, FONT_5X8, FONT_6X9, FONT_6X10, FONT_6X12,
-                    FONT_6X13, FONT_7X13, FONT_7X14, FONT_8X13, FONT_9X15, FONT_9X18,
+                    FONT_6X13, FONT_7X14, FONT_9X15, FONT_9X18,
                     FONT_10X20,
                 }, MonoTextStyle},
                 pixelcolor::BinaryColor,

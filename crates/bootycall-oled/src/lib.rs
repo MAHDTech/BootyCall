@@ -63,8 +63,8 @@ pub async fn run_oled_manager(
             match current_mode {
                 DisplayMode::Screensaver => {
                     // Update bounce logic
-                    let width_tars = 36; // 4 chars * 6px + padding = 24..36px
-                    let height_tars = 24; // 12px 'TARS' + 12px braille = 24px
+                    let width_tars = 29; // 4 characters * 8px = 32px (actual bounds: 29px)
+                    let height_tars = 21; // 12px 'TARS' + 8px braille + 1px gap = 21px
 
                     let min_y = VISIBLE_Y_START as isize;
                     let max_y = (HEIGHT - height_tars) as isize;
@@ -83,7 +83,7 @@ pub async fn run_oled_manager(
                     ss_y += ss_dy;
 
                     renderer.draw_text(ss_x as usize, ss_y as usize, "TARS", false);
-                    renderer.draw_braille(ss_x as usize + 2, ss_y as usize + 12, 4, 4, 12);
+                    renderer.draw_braille(ss_x as usize + 3, ss_y as usize + 13, 3, 3, 8);
                 }
                 DisplayMode::Metrics => {
                     if last_page_flip.elapsed() > PAGE_DURATION {
@@ -136,7 +136,8 @@ pub async fn run_oled_manager(
                     };
 
                     // Draw label (top aligned inside visible window)
-                    renderer.draw_bitmap(12, VISIBLE_Y_START, icon, 16, 16);
+                    let icon_y = if label == "UPTIME" { VISIBLE_Y_START + 1 } else { VISIBLE_Y_START };
+                    renderer.draw_bitmap(12, icon_y, icon, 16, 16);
                     renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
 
                     // Draw separator in the middle of visible window

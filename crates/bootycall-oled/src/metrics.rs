@@ -63,6 +63,24 @@ impl SystemMetrics {
                 max_temp = component.temperature().unwrap_or(0.0);
             }
         }
+        if max_temp == 0.0 {
+            if let Ok(entries) = std::fs::read_dir("/sys/class/thermal") {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.file_name().and_then(|s| s.to_str()).map_or(false, |s| s.starts_with("thermal_zone")) {
+                        let temp_file = path.join("temp");
+                        if let Ok(content) = std::fs::read_to_string(temp_file) {
+                            if let Ok(temp_raw) = content.trim().parse::<f64>() {
+                                let temp_c = temp_raw / 1000.0;
+                                if temp_c > max_temp && temp_c < 150.0 {
+                                    max_temp = temp_c;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if max_temp > 0.0 {
             format!("{:.1}C", max_temp)
         } else {

@@ -25,7 +25,7 @@ struct Cli {
 enum Commands {
     /// Test OLED rendering with custom text, size, and layout
     OledTest {
-        /// Font size in points. For built-in fonts, choose 12 (small) or 16 (large). For custom TTF/OTF fonts, choose a value between 6 and 60.
+        /// Font size in points. Supported range: between 6 and 40.
         #[arg(long, default_value = "12")]
         size: usize,
         /// Layout alignment. Options: left, center, right, left-top, left-bottom, center-top, center-bottom, right-top, right-bottom
@@ -34,9 +34,6 @@ enum Commands {
         /// Text string to display on the screen
         #[arg(long, default_value = "Hello World")]
         text: String,
-        /// Path to a custom TrueType (.ttf/.otf) font file for dynamic rendering
-        #[arg(long)]
-        font: Option<String>,
     },
     /// Test LED control
     LedTest {
@@ -70,21 +67,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 size,
                 alignment,
                 text,
-                font,
             } => {
                 info!(
                     "Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)"
                 );
 
-                // Validate size based on custom font vs built-in font
-                if font.is_some() {
-                    if !(6..=60).contains(&size) {
-                        return Err(anyhow::anyhow!(
-                            "Error: Custom font size {} is out of range. Must be between 6 and 60.",
-                            size
-                        ));
-                    }
-                } else if !(6..=40).contains(&size) {
+                // Validate size based on built-in font
+                if !(6..=40).contains(&size) {
                     return Err(anyhow::anyhow!(
                         "Error: Built-in font size {} is out of range. Must be between 6 and 40.",
                         size
@@ -110,7 +99,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     ));
                 }
 
-                bootycall_oled::oled_test(size, &alignment, &text, font.as_deref())?;
+                bootycall_oled::oled_test(size, &alignment, &text)?;
                 return Ok(());
             }
             Commands::LedTest { color, blinking } => {

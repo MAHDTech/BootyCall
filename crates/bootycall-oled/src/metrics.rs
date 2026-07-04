@@ -64,17 +64,22 @@ impl SystemMetrics {
             }
         }
         if max_temp == 0.0 {
-            if let Ok(entries) = std::fs::read_dir("/sys/class/thermal") {
+            let read_dir = std::fs::read_dir("/sys/class/thermal");
+            if let Ok(entries) = read_dir {
                 for entry in entries.filter_map(Result::ok) {
                     let path = entry.path();
-                    if path.file_name().and_then(|s| s.to_str()).map_or(false, |s| s.starts_with("thermal_zone")) {
+                    if path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.starts_with("thermal_zone"))
+                    {
                         let temp_file = path.join("temp");
-                        if let Ok(content) = std::fs::read_to_string(temp_file) {
-                            if let Ok(temp_raw) = content.trim().parse::<f32>() {
-                                let temp_c = temp_raw / 1000.0;
-                                if temp_c > max_temp && temp_c < 150.0 {
-                                    max_temp = temp_c;
-                                }
+                        let content = std::fs::read_to_string(temp_file);
+                        let temp_raw = content.as_ref().map(|c| c.trim().parse::<f32>());
+                        if let Ok(Ok(temp_raw)) = temp_raw {
+                            let temp_c = temp_raw / 1000.0;
+                            if temp_c > max_temp && temp_c < 150.0 {
+                                max_temp = temp_c;
                             }
                         }
                     }

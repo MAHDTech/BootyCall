@@ -63,32 +63,47 @@ impl<'a> Renderer<'a> {
 
     pub fn draw_text(&mut self, x: usize, y: usize, text: &str, use_large_font: bool) {
         use embedded_graphics::{
-            mono_font::{ascii::{FONT_6X12, FONT_9X15}, MonoTextStyleBuilder},
+            mono_font::{
+                MonoTextStyleBuilder,
+                ascii::{FONT_6X12, FONT_9X15},
+            },
             pixelcolor::BinaryColor,
             prelude::*,
             text::{Baseline, Text, TextStyleBuilder},
         };
 
-        let font = if use_large_font { &FONT_9X15 } else { &FONT_6X12 };
+        let font = if use_large_font {
+            &FONT_9X15
+        } else {
+            &FONT_6X12
+        };
         let text_style = MonoTextStyleBuilder::new()
             .font(font)
             .text_color(BinaryColor::On)
             .build();
         let style = TextStyleBuilder::new().baseline(Baseline::Top).build();
 
-        let text_obj = Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
+        let text_obj =
+            Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
         let _ = text_obj.draw(self.fb);
     }
 
     pub fn measure_text(text: &str, use_large_font: bool) -> usize {
         use embedded_graphics::{
-            mono_font::{ascii::{FONT_6X12, FONT_9X15}, MonoTextStyle},
+            mono_font::{
+                MonoTextStyle,
+                ascii::{FONT_6X12, FONT_9X15},
+            },
             pixelcolor::BinaryColor,
             prelude::*,
             text::{Baseline, Text, TextStyleBuilder},
         };
 
-        let font = if use_large_font { &FONT_9X15 } else { &FONT_6X12 };
+        let font = if use_large_font {
+            &FONT_9X15
+        } else {
+            &FONT_6X12
+        };
         let text_style = MonoTextStyle::new(font, BinaryColor::On);
         let style = TextStyleBuilder::new().baseline(Baseline::Top).build();
 

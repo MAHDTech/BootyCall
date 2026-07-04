@@ -136,7 +136,11 @@ pub async fn run_oled_manager(
                     };
 
                     // Draw label (top aligned inside visible window)
-                    let icon_y = if label == "UPTIME" { VISIBLE_Y_START + 1 } else { VISIBLE_Y_START };
+                    let icon_y = if label == "UPTIME" {
+                        VISIBLE_Y_START + 1
+                    } else {
+                        VISIBLE_Y_START
+                    };
                     renderer.draw_bitmap(12, icon_y, icon, 16, 16);
                     renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
 
@@ -179,11 +183,7 @@ pub async fn run_oled_manager(
 }
 
 /// Dynamic OLED rendering test for testing font size and alignment using native pixel fonts.
-pub fn oled_test(
-    size: usize,
-    alignment: &str,
-    text: &str,
-) -> Result<(), anyhow::Error> {
+pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
     // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
     let parts: Vec<&str> = alignment.split('-').collect();
     let horiz = parts.first().copied().unwrap_or("left");
@@ -194,11 +194,13 @@ pub fn oled_test(
 
     {
         use embedded_graphics::{
-            mono_font::{ascii::{
-                FONT_4X6, FONT_5X7, FONT_5X8, FONT_6X9, FONT_6X10, FONT_6X12,
-                FONT_6X13, FONT_7X14, FONT_9X15, FONT_9X18,
-                FONT_10X20,
-            }, MonoTextStyle},
+            mono_font::{
+                MonoTextStyle,
+                ascii::{
+                    FONT_4X6, FONT_5X7, FONT_5X8, FONT_6X9, FONT_6X10, FONT_6X12, FONT_6X13,
+                    FONT_7X14, FONT_9X15, FONT_9X18, FONT_10X20,
+                },
+            },
             pixelcolor::BinaryColor,
             prelude::*,
             text::{Baseline, Text, TextStyleBuilder},
@@ -262,7 +264,8 @@ pub fn oled_test(
             } // middle
         };
 
-        let text_obj = Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
+        let text_obj =
+            Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
         let _ = text_obj.draw(&mut fb);
     }
 

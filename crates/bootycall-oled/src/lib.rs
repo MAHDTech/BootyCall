@@ -178,7 +178,7 @@ fn render_ttf_text(
     let scale = Scale::uniform(scale_px);
     let v_metrics = font.v_metrics(scale);
     let mut glyphs = Vec::new();
-    let mut caret = 0.0;
+    let mut caret: f32 = 0.0;
     for c in text.chars() {
         let base_glyph = font.glyph(c);
         let scaled = base_glyph.scaled(scale);

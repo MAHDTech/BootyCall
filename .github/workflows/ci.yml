@@ -38,6 +38,7 @@ jobs:
     name: Setup Environment (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -212,6 +213,7 @@ jobs:
     name: Cargo Test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: true
       matrix:
         include:
           - arch: amd64
@@ -256,6 +258,7 @@ jobs:
     name: Cargo Clippy (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -301,6 +304,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -348,6 +352,7 @@ jobs:
     name: Build Assets & iPXE (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64

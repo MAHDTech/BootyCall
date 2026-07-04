@@ -20,6 +20,9 @@ enum DisplayMode {
     Metrics,
 }
 
+const VISIBLE_Y_START: usize = 20;
+const VISIBLE_HEIGHT: usize = 40;
+
 pub async fn run_oled_manager(
     state_store: StateStore,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
@@ -126,21 +129,21 @@ pub async fn run_oled_manager(
                         _ => ("UNKNOWN", String::new(), &crate::assets::ICON_HOST),
                     };
 
-                    // Draw label (top aligned)
-                    renderer.draw_bitmap(12, 10, icon, 16, 16);
-                    renderer.draw_text(32, 12, label, true);
+                    // Draw label (top aligned inside visible window)
+                    renderer.draw_bitmap(12, VISIBLE_Y_START, icon, 16, 16);
+                    renderer.draw_text(32, VISIBLE_Y_START + 2, label, true);
 
-                    // Draw separator
-                    renderer.draw_line(12, 30, WIDTH - 12, 30, 128);
+                    // Draw separator in the middle of visible window
+                    renderer.draw_line(12, VISIBLE_Y_START + 18, WIDTH - 12, VISIBLE_Y_START + 18, 128);
 
-                    // Draw metric value (bottom aligned)
+                    // Draw metric value (bottom aligned inside visible window)
                     let text_w = Renderer::measure_text(&value, true);
                     let val_x = if text_w < WIDTH {
                         (WIDTH - text_w) / 2
                     } else {
                         0
                     };
-                    renderer.draw_text(val_x, 40, &value, true);
+                    renderer.draw_text(val_x, VISIBLE_Y_START + 22, &value, true);
                 }
             }
         }
@@ -262,21 +265,21 @@ pub fn oled_test(
                 _ => 5, // left
             };
 
-            // Calculate y based on vertical alignment
+            // Calculate y based on vertical alignment inside the visible window
             let y = match vert {
-                "top" => 5,
+                "top" => VISIBLE_Y_START + 2,
                 "bottom" => {
-                    if text_h < HEIGHT {
-                        HEIGHT - text_h - 5
+                    if text_h < VISIBLE_HEIGHT {
+                        VISIBLE_Y_START + VISIBLE_HEIGHT - text_h - 2
                     } else {
-                        0
+                        VISIBLE_Y_START
                     }
                 }
                 _ => {
-                    if text_h < HEIGHT {
-                        (HEIGHT - text_h) / 2
+                    if text_h < VISIBLE_HEIGHT {
+                        VISIBLE_Y_START + (VISIBLE_HEIGHT - text_h) / 2
                     } else {
-                        0
+                        VISIBLE_Y_START
                     }
                 } // middle
             };
@@ -312,9 +315,9 @@ pub fn oled_test(
             };
 
             let y = match vert {
-                "top" => 5,
-                "bottom" => HEIGHT - line_height - 5,
-                _ => (HEIGHT - line_height) / 2, // middle
+                "top" => VISIBLE_Y_START + 2,
+                "bottom" => VISIBLE_Y_START + VISIBLE_HEIGHT - line_height - 2,
+                _ => VISIBLE_Y_START + (VISIBLE_HEIGHT - line_height) / 2, // middle
             };
 
             // Draw text using static fonts

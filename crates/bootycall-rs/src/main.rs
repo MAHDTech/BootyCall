@@ -84,9 +84,9 @@ async fn main() -> Result<(), anyhow::Error> {
                             size
                         ));
                     }
-                } else if size != 12 && size != 16 {
+                } else if !(6..=40).contains(&size) {
                     return Err(anyhow::anyhow!(
-                        "Error: Built-in font size {} is not supported. Use 12 (small) or 16 (large).",
+                        "Error: Built-in font size {} is out of range. Must be between 6 and 40.",
                         size
                     ));
                 }

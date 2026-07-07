@@ -34,7 +34,7 @@ in
   packages = with pkgs; [
     bashInteractive
     bootycall
-    cargo-edit # Adds the 'cargo upgrade'
+    cargo-edit # Adds 'cargo upgrade'
     figlet
     gh
     hello
@@ -74,16 +74,20 @@ in
 
   git-hooks = {
     excludes = [
+      ".*\\.drawio$"
       ".devenv/"
       "\\.git(/.*)?$"
       "^.vscode/"
-      "target/"
+      "^\\.cache(/.*)?$"
+      "^\\.devenv(/.*)?$"
+      "^\\.direnv(/.*)?$"
+      "^\\.git(/.*)?$"
       "^scratch(/.*)?$"
+      "target/"
     ];
     hooks = {
       actionlint.enable = true;
       action-validator.enable = true;
-
       check-json.enable = true;
       check-merge-conflicts.enable = true;
       check-shebang-scripts-are-executable = {
@@ -209,7 +213,6 @@ in
             "gruntfuggly.todo-tree"
             "hediet.vscode-drawio"
             "jnoortheen.nix-ide"
-            "mkhl.direnv"
             "nhoizey.gremlins"
             "pinage404.nix-extension-pack"
             "redhat.vscode-yaml"

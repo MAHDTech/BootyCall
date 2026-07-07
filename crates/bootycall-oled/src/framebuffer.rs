@@ -14,6 +14,8 @@ pub struct Framebuffer {
     lut: [u16; 256],
     // Cached file descriptor to the framebuffer
     file: Option<File>,
+    // Rotation state: 0 or 180 (defaults to 180 standalone)
+    pub rotation: u16,
 }
 
 impl Default for Framebuffer {
@@ -44,6 +46,7 @@ impl Framebuffer {
             buffer: [0; WIDTH * HEIGHT],
             lut,
             file,
+            rotation: 180,
         }
     }
 
@@ -59,10 +62,20 @@ impl Framebuffer {
 
     pub fn flush(&mut self) -> std::io::Result<()> {
         let mut packed = Vec::with_capacity(WIDTH * HEIGHT * 2);
-        for &gray in self.buffer.iter() {
-            let rgb565 = self.lut[gray as usize];
-            packed.push((rgb565 & 0xFF) as u8);
-            packed.push((rgb565 >> 8) as u8);
+        if self.rotation == 0 {
+            // Apply 180 degree rotation in user-space to cancel out the driver's 180 degree rotation
+            for &gray in self.buffer.iter().rev() {
+                let rgb565 = self.lut[gray as usize];
+                packed.push((rgb565 & 0xFF) as u8);
+                packed.push((rgb565 >> 8) as u8);
+            }
+        } else {
+            // Unrotated in user-space (let the driver's 180 degree rotation apply)
+            for &gray in self.buffer.iter() {
+                let rgb565 = self.lut[gray as usize];
+                packed.push((rgb565 & 0xFF) as u8);
+                packed.push((rgb565 >> 8) as u8);
+            }
         }
 
         if self.file.is_none() {

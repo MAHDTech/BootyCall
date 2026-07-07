@@ -14,6 +14,8 @@ use tokio::time::sleep;
 const PAGE_DURATION: Duration = Duration::from_secs(3);
 const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
 
+use gpio_cdev::{Chip, LineRequestFlags};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayMode {
     Screensaver,
@@ -28,6 +30,17 @@ pub async fn run_oled_manager(
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), anyhow::Error> {
     info!("Starting OLED Manager Task...");
+
+    // Try to open GPIO chip and line 44 for rackmount detection on startup.
+    // Group permissions for video group on /dev/gpiochip0 are handled via udev rules.
+    let detect_handle = Chip::new("/dev/gpiochip0")
+        .and_then(|mut chip| chip.get_line(44))
+        .and_then(|line| line.request(LineRequestFlags::INPUT, 0, "bootycall-detect"))
+        .map_err(|e| {
+            info!("GPIO rackmount detection not available (optional): {:?}", e);
+            e
+        })
+        .ok();
 
     let mut fb = Framebuffer::new();
     let mut sys_metrics = SystemMetrics::new();
@@ -185,6 +198,15 @@ pub async fn run_oled_manager(
                 }
             }
         }
+
+        // Read rackmount detection state: low (0) = docked (rotation 0), high/error = standalone (rotation 180)
+        let is_docked = if let Some(ref handle) = detect_handle {
+            handle.get_value().map(|val| val == 0).unwrap_or(false)
+        } else {
+            false
+        };
+
+        fb.rotation = if is_docked { 0 } else { 180 };
 
         if let Err(e) = fb.flush() {
             error!("Failed to write to framebuffer: {:?}", e);

@@ -1,6 +1,6 @@
 use bootycall_log::{debug, error, info, warn};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
@@ -127,17 +127,6 @@ fn is_error_packet(pkt: &[u8]) -> bool {
     }
     let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
     opcode == 5
-}
-
-fn resolve_safe_path(tftp_root: &Path, requested_path: &str) -> Option<PathBuf> {
-    let normalized = requested_path.replace('\\', "/");
-    let path = Path::new(&normalized);
-    for component in path.components() {
-        if let std::path::Component::ParentDir = component {
-            return None;
-        }
-    }
-    Some(tftp_root.join(path))
 }
 
 async fn handle_tftp_transfer(
@@ -412,7 +401,8 @@ pub async fn run_tftp_server(
                 }
             }
 
-            let safe_path = resolve_safe_path(&config_guard.server.tftp_root, &final_filename);
+            let safe_path =
+                bootycall_core::safe_join(&config_guard.server.tftp_root, &final_filename);
             (safe_path, mac_addr)
         };
 

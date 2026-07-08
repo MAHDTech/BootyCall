@@ -79,14 +79,11 @@ reboot
 "#;
 
 async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response, StatusCode> {
-    let path = Path::new(relative_path);
-    for component in path.components() {
-        if let std::path::Component::ParentDir = component {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    let full_path = match bootycall_core::safe_join(dir, relative_path) {
+        Some(p) => p,
+        None => return Err(StatusCode::FORBIDDEN),
+    };
 
-    let full_path = dir.join(path);
     if !full_path.exists() || !full_path.is_file() {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -96,7 +93,10 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = Path::new(relative_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     let content_type = match ext.to_lowercase().as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",

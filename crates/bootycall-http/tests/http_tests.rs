@@ -398,6 +398,59 @@ async fn test_api_logs_endpoint() {
     assert_eq!(arr[1]["message"], "Another test log");
 }
 
+async fn assert_http_traversal_blocked(port: u16, request_path: &str) {
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    let (status, _headers, body) = parse_http_response(&response);
+    // A rejected traversal must not disclose file contents. Accept 403 or 404
+    // (the resolver returns None for absolute paths → 403; missing files → 404).
+    assert!(
+        status.contains("403") || status.contains("404"),
+        "Expected 403/404 for {request_path:?}, got: {status}"
+    );
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        !body_str.contains("root:"),
+        "Response body must not contain /etc/passwd content for {request_path:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_http_cache_absolute_path_blocked() {
+    assert_http_traversal_blocked(26090, "/cache//etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_cache_parent_dir_blocked() {
+    assert_http_traversal_blocked(26091, "/cache/../../etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_static_absolute_path_blocked() {
+    assert_http_traversal_blocked(26092, "/static//etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_static_parent_dir_blocked() {
+    assert_http_traversal_blocked(26093, "/static/../../etc/passwd").await;
+}
+
 #[tokio::test]
 async fn test_root_redirect() {
     let port: u16 = 26083;

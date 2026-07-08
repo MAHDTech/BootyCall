@@ -285,15 +285,13 @@ async fn test_tftp_file_not_found() {
     );
 }
 
-#[tokio::test]
-async fn test_tftp_path_traversal_blocked() {
-    // Setup temporary directory for tftp root
+async fn assert_tftp_traversal_rejected(bind_port: u16, client_port: u16, requested: &str) {
     let tmp_dir = tempdir().unwrap();
     let tftp_root = tmp_dir.path().to_path_buf();
 
     let server_config = ServerConfig {
         http_bind: "0.0.0.0:8080".to_string(),
-        tftp_bind: "127.0.0.1:25076".to_string(),
+        tftp_bind: format!("127.0.0.1:{bind_port}"),
         tftp_root: tftp_root.clone(),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir: "./cache".into(),
@@ -310,29 +308,25 @@ async fn test_tftp_path_traversal_blocked() {
     let shared_config = Arc::new(std::sync::RwLock::new(config));
     let state_store = StateStore::new();
 
-    // Spawn TFTP server on port 25071
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
+    let bind = format!("127.0.0.1:{bind_port}");
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25076", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(&bind, server_config_clone, server_store).await;
     });
 
-    // Wait for server to bind
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Client socket on a unique port
-    let client_socket = UdpSocket::bind("127.0.0.1:25077").await.unwrap();
-
-    // Request a path traversal attempt
-    let rrq = make_rrq_packet("../../etc/passwd", &[]);
-    client_socket
-        .send_to(&rrq, "127.0.0.1:25076")
+    let client_socket = UdpSocket::bind(format!("127.0.0.1:{client_port}"))
         .await
         .unwrap();
 
-    // Receive the ERROR packet from the server's transfer socket
+    let rrq = make_rrq_packet(requested, &[]);
+    client_socket
+        .send_to(&rrq, format!("127.0.0.1:{bind_port}"))
+        .await
+        .unwrap();
+
     let mut response_buf = [0u8; 1024];
     let (len, _server_tid) = tokio::time::timeout(
         Duration::from_secs(2),
@@ -343,10 +337,28 @@ async fn test_tftp_path_traversal_blocked() {
     .expect("Failed to receive ERROR response");
 
     let (opcode, error_code, msg) = parse_error_packet(&response_buf[..len]);
-    assert_eq!(opcode, 5, "Expected ERROR opcode (5)");
-    assert_eq!(error_code, 2, "Expected error code 2 (Access Violation)");
+    assert_eq!(opcode, 5, "Expected ERROR opcode (5) for {requested:?}");
+    assert_eq!(
+        error_code, 2,
+        "Expected error code 2 (Access Violation) for {requested:?}"
+    );
     assert!(
         msg.contains("Access violation"),
-        "Error message should mention 'Access violation', got: {msg}"
+        "Error message should mention 'Access violation', got {msg:?} for {requested:?}"
     );
+}
+
+#[tokio::test]
+async fn test_tftp_path_traversal_parent_dir_blocked() {
+    assert_tftp_traversal_rejected(25076, 25077, "../../etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_tftp_path_traversal_absolute_blocked() {
+    assert_tftp_traversal_rejected(25086, 25087, "/etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_tftp_path_traversal_double_slash_absolute_blocked() {
+    assert_tftp_traversal_rejected(25096, 25097, "//etc/passwd").await;
 }

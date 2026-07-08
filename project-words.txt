@@ -146,3 +146,4 @@ hexhyp
 hexdigit
 codegen
 binfmt
+vulns

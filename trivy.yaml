@@ -20,7 +20,12 @@ db:
     - "aquasec/trivy-java-db:1"
 
 # Report
-exit-code: 1
+# INFRA-8: keep this in sync with `.github/workflows/trivy.yml`, which
+# overrides with `--exit-code 0`. The scan is informational: findings
+# still upload SARIF for GitHub code scanning, but they don't fail the
+# workflow. If we ever want CI to break on vulns, change both places
+# together.
+exit-code: 0
 format: table
 report: all
 dependency-tree: true

@@ -6,40 +6,119 @@ use tokio::time::{Duration, sleep};
 const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
 const LED_WHITE_PATH: &str = "/sys/class/leds/white/brightness";
 
-fn set_led(path: &str, value: u8) {
-    match OpenOptions::new().write(true).open(path) {
-        Ok(mut file) => {
-            if let Err(e) = write!(file, "{}", value) {
-                bootycall_log::error!(
-                    "Failed to write value {} to LED path {}: {:?}",
-                    value,
-                    path,
-                    e
-                );
-            }
-        }
-        Err(e) => {
-            bootycall_log::error!("Failed to open LED path {}: {:?}", path, e);
-        }
-    }
+fn set_led(path: &str, value: u8) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(path).map_err(|e| {
+        bootycall_log::error!("Failed to open LED path {}: {:?}", path, e);
+        e
+    })?;
+    write!(file, "{}", value).map_err(|e| {
+        bootycall_log::error!(
+            "Failed to write value {} to LED path {}: {:?}",
+            value,
+            path,
+            e
+        );
+        e
+    })
 }
 
+/// Write `value` to `path` only when it differs from the last-known-good
+/// value. BUG-14: the cache is only updated on a successful write —
+/// previously a failed write still poisoned `last_value`, so subsequent
+/// calls thought the hardware was already in the right state and never
+/// retried.
 fn set_led_cached(path: &str, value: u8, last_value: &mut Option<u8>) {
-    if Some(value) != *last_value {
-        set_led(path, value);
+    set_led_cached_with(path, value, last_value, set_led);
+}
+
+/// Same as `set_led_cached` but takes the "actually write" closure as a
+/// parameter so unit tests can exercise the caching-on-success logic
+/// without touching `/sys/class/leds/*`.
+fn set_led_cached_with<F>(path: &str, value: u8, last_value: &mut Option<u8>, mut writer: F)
+where
+    F: FnMut(&str, u8) -> std::io::Result<()>,
+{
+    if Some(value) == *last_value {
+        return;
+    }
+    if writer(path, value).is_ok() {
         *last_value = Some(value);
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_updates_on_successful_write() {
+        let mut last = None;
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Ok(())
+        });
+        assert_eq!(last, Some(255));
+        assert_eq!(writes, vec![255]);
+    }
+
+    #[test]
+    fn cache_stays_none_when_write_fails() {
+        let mut last = None;
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+        });
+        assert_eq!(
+            last, None,
+            "cache must not remember a value the hardware never accepted"
+        );
+        assert_eq!(writes, vec![255]);
+    }
+
+    #[test]
+    fn cache_hit_skips_write_entirely() {
+        let mut last = Some(255);
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Ok(())
+        });
+        assert!(
+            writes.is_empty(),
+            "identical value should not touch the hardware"
+        );
+    }
+
+    #[test]
+    fn failed_write_still_retries_on_next_call() {
+        // The regression BUG-14 covers: a failed first write must not
+        // poison `last_value`, so the next call still attempts the write.
+        let mut last = None;
+        let mut attempts = 0;
+        set_led_cached_with("led", 255, &mut last, |_, _| {
+            attempts += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+        });
+        set_led_cached_with("led", 255, &mut last, |_, _| {
+            attempts += 1;
+            Ok(())
+        });
+        assert_eq!(attempts, 2, "second call must retry after a failed write");
+        assert_eq!(last, Some(255));
+    }
+}
+
 pub fn activate_blue_led() {
-    set_led(LED_BLUE_PATH, 255);
-    set_led(LED_WHITE_PATH, 0);
+    let _ = set_led(LED_BLUE_PATH, 255);
+    let _ = set_led(LED_WHITE_PATH, 0);
     info!("LED set to solid Blue (Service Running)");
 }
 
 pub fn activate_white_led() {
-    set_led(LED_WHITE_PATH, 255);
-    set_led(LED_BLUE_PATH, 0);
+    let _ = set_led(LED_WHITE_PATH, 255);
+    let _ = set_led(LED_BLUE_PATH, 0);
     info!("LED set to solid White (Service Stopped)");
 }
 
@@ -54,11 +133,11 @@ pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
             }
             _ = sleep(Duration::from_millis(500)) => {
                 if state {
-                    set_led(LED_WHITE_PATH, 255);
-                    set_led(LED_BLUE_PATH, 0);
+                    let _ = set_led(LED_WHITE_PATH, 255);
+                    let _ = set_led(LED_BLUE_PATH, 0);
                 } else {
-                    set_led(LED_WHITE_PATH, 0);
-                    set_led(LED_BLUE_PATH, 0);
+                    let _ = set_led(LED_WHITE_PATH, 0);
+                    let _ = set_led(LED_BLUE_PATH, 0);
                 }
                 state = !state;
             }
@@ -130,40 +209,40 @@ pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
             if blinking {
                 info!("Testing Blinking Blue LED for 10 seconds...");
                 for _ in 0..10 {
-                    set_led(LED_BLUE_PATH, 255);
-                    set_led(LED_WHITE_PATH, 0);
+                    let _ = set_led(LED_BLUE_PATH, 255);
+                    let _ = set_led(LED_WHITE_PATH, 0);
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    set_led(LED_BLUE_PATH, 0);
-                    set_led(LED_WHITE_PATH, 0);
+                    let _ = set_led(LED_BLUE_PATH, 0);
+                    let _ = set_led(LED_WHITE_PATH, 0);
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             } else {
                 info!("Testing Solid Blue LED");
-                set_led(LED_BLUE_PATH, 255);
-                set_led(LED_WHITE_PATH, 0);
+                let _ = set_led(LED_BLUE_PATH, 255);
+                let _ = set_led(LED_WHITE_PATH, 0);
             }
         }
         "white" => {
             if blinking {
                 info!("Testing Blinking White LED for 10 seconds...");
                 for _ in 0..10 {
-                    set_led(LED_WHITE_PATH, 255);
-                    set_led(LED_BLUE_PATH, 0);
+                    let _ = set_led(LED_WHITE_PATH, 255);
+                    let _ = set_led(LED_BLUE_PATH, 0);
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    set_led(LED_WHITE_PATH, 0);
-                    set_led(LED_BLUE_PATH, 0);
+                    let _ = set_led(LED_WHITE_PATH, 0);
+                    let _ = set_led(LED_BLUE_PATH, 0);
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             } else {
                 info!("Testing Solid White LED");
-                set_led(LED_WHITE_PATH, 255);
-                set_led(LED_BLUE_PATH, 0);
+                let _ = set_led(LED_WHITE_PATH, 255);
+                let _ = set_led(LED_BLUE_PATH, 0);
             }
         }
         "off" => {
             info!("Testing LEDs Off");
-            set_led(LED_BLUE_PATH, 0);
-            set_led(LED_WHITE_PATH, 0);
+            let _ = set_led(LED_BLUE_PATH, 0);
+            let _ = set_led(LED_WHITE_PATH, 0);
         }
         _ => {
             return Err(anyhow::anyhow!(

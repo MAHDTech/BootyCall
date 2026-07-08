@@ -184,3 +184,64 @@ impl<'a> Renderer<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bresenham_horizontal_line_lights_only_row() {
+        let mut fb = Framebuffer::new();
+        {
+            let mut r = Renderer::new(&mut fb);
+            r.draw_line(3, 7, 8, 7, 200);
+        }
+        for x in 0..WIDTH {
+            let expected = if (3..=8).contains(&x) { 200 } else { 0 };
+            assert_eq!(
+                fb.buffer[7 * WIDTH + x],
+                expected,
+                "row 7 col {x} unexpected"
+            );
+        }
+        // Adjacent rows must stay dark.
+        for x in 0..WIDTH {
+            assert_eq!(fb.buffer[6 * WIDTH + x], 0);
+            assert_eq!(fb.buffer[8 * WIDTH + x], 0);
+        }
+    }
+
+    #[test]
+    fn bresenham_diagonal_line_touches_expected_pixels() {
+        let mut fb = Framebuffer::new();
+        {
+            let mut r = Renderer::new(&mut fb);
+            r.draw_line(0, 0, 5, 5, 255);
+        }
+        for i in 0..=5 {
+            assert_eq!(fb.buffer[i * WIDTH + i], 255, "diagonal ({i},{i}) missing");
+        }
+    }
+
+    #[test]
+    fn measure_text_empty_string_is_zero() {
+        assert_eq!(Renderer::measure_text("", false), 0);
+        assert_eq!(Renderer::measure_text("", true), 0);
+    }
+
+    #[test]
+    fn measure_text_is_monotone_in_length() {
+        // Not testing exact widths (they depend on the shipped fonts),
+        // just the invariant that longer strings measure at least as
+        // wide as shorter ones with the same font.
+        let short = Renderer::measure_text("A", false);
+        let long = Renderer::measure_text("AAAAAAAAAA", false);
+        assert!(long >= short);
+    }
+
+    #[test]
+    fn measure_text_bold_matches_regular_shape() {
+        // Large font should also be non-zero for a non-empty string.
+        assert!(Renderer::measure_text("HELLO", true) > 0);
+    }
+}

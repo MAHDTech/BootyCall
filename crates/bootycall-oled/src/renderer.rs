@@ -2,6 +2,18 @@ use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 use rusttype::{Font, Scale, point};
 use std::sync::OnceLock;
 
+/// Font point size for regular (Lato) labels drawn on the OLED. Shared
+/// with the layout math in `lib.rs` so the two files can't drift.
+pub const SMALL_SCALE: f32 = 11.0;
+
+/// Font point size for bold (Rajdhani) values drawn on the OLED.
+pub const LARGE_SCALE: f32 = 15.0;
+
+/// `oled_test --size` threshold: sizes strictly above this render bold,
+/// at or below render regular. Kept next to the scale constants so
+/// changing one nudges the code that switches between them.
+pub const BOLD_THRESHOLD: usize = 13;
+
 pub struct FontSet {
     pub regular: Font<'static>,
     pub bold: Font<'static>,
@@ -87,7 +99,11 @@ impl<'a> Renderer<'a> {
         } else {
             &get_fonts().regular
         };
-        let scale_px = if use_large_font { 15.0 } else { 11.0 };
+        let scale_px = if use_large_font {
+            LARGE_SCALE
+        } else {
+            SMALL_SCALE
+        };
         let scale = Scale::uniform(scale_px);
         let v_metrics = font.v_metrics(scale);
 
@@ -119,7 +135,11 @@ impl<'a> Renderer<'a> {
         } else {
             &get_fonts().regular
         };
-        let scale_px = if use_large_font { 15.0 } else { 11.0 };
+        let scale_px = if use_large_font {
+            LARGE_SCALE
+        } else {
+            SMALL_SCALE
+        };
         let scale = Scale::uniform(scale_px);
         let glyphs: Vec<_> = font.layout(text, scale, point(0.0, 0.0)).collect();
         if glyphs.is_empty() {

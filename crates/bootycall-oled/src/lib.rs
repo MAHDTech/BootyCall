@@ -29,6 +29,69 @@ enum DisplayMode {
 const VISIBLE_Y_START: usize = 28;
 const VISIBLE_HEIGHT: usize = 32;
 
+/// Metric-page descriptor. Adding a page is one entry: label, icon,
+/// optional refresh callback (only pages backed by an expensive sysinfo
+/// query need one), and a value getter. The old `%8` + triple `match`
+/// over `page_index` scattered these across three call sites; the table
+/// keeps them together.
+struct PageSpec {
+    label: &'static str,
+    icon: &'static [u8; 256],
+    refresh: Option<fn(&mut SystemMetrics)>,
+    value: fn(&SystemMetrics) -> String,
+}
+
+const PAGES: &[PageSpec] = &[
+    PageSpec {
+        label: "HOSTNAME",
+        icon: &crate::assets::ICON_HOST,
+        refresh: None,
+        value: |m| m.get_hostname(),
+    },
+    PageSpec {
+        label: "IP ADDRESS",
+        icon: &crate::assets::ICON_NETWORK,
+        refresh: None,
+        value: |m| m.get_ip_address(),
+    },
+    PageSpec {
+        label: "UPTIME",
+        icon: &crate::assets::ICON_CLOCK,
+        refresh: None,
+        value: |m| m.get_uptime(),
+    },
+    PageSpec {
+        label: "CPU TEMP",
+        icon: &crate::assets::ICON_HOST,
+        refresh: Some(SystemMetrics::refresh_components),
+        value: |m| m.get_cpu_temp(),
+    },
+    PageSpec {
+        label: "CPU USAGE",
+        icon: &crate::assets::ICON_HOST,
+        refresh: Some(SystemMetrics::refresh_cpu),
+        value: |m| m.get_cpu_usage(),
+    },
+    PageSpec {
+        label: "RAM USAGE",
+        icon: &crate::assets::ICON_HOST,
+        refresh: Some(SystemMetrics::refresh_memory),
+        value: |m| m.get_ram_usage(),
+    },
+    PageSpec {
+        label: "DISK USAGE",
+        icon: &crate::assets::ICON_HOST,
+        refresh: Some(SystemMetrics::refresh_disks),
+        value: |m| m.get_disk_usage(),
+    },
+    PageSpec {
+        label: "KERNEL",
+        icon: &crate::assets::ICON_HOST,
+        refresh: None,
+        value: |m| m.get_kernel(),
+    },
+];
+
 /// Public entry point: spawn the sync render loop on a dedicated OS thread,
 /// then wait for the async shutdown channel. Framebuffer I/O and sysinfo
 /// refreshes are synchronous by nature; running them inside a tokio task
@@ -129,17 +192,13 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         // 3. Only refresh display-specific metrics if we are in Metrics mode
         if current_mode == DisplayMode::Metrics {
             if last_page_flip.elapsed() > PAGE_DURATION {
-                page_index = (page_index + 1) % 8; // 8 pages
+                page_index = (page_index + 1) % PAGES.len();
                 last_page_flip = now;
             }
 
-            // Only refresh the subsystem that is currently being displayed!
-            match page_index {
-                3 => sys_metrics.refresh_components(), // CPU Temp
-                4 => sys_metrics.refresh_cpu(),        // CPU Usage
-                5 => sys_metrics.refresh_memory(),     // RAM Usage
-                6 => sys_metrics.refresh_disks(),      // Disk Usage
-                _ => {}                                // Others don't need refresh
+            // Only refresh the subsystem that is currently being displayed.
+            if let Some(refresh) = PAGES[page_index].refresh {
+                refresh(&mut sys_metrics);
             }
         }
 
@@ -190,49 +249,10 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
                     renderer.draw_braille(draw_x + 3, draw_y + 13, 3, 3, 8);
                 }
                 DisplayMode::Metrics => {
-                    let (label, value, icon) = match page_index {
-                        0 => (
-                            "HOSTNAME",
-                            sys_metrics.get_hostname(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        1 => (
-                            "IP ADDRESS",
-                            sys_metrics.get_ip_address(),
-                            &crate::assets::ICON_NETWORK,
-                        ),
-                        2 => (
-                            "UPTIME",
-                            sys_metrics.get_uptime(),
-                            &crate::assets::ICON_CLOCK,
-                        ),
-                        3 => (
-                            "CPU TEMP",
-                            sys_metrics.get_cpu_temp(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        4 => (
-                            "CPU USAGE",
-                            sys_metrics.get_cpu_usage(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        5 => (
-                            "RAM USAGE",
-                            sys_metrics.get_ram_usage(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        6 => (
-                            "DISK USAGE",
-                            sys_metrics.get_disk_usage(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        7 => (
-                            "KERNEL",
-                            sys_metrics.get_kernel(),
-                            &crate::assets::ICON_HOST,
-                        ),
-                        _ => ("UNKNOWN", String::new(), &crate::assets::ICON_HOST),
-                    };
+                    let page = &PAGES[page_index % PAGES.len()];
+                    let label = page.label;
+                    let value = (page.value)(&sys_metrics);
+                    let icon = page.icon;
 
                     // Draw label (top aligned inside visible window)
                     let icon_y = if label == "UPTIME" {
@@ -302,9 +322,14 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
 
     {
         let mut renderer = Renderer::new(&mut fb);
-        let use_large_font = size > 13;
+        let use_large_font = size > crate::renderer::BOLD_THRESHOLD;
         let text_w = Renderer::measure_text(text, use_large_font);
-        let text_h = if use_large_font { 15 } else { 11 };
+        // Text height matches the font point size rounded to whole pixels.
+        let text_h = if use_large_font {
+            crate::renderer::LARGE_SCALE as usize
+        } else {
+            crate::renderer::SMALL_SCALE as usize
+        };
 
         let x = match horiz {
             "center" => {

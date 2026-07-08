@@ -102,7 +102,9 @@ poweroff
 prek
 qcow
 gpiocdev
+lato
 rackmount
+rajdhani
 ranlib
 rarr
 ripsecrets
@@ -133,6 +135,7 @@ timonwong
 toplevel
 tuxtina
 undionly
+unpositioned
 unrotated
 versionrc
 vscodevim

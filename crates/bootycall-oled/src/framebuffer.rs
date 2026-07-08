@@ -9,7 +9,7 @@ const FB_PATH: &str = "/dev/fb0";
 
 pub struct Framebuffer {
     // 8-bit grayscale backbuffer
-    buffer: [u8; WIDTH * HEIGHT],
+    pub buffer: [u8; WIDTH * HEIGHT],
     // LUT to convert grayscale to RGB565
     lut: [u16; 256],
     // Cached file descriptor to the framebuffer

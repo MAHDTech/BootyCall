@@ -1,4 +1,24 @@
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
+use rusttype::{Font, Scale, point};
+use std::sync::OnceLock;
+
+pub struct FontSet {
+    pub regular: Font<'static>,
+    pub bold: Font<'static>,
+}
+
+pub static FONTS: OnceLock<FontSet> = OnceLock::new();
+
+pub fn get_fonts() -> &'static FontSet {
+    FONTS.get_or_init(|| {
+        let regular_bytes = include_bytes!("../assets/Lato-Regular.ttf");
+        let bold_bytes = include_bytes!("../assets/Rajdhani-Bold.ttf");
+        FontSet {
+            regular: Font::try_from_bytes(regular_bytes).expect("Failed to load Lato-Regular.ttf"),
+            bold: Font::try_from_bytes(bold_bytes).expect("Failed to load Rajdhani-Bold.ttf"),
+        }
+    })
+}
 
 pub struct Renderer<'a> {
     fb: &'a mut Framebuffer,
@@ -62,53 +82,52 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn draw_text(&mut self, x: usize, y: usize, text: &str, use_large_font: bool) {
-        use embedded_graphics::{
-            mono_font::{
-                MonoTextStyleBuilder,
-                ascii::{FONT_6X12, FONT_9X15},
-            },
-            pixelcolor::BinaryColor,
-            prelude::*,
-            text::{Baseline, Text, TextStyleBuilder},
-        };
-
         let font = if use_large_font {
-            &FONT_9X15
+            &get_fonts().bold
         } else {
-            &FONT_6X12
+            &get_fonts().regular
         };
-        let text_style = MonoTextStyleBuilder::new()
-            .font(font)
-            .text_color(BinaryColor::On)
-            .build();
-        let style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+        let scale_px = if use_large_font { 15.0 } else { 11.0 };
+        let scale = Scale::uniform(scale_px);
+        let v_metrics = font.v_metrics(scale);
 
-        let text_obj =
-            Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
-        let _ = text_obj.draw(self.fb);
+        let glyphs: Vec<_> = font
+            .layout(text, scale, point(x as f32, y as f32 + v_metrics.ascent))
+            .collect();
+
+        for glyph in glyphs {
+            if let Some(bounding_box) = glyph.pixel_bounding_box() {
+                glyph.draw(|gx, gy, gv| {
+                    let px = bounding_box.min.x + gx as i32;
+                    let py = bounding_box.min.y + gy as i32;
+                    if px >= 0 && px < WIDTH as i32 && py >= 0 && py < HEIGHT as i32 {
+                        let alpha = (gv * 255.0) as u8;
+                        if alpha > 0 {
+                            let current = self.fb.buffer[py as usize * WIDTH + px as usize];
+                            let blended = std::cmp::max(current, alpha);
+                            self.fb.set_pixel(px as usize, py as usize, blended);
+                        }
+                    }
+                });
+            }
+        }
     }
 
     pub fn measure_text(text: &str, use_large_font: bool) -> usize {
-        use embedded_graphics::{
-            mono_font::{
-                MonoTextStyle,
-                ascii::{FONT_6X12, FONT_9X15},
-            },
-            pixelcolor::BinaryColor,
-            prelude::*,
-            text::{Baseline, Text, TextStyleBuilder},
-        };
-
         let font = if use_large_font {
-            &FONT_9X15
+            &get_fonts().bold
         } else {
-            &FONT_6X12
+            &get_fonts().regular
         };
-        let text_style = MonoTextStyle::new(font, BinaryColor::On);
-        let style = TextStyleBuilder::new().baseline(Baseline::Top).build();
-
-        let text_obj = Text::with_text_style(text, Point::zero(), text_style, style);
-        text_obj.bounding_box().size.width as usize
+        let scale_px = if use_large_font { 15.0 } else { 11.0 };
+        let scale = Scale::uniform(scale_px);
+        let glyphs: Vec<_> = font.layout(text, scale, point(0.0, 0.0)).collect();
+        if glyphs.is_empty() {
+            return 0;
+        }
+        let last_glyph = &glyphs[glyphs.len() - 1];
+        let width = last_glyph.position().x + last_glyph.unpositioned().h_metrics().advance_width;
+        width.ceil() as usize
     }
 
     // Braille renderer from python script

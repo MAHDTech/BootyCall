@@ -44,6 +44,21 @@ pub async fn run_oled_manager(
         })
         .ok();
 
+    // Drive GPIO 46 high to enable power to the rackmount accessory slot.
+    let _enable_request = gpiocdev::Request::builder()
+        .on_chip("/dev/gpiochip0")
+        .with_line(46)
+        .as_output(Value::Active)
+        .request()
+        .map_err(|e| {
+            info!(
+                "GPIO rackmount power enable not available (optional): {:?}",
+                e
+            );
+            e
+        })
+        .ok();
+
     let mut fb = Framebuffer::new();
     let mut sys_metrics = SystemMetrics::new();
 

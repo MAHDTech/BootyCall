@@ -274,6 +274,10 @@ in
         Environment = [
           "TFTP_ROOT=${cfg.server.tftpRoot}"
           "STATIC_ROOT=${cfg.dataDir}/static"
+          # Emit structured lifecycle events as one JSON object per line so a
+          # collector (e.g. Vector) can route them into ClickHouse. See
+          # docs/observability.md.
+          "BOOTYCALL_LOG_FORMAT=json"
         ];
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];

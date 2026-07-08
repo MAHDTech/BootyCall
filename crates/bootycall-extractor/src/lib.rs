@@ -108,6 +108,12 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
 
     if cache_valid {
         info!("Cache is valid for host {} (MAC: {})", host.name, host.mac);
+        bootycall_log::event!(
+            "extract_cache_hit",
+            host = %host.name,
+            mac = %host.mac,
+            image = %host.image_path.display(),
+        );
         return Ok(());
     }
 
@@ -115,6 +121,13 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
         "Cache stale or missing for host {} (MAC: {}). Extracting files...",
         host.name, host.mac
     );
+    bootycall_log::event!(
+        "extract_cache_miss",
+        host = %host.name,
+        mac = %host.mac,
+        image = %host.image_path.display(),
+    );
+    let extract_started = std::time::Instant::now();
 
     // Ensure cache folder exists
     if !host_cache_dir.exists() {
@@ -164,9 +177,23 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
                 "Successfully extracted kernel and initrd for host {} (MAC: {})",
                 host.name, host.mac
             );
+            bootycall_log::event!(
+                "extract_complete",
+                host = %host.name,
+                mac = %host.mac,
+                image = %host.image_path.display(),
+                duration_ms = extract_started.elapsed().as_millis() as u64,
+            );
             Ok(())
         }
         Err(e) => {
+            bootycall_log::event!(
+                "extract_failed",
+                host = %host.name,
+                mac = %host.mac,
+                image = %host.image_path.display(),
+                error = %e,
+            );
             // Clean up potentially incomplete cache files
             let _ = fs::remove_file(&kernel_path);
             let _ = fs::remove_file(&initrd_path);

@@ -286,6 +286,12 @@ async fn poll_handler(
                     target_mac_to_use
                 ),
             );
+            bootycall_log::event!(
+                "http_boot_served",
+                mac = %mac_str,
+                target_mac = target_mac_to_use.as_deref().unwrap_or(""),
+                client_ip = %client_ip,
+            );
         }
         return ([(header::CONTENT_TYPE, "text/plain")], script).into_response();
     }
@@ -513,6 +519,12 @@ async fn api_override_handler(
         "INFO",
         Some(&mac_str),
         &format!("Assigned manual override target: {}", payload.target),
+    );
+
+    bootycall_log::event!(
+        "http_override_assigned",
+        mac = %mac_str,
+        target = %payload.target,
     );
 
     Ok(Json(serde_json::json!({ "status": "ok" })))

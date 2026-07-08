@@ -203,6 +203,15 @@ pub async fn run_dhcp_server(
             ),
         );
 
+        bootycall_log::event!(
+            "dhcp_pxe_offer",
+            mac = %mac_str,
+            arch = arch_str,
+            client_ip = %client_ip_str,
+            bootloader = %bootloader_path,
+            next_server = %our_ip,
+        );
+
         // Craft reply message
         let mut reply = v4::Message::new_with_id(
             request.xid(),

@@ -137,10 +137,17 @@ async fn handle_tftp_transfer(
     state_store: StateStore,
     mac_addr: Option<String>,
 ) -> Result<(), std::io::Error> {
+    let transfer_start = std::time::Instant::now();
+
     // 1. Open file
     let mut file = match tokio::fs::File::open(&file_path).await {
         Ok(f) => f,
         Err(e) => {
+            bootycall_log::event!(
+                "tftp_transfer_error",
+                file = %file_path.display(),
+                error = "file_open_failed",
+            );
             let err_pkt = make_error_packet(1, "File not found");
             let _ = socket.send(&err_pkt).await;
             return Err(e);
@@ -342,6 +349,14 @@ async fn handle_tftp_transfer(
                     &format!("TFTP transfer completed: {} blocks sent", block_num),
                 );
             }
+            bootycall_log::event!(
+                "tftp_transfer_complete",
+                mac = mac_addr.as_deref().unwrap_or(""),
+                file = %file_path.display(),
+                bytes = file_size,
+                blocks = block_num,
+                duration_ms = transfer_start.elapsed().as_millis() as u64,
+            );
             break;
         }
 

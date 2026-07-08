@@ -46,6 +46,24 @@ pub struct StatusResponse {
     pub configs: Vec<HostConfig>,
 }
 
+/// Shared kernel/initrd/boot payload for the poll_handler. Two sites in
+/// poll_handler used to format almost-identical strings by hand — one for
+/// "host is directly configured", one for "host got a manual override
+/// target". Both go through this template now so a change to the shape of
+/// the boot line (extra kernel arg, rewritten cache path, whatever) is
+/// one edit instead of two coordinated ones.
+///
+/// The `target_of` variable is `None` in the direct-config case and
+/// `Some("<original mac>")` in the override case, so the "Booting …"
+/// echo line still communicates why this target is being served.
+const BOOT_TEMPLATE: &str = r#"#!ipxe
+{% if target_of %}echo Booting target {{ name }} for host {{ target_of }}...
+{% else %}echo Booting {{ name }}...
+{% endif %}kernel http://{{ server_ip_port }}/cache/{{ mac }}/kernel {{ cmdline }}
+initrd http://{{ server_ip_port }}/cache/{{ mac }}/initrd
+boot
+"#;
+
 const MENU_TEMPLATE: &str = r#"#!ipxe
 
 # Load wallpaper if available
@@ -203,13 +221,22 @@ async fn poll_handler(
     let (boot_script, should_update_booting, target_mac_to_use) = {
         let config_guard = state.config.read();
 
+        let boot_template = state
+            .jinja_env
+            .get_template("boot")
+            .expect("boot template registered at startup");
+
         // 1. Check if host is configured directly in yaml
         if let Some(host_config) = config_guard.find_host(&mac_str) {
-            let cmdline = host_config.cmdline.as_deref().unwrap_or("");
-            let script = format!(
-                "#!ipxe\necho Booting {}...\nkernel http://{}/cache/{}/kernel {}\ninitrd http://{}/cache/{}/initrd\nboot\n",
-                host_config.name, host_hdr, host_config.mac, cmdline, host_hdr, host_config.mac
-            );
+            let script = boot_template
+                .render(context! {
+                    name => host_config.name.as_str(),
+                    server_ip_port => host_hdr,
+                    mac => host_config.mac.as_str(),
+                    cmdline => host_config.cmdline.as_deref().unwrap_or(""),
+                    target_of => None::<&str>,
+                })
+                .unwrap_or_default();
             (Some(script), true, Some(host_config.mac.clone()))
         } else {
             // 2. Check if host is registered and has a manual override target
@@ -219,17 +246,15 @@ async fn poll_handler(
                     if let Some(target_config) =
                         config_guard.hosts.iter().find(|h| &h.name == target_name)
                     {
-                        let cmdline = target_config.cmdline.as_deref().unwrap_or("");
-                        let script = format!(
-                            "#!ipxe\necho Booting target {} for host {}...\nkernel http://{}/cache/{}/kernel {}\ninitrd http://{}/cache/{}/initrd\nboot\n",
-                            target_config.name,
-                            mac_str,
-                            host_hdr,
-                            target_config.mac,
-                            cmdline,
-                            host_hdr,
-                            target_config.mac
-                        );
+                        let script = boot_template
+                            .render(context! {
+                                name => target_config.name.as_str(),
+                                server_ip_port => host_hdr,
+                                mac => target_config.mac.as_str(),
+                                cmdline => target_config.cmdline.as_deref().unwrap_or(""),
+                                target_of => Some(mac_str.as_str()),
+                            })
+                            .unwrap_or_default();
                         (Some(script), true, Some(target_config.mac.clone()))
                     } else {
                         (None, false, None)
@@ -502,6 +527,7 @@ pub async fn run_http_server(
     // Initialise minijinja environment
     let mut env = minijinja::Environment::new();
     env.add_template("ipxemenu", MENU_TEMPLATE).unwrap();
+    env.add_template("boot", BOOT_TEMPLATE).unwrap();
     let jinja_env = Arc::new(env);
 
     let server_state = ServerState {

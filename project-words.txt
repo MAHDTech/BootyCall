@@ -145,3 +145,4 @@ yzhang
 hexhyp
 hexdigit
 codegen
+binfmt

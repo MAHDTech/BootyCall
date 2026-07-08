@@ -6,6 +6,14 @@ on:
       - main
       - master
       - trunk
+  # Also run on pushes to the release branches so the Release workflow
+  # (which fires on the same event) can gate on this workflow completing.
+  push:
+    branches:
+      - main
+      - master
+      - trunk
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
@@ -389,6 +397,50 @@ jobs:
         name: Build Assets & iPXE
         run: nix build .#assets --no-link
 
+  ci-nix-build-bootycall:
+    # Exercise the Nix package derivation on both target arches so
+    # packages/crate.nix can't silently rot between releases (INFRA-4).
+    # Runs alongside the Cargo build; the release workflow reuses the
+    # same derivation to produce shipped binaries.
+    name: Nix Build bootycall (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: nix_build_bootycall
+        name: Nix Build bootycall
+        run: nix build .#bootycall --no-link --print-out-paths
+
   ci-statix:
     name: Check Statix
     runs-on: ubuntu-latest
@@ -436,6 +488,7 @@ jobs:
       - ci-flake-check
       - ci-statix
       - ci-build-assets
+      - ci-nix-build-bootycall
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -485,12 +538,13 @@ jobs:
             echo "| Nix Flake Check | $(status_emoji '${{ needs.ci-flake-check.result }}') ${{ needs.ci-flake-check.result }} |"
             echo "| Statix Check | $(status_emoji '${{ needs.ci-statix.result }}') ${{ needs.ci-statix.result }} |"
             echo "| Build Assets & iPXE | $(status_emoji '${{ needs.ci-build-assets.result }}') ${{ needs.ci-build-assets.result }} |"
+            echo "| Nix Build bootycall | $(status_emoji '${{ needs.ci-nix-build-bootycall.result }}') ${{ needs.ci-nix-build-bootycall.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - id: check_failures
         name: Check for Failures
         run: |
-          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }}"
+          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }},${{ needs.ci-nix-build-bootycall.result }}"
           if echo "${ALL_JOBS}" | grep -qE "(failure|cancelled)"; then
             echo "::error::One or more CI jobs failed"
             exit 1

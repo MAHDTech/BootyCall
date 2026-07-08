@@ -8,11 +8,7 @@ use bootycall_core::config::{Config, watch_config};
 use bootycall_core::state::StateStore;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "bootycall-rs",
-    version = "0.1.0",
-    about = "UEFI PXE Server Suite"
-)]
+#[command(name = "bootycall-rs", version, about = "UEFI PXE Server Suite")]
 struct Cli {
     #[arg(short, long, default_value = "bootycall.yaml")]
     config: String,
@@ -119,8 +115,6 @@ async fn main() -> Result<(), anyhow::Error> {
         bootycall_led::run_boot_blink(led_stop_rx).await;
     });
 
-    // 2. Parse CLI arguments
-    let args = Cli::parse();
     let config_path = PathBuf::from(&args.config);
     if !config_path.exists() {
         return Err(anyhow::anyhow!(
@@ -172,29 +166,32 @@ async fn main() -> Result<(), anyhow::Error> {
         )
     };
 
-    // 8. Spawn protocol server tasks
+    // 8. Spawn protocol server tasks. Each returns Result so a fatal error
+    //    (bind failure, socket error) propagates through the JoinHandle and
+    //    turns into a non-zero exit below — systemd Restart=on-failure then
+    //    kicks the unit back to life instead of silently succeeding.
     let dhcp_config = shared_config.clone();
     let dhcp_store = state_store.clone();
     let dhcp_handle = tokio::spawn(async move {
-        if let Err(e) = bootycall_dhcp::run_dhcp_server(&dhcp_bind, dhcp_config, dhcp_store).await {
-            error!("Proxy DHCP Server encountered a fatal error: {:?}", e);
-        }
+        bootycall_dhcp::run_dhcp_server(&dhcp_bind, dhcp_config, dhcp_store)
+            .await
+            .map_err(anyhow::Error::from)
     });
 
     let tftp_config = shared_config.clone();
     let tftp_store = state_store.clone();
     let tftp_handle = tokio::spawn(async move {
-        if let Err(e) = bootycall_tftp::run_tftp_server(&tftp_bind, tftp_config, tftp_store).await {
-            error!("TFTP Server encountered a fatal error: {:?}", e);
-        }
+        bootycall_tftp::run_tftp_server(&tftp_bind, tftp_config, tftp_store)
+            .await
+            .map_err(anyhow::Error::from)
     });
 
     let http_config = shared_config.clone();
     let http_store = state_store.clone();
     let http_handle = tokio::spawn(async move {
-        if let Err(e) = bootycall_http::run_http_server(&http_bind, http_config, http_store).await {
-            error!("HTTP Server encountered a fatal error: {:?}", e);
-        }
+        bootycall_http::run_http_server(&http_bind, http_config, http_store)
+            .await
+            .map_err(anyhow::Error::from)
     });
 
     // 9. Clean up stale hosts periodically
@@ -234,7 +231,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
-    tokio::select! {
+    // A signal exits cleanly (Ok); a protocol server dying is treated as
+    // fatal and returns Err so the process exit code is non-zero.
+    let outcome: anyhow::Result<()> = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received (SIGINT). Cleaning up services...");
             let _ = led_shutdown_tx.send(()).await;
@@ -243,6 +242,7 @@ async fn main() -> Result<(), anyhow::Error> {
             if let Some(handle) = oled_manager_handle {
                 let _ = handle.await;
             }
+            Ok(())
         }
         _ = async {
             #[cfg(unix)]
@@ -261,21 +261,44 @@ async fn main() -> Result<(), anyhow::Error> {
             if let Some(handle) = oled_manager_handle {
                 let _ = handle.await;
             }
+            Ok(())
         }
-        _ = dhcp_handle => {
-            error!("DHCP Server task exited unexpectedly.");
+        res = dhcp_handle => {
+            let err = join_result_to_error("Proxy DHCP", res);
+            error!("Proxy DHCP Server exited: {err:?}");
+            Err(err)
         }
-        _ = tftp_handle => {
-            error!("TFTP Server task exited unexpectedly.");
+        res = tftp_handle => {
+            let err = join_result_to_error("TFTP", res);
+            error!("TFTP Server exited: {err:?}");
+            Err(err)
         }
-        _ = http_handle => {
-            error!("HTTP Server task exited unexpectedly.");
+        res = http_handle => {
+            let err = join_result_to_error("HTTP", res);
+            error!("HTTP Server exited: {err:?}");
+            Err(err)
         }
         _ = cleaner_handle => {
-            error!("Host state cleaner task exited unexpectedly.");
+            let err = anyhow::anyhow!("Host state cleaner task exited unexpectedly");
+            error!("{err}");
+            Err(err)
         }
-    }
+    };
 
     info!("BootyCall shutdown complete.");
-    Ok(())
+    outcome
+}
+
+/// Unwrap a spawned server's `JoinHandle` outcome into a single
+/// `anyhow::Error`. A task panic, a task cancel, or a returned server
+/// error all collapse to a fatal error worth exiting on.
+fn join_result_to_error(
+    name: &str,
+    res: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> anyhow::Error {
+    match res {
+        Ok(Ok(())) => anyhow::anyhow!("{name} server exited unexpectedly with Ok"),
+        Ok(Err(e)) => e.context(format!("{name} server fatal error")),
+        Err(join_err) => anyhow::anyhow!("{name} server task join error: {join_err}"),
+    }
 }

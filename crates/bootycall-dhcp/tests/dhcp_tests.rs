@@ -35,7 +35,7 @@ async fn test_dhcp_server_redirection() {
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     // 2. Spawn DHCP server

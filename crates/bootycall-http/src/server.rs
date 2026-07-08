@@ -22,7 +22,7 @@ struct Asset;
 
 #[derive(Clone)]
 pub struct ServerState {
-    pub config: Arc<std::sync::RwLock<Config>>,
+    pub config: Arc<parking_lot::RwLock<Config>>,
     pub state_store: StateStore,
     pub jinja_env: Arc<minijinja::Environment<'static>>,
 }
@@ -158,7 +158,7 @@ async fn serve_cache_file(
     AxumPath(path): AxumPath<String>,
 ) -> Result<Response, StatusCode> {
     let cache_dir = {
-        let config_guard = state.config.read().unwrap();
+        let config_guard = state.config.read();
         config_guard.server.cache_dir.clone()
     };
     serve_file_from_dir(&cache_dir, &path).await
@@ -195,7 +195,7 @@ async fn poll_handler(
     let client_ip = client_addr.ip().to_string();
 
     let (boot_script, should_update_booting, target_mac_to_use) = {
-        let config_guard = state.config.read().unwrap();
+        let config_guard = state.config.read();
 
         // 1. Check if host is configured directly in yaml
         if let Some(host_config) = config_guard.find_host(&mac_str) {
@@ -286,7 +286,7 @@ async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> i
         .unwrap_or("localhost:8080");
 
     let hosts_list = {
-        let config_guard = state.config.read().unwrap();
+        let config_guard = state.config.read();
         config_guard.hosts.clone()
     };
 
@@ -403,7 +403,7 @@ async fn wallpaper_handler(
 async fn api_status_handler(State(state): State<ServerState>) -> impl IntoResponse {
     let hosts = state.state_store.list_hosts();
     let configs = {
-        let config_guard = state.config.read().unwrap();
+        let config_guard = state.config.read();
         config_guard.hosts.clone()
     };
 
@@ -425,7 +425,7 @@ async fn api_override_handler(
 
     // Validate target configuration exists
     let target_exists = {
-        let config_guard = state.config.read().unwrap();
+        let config_guard = state.config.read();
         config_guard.hosts.iter().any(|h| h.name == payload.target)
     };
 
@@ -454,7 +454,7 @@ async fn api_override_handler(
 /// Runs the Axum HTTP routing server, handling iPXE client scripting and the dashboard.
 pub async fn run_http_server(
     bind_addr: &str,
-    config: Arc<std::sync::RwLock<Config>>,
+    config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
 ) -> Result<(), std::io::Error> {
     // Initialise minijinja environment

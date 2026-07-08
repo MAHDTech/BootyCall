@@ -56,7 +56,7 @@ fn resolve_local_ip(request: &v4::Message, socket: &UdpSocket) -> Ipv4Addr {
 /// Runs the Proxy DHCP server UDP loop, handling configuration-based PXE redirection.
 pub async fn run_dhcp_server(
     bind_addr: &str,
-    config: Arc<std::sync::RwLock<Config>>,
+    config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
 ) -> Result<(), std::io::Error> {
     let socket = UdpSocket::bind(bind_addr).await?;
@@ -136,7 +136,7 @@ pub async fn run_dhcp_server(
 
         // Read configuration in a nested block to drop the lock guard before await points
         let (bootloader_path, host_name) = {
-            let config_guard = config.read().unwrap();
+            let config_guard = config.read();
             let host_config = config_guard.find_host(&mac_str);
             let bootloader_path = if let Some(host) = host_config {
                 if let Some(ref override_path) = host.bootloader {

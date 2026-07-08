@@ -88,7 +88,7 @@ async fn test_http_server_endpoints() {
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     // 3. Spawn HTTP Server
@@ -220,7 +220,7 @@ async fn test_http_server_endpoints() {
 
 /// Helper to create a minimal Config and StateStore, spawn the HTTP server on the
 /// given port, and return the shared state objects for assertion.
-async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateStore) {
+async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, StateStore) {
     let tmp_dir = tempdir().unwrap();
     let cache_dir = tmp_dir.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
@@ -251,7 +251,7 @@ async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateS
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     let server_store = state_store.clone();

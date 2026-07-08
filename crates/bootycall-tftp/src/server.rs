@@ -341,7 +341,7 @@ async fn handle_tftp_transfer(
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 pub async fn run_tftp_server(
     bind_addr: &str,
-    config: Arc<std::sync::RwLock<Config>>,
+    config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
 ) -> Result<(), std::io::Error> {
     let socket = UdpSocket::bind(bind_addr).await?;
@@ -373,7 +373,7 @@ pub async fn run_tftp_server(
         let filename = request.filename.clone();
 
         let (resolved_file_path, mac_addr) = {
-            let config_guard = config.read().unwrap();
+            let config_guard = config.read();
             let state_hosts = state_store.list_hosts();
             let host_state = state_hosts
                 .iter()

@@ -116,7 +116,7 @@ async fn test_tftp_server_negotiation_and_transfer() {
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     // Insert host in state store, mapping 127.0.0.1 to MAC 00:aa:bb:cc:dd:ee
@@ -241,7 +241,7 @@ async fn test_tftp_file_not_found() {
         hosts: vec![],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     // Spawn TFTP server on port 25070
@@ -305,7 +305,7 @@ async fn assert_tftp_traversal_rejected(bind_port: u16, client_port: u16, reques
         hosts: vec![],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     let server_store = state_store.clone();

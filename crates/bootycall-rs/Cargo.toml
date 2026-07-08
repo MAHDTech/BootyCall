@@ -16,3 +16,4 @@ tokio = { workspace = true }
 bootycall-log = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+parking_lot = { workspace = true }

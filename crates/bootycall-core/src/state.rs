@@ -1,6 +1,7 @@
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +60,7 @@ impl StateStore {
         ip: Option<String>,
         arch: Option<String>,
     ) {
-        let mut hosts = self.hosts.write().unwrap();
+        let mut hosts = self.hosts.write();
         let normalized = mac.to_ascii_lowercase().replace('-', ":");
         let entry = hosts
             .entry(normalized.clone())
@@ -90,19 +91,19 @@ impl StateStore {
     }
 
     pub fn get_host(&self, mac: &str) -> Option<HostState> {
-        let hosts = self.hosts.read().unwrap();
+        let hosts = self.hosts.read();
         let normalized = mac.to_ascii_lowercase().replace('-', ":");
         hosts.get(&normalized).cloned()
     }
 
     pub fn list_hosts(&self) -> Vec<HostState> {
-        let hosts = self.hosts.read().unwrap();
+        let hosts = self.hosts.read();
         hosts.values().cloned().collect()
     }
 
     pub fn has_recent_activity(&self, max_age: std::time::Duration) -> bool {
         let now = SystemTime::now();
-        let hosts = self.hosts.read().unwrap();
+        let hosts = self.hosts.read();
         hosts.values().any(|h| {
             now.duration_since(h.last_seen)
                 .map(|age| age <= max_age)
@@ -111,7 +112,7 @@ impl StateStore {
     }
 
     pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
-        let mut logs = self.logs.write().unwrap();
+        let mut logs = self.logs.write();
         logs.push(LogEvent {
             timestamp: SystemTime::now(),
             level: level.to_string(),
@@ -125,12 +126,12 @@ impl StateStore {
     }
 
     pub fn list_logs(&self) -> Vec<LogEvent> {
-        let logs = self.logs.read().unwrap();
+        let logs = self.logs.read();
         logs.clone()
     }
 
     pub fn clean_stale_hosts(&self, max_idle_secs: u64) {
-        let mut hosts = self.hosts.write().unwrap();
+        let mut hosts = self.hosts.write();
         let now = SystemTime::now();
         hosts.retain(|_, state| {
             if let Ok(duration) = now.duration_since(state.last_seen) {

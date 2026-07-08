@@ -1,8 +1,9 @@
 use anyhow::Context;
 use bootycall_log::{error, info};
 use clap::{Parser, Subcommand};
+use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use bootycall_core::config::{Config, watch_config};
 use bootycall_core::state::StateStore;
@@ -144,7 +145,7 @@ async fn main() -> Result<(), anyhow::Error> {
         if let Err(e) = bootycall_extractor::sync_all_hosts_cache(&new_config) {
             error!("Cache sync failed on config reload: {:?}", e);
         }
-        let mut guard = shared_config_clone.write().unwrap();
+        let mut guard = shared_config_clone.write();
         *guard = new_config;
     })
     .context("Failed to start configuration file watcher")?;
@@ -158,7 +159,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // 7. Extract bind addresses
     let (dhcp_bind, tftp_bind, http_bind) = {
-        let guard = shared_config.read().unwrap();
+        let guard = shared_config.read();
         (
             guard.server.proxy_dhcp_bind.clone(),
             guard.server.tftp_bind.clone(),
@@ -204,7 +205,7 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     let oled_store = state_store.clone();
-    let oled_enabled = shared_config.read().unwrap().server.oled_enabled;
+    let oled_enabled = shared_config.read().server.oled_enabled;
     let (oled_shutdown_tx, oled_shutdown_rx) = tokio::sync::mpsc::channel(1);
     let mut oled_manager_handle = None;
     if oled_enabled {

@@ -8,6 +8,7 @@ license.workspace = true
 bootycall-core = { path = "../bootycall-core" }
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

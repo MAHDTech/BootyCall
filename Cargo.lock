@@ -173,6 +173,7 @@ version = "0.1.2"
 dependencies = [
  "bootycall-log",
  "notify",
+ "parking_lot",
  "serde",
  "serde_yaml",
  "tempfile",
@@ -187,6 +188,7 @@ dependencies = [
  "bootycall-core",
  "bootycall-log",
  "dhcproto",
+ "parking_lot",
  "serde",
  "thiserror",
  "tokio",
@@ -215,6 +217,7 @@ dependencies = [
  "bootycall-core",
  "bootycall-log",
  "minijinja",
+ "parking_lot",
  "rand",
  "rust-embed",
  "serde",
@@ -270,6 +273,7 @@ dependencies = [
  "bootycall-oled",
  "bootycall-tftp",
  "clap",
+ "parking_lot",
  "tokio",
 ]
 
@@ -279,6 +283,7 @@ version = "0.1.2"
 dependencies = [
  "bootycall-core",
  "bootycall-log",
+ "parking_lot",
  "tempfile",
  "tokio",
 ]

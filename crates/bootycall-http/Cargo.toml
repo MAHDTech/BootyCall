@@ -9,6 +9,7 @@ bootycall-core = { path = "../bootycall-core" }
 axum = { workspace = true }
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 minijinja = { workspace = true }
 rust-embed = { workspace = true }

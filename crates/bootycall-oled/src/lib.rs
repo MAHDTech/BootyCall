@@ -8,11 +8,15 @@ use crate::metrics::SystemMetrics;
 use crate::renderer::Renderer;
 use bootycall_core::state::StateStore;
 use bootycall_log::{error, info};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
 
 const PAGE_DURATION: Duration = Duration::from_secs(3);
 const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cadence at which the render loop redraws. The shutdown flag is checked
+/// once per tick, so this doubles as the shutdown latency ceiling.
+const TICK: Duration = Duration::from_millis(1000);
 
 use gpiocdev::line::Value;
 
@@ -25,12 +29,40 @@ enum DisplayMode {
 const VISIBLE_Y_START: usize = 28;
 const VISIBLE_HEIGHT: usize = 32;
 
+/// Public entry point: spawn the sync render loop on a dedicated OS thread,
+/// then wait for the async shutdown channel. Framebuffer I/O and sysinfo
+/// refreshes are synchronous by nature; running them inside a tokio task
+/// starves the reactor. A dedicated std::thread is cleaner than per-tick
+/// spawn_blocking churn — and keeps this function's async signature, so the
+/// caller in `main.rs` doesn't have to know.
 pub async fn run_oled_manager(
     state_store: StateStore,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), anyhow::Error> {
     info!("Starting OLED Manager Task...");
 
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let flag_for_thread = shutdown_flag.clone();
+    let state_for_thread = state_store.clone();
+
+    let render_thread = std::thread::Builder::new()
+        .name("bootycall-oled".to_string())
+        .spawn(move || render_loop(state_for_thread, flag_for_thread))?;
+
+    // Bridge the async shutdown channel to the sync loop.
+    let _ = shutdown_rx.recv().await;
+    shutdown_flag.store(true, Ordering::Relaxed);
+
+    // Wait for the render thread to finish. Join is blocking; wrap it so we
+    // don't stall the reactor while the last frame drains + screen blanks.
+    match tokio::task::spawn_blocking(move || render_thread.join()).await {
+        Ok(Ok(inner)) => inner,
+        Ok(Err(_panic)) => Err(anyhow::anyhow!("OLED render thread panicked")),
+        Err(join_err) => Err(anyhow::anyhow!("OLED shutdown join error: {join_err}")),
+    }
+}
+
+fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
     // Try to open GPIO chip and line 44 for rackmount detection on startup.
     // Group permissions for video group on /dev/gpiochip0 are handled via udev rules.
     let detect_request = gpiocdev::Request::builder()
@@ -231,15 +263,13 @@ pub async fn run_oled_manager(
             error!("Failed to write to framebuffer: {:?}", e);
         }
 
-        tokio::select! {
-            _ = shutdown_rx.recv() => {
-                info!("OLED Manager shutting down. Blanking screen...");
-                fb.clear();
-                let _ = fb.flush();
-                break;
-            }
-            _ = sleep(Duration::from_millis(1000)) => {}
+        if shutdown.load(Ordering::Relaxed) {
+            info!("OLED Manager shutting down. Blanking screen...");
+            fb.clear();
+            let _ = fb.flush();
+            break;
         }
+        std::thread::sleep(TICK);
     }
     Ok(())
 }

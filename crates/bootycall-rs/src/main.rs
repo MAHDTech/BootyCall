@@ -127,10 +127,20 @@ async fn main() -> Result<(), anyhow::Error> {
     // 3. Load configuration
     let config = Config::load(&config_path).context("Failed to load configuration file")?;
 
-    // 4. Initialise extractor cache sync
+    // 4. Initialise extractor cache sync. Extraction can take minutes on
+    //    large ISOs and is fully synchronous, so run it on a blocking pool
+    //    thread — otherwise it starves the reactor and the boot-blink LED
+    //    freezes during startup.
     info!("Performing initial cache synchronisation...");
-    if let Err(e) = bootycall_extractor::sync_all_hosts_cache(&config) {
-        error!("Initial cache sync failed: {:?}", e);
+    let config_for_sync = config.clone();
+    let sync_result = tokio::task::spawn_blocking(move || {
+        bootycall_extractor::sync_all_hosts_cache(&config_for_sync)
+    })
+    .await;
+    match sync_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => error!("Initial cache sync failed: {:?}", e),
+        Err(join_err) => error!("Initial cache sync task join error: {:?}", join_err),
     }
 
     // 5. Setup shared state

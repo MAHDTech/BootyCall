@@ -71,6 +71,7 @@ async fn test_http_server_endpoints() {
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
+        api_token: None,
     };
 
     let host = HostConfig {
@@ -234,6 +235,7 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
+        api_token: None,
     };
 
     let host = HostConfig {
@@ -492,4 +494,106 @@ async fn test_root_redirect() {
         "Expected redirect to /ui/index.html, got: {}",
         location
     );
+}
+
+#[tokio::test]
+async fn test_poll_rejects_invalid_mac() {
+    let port: u16 = 26100;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /poll/zz-bb-cc-dd-ee-ff HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, _) = parse_http_response(&response);
+    assert!(
+        status.contains("400"),
+        "Invalid MAC must return 400, got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_override_rejects_invalid_mac() {
+    let port: u16 = 26101;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let body = r#"{"mac":"zz:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+    let req = format!(
+        "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, _) = parse_http_response(&response);
+    assert!(
+        status.contains("400"),
+        "Invalid MAC on override must return 400, got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_override_requires_api_token_when_configured() {
+    let port: u16 = 26102;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.api_token = Some("super-secret".to_string());
+    }
+
+    // No token → 401
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let body = r#"{"mac":"aa:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+        let req = format!(
+            "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("401"),
+            "Missing X-API-Token must return 401, got: {status}"
+        );
+    }
+
+    // Correct token → 200
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let body = r#"{"mac":"aa:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+        let req = format!(
+            "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nX-API-Token: super-secret\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("200"),
+            "Correct token must succeed, got: {status}"
+        );
+    }
 }

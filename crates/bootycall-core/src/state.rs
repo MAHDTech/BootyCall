@@ -4,6 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+/// Upper bound on host entries kept in the state store. SEC-4: an unbounded
+/// map lets a MAC-injection flood balloon memory (the state store is fed by
+/// every DHCP/HTTP/TFTP touch). New MACs beyond this ceiling are silently
+/// dropped by `update_host_status`; the periodic cleaner sweeps stale
+/// entries so headroom returns on its own.
+pub const MAX_TRACKED_HOSTS: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostStatus {
     Polling,
@@ -62,6 +69,12 @@ impl StateStore {
     ) {
         let mut hosts = self.hosts.write();
         let normalized = crate::mac::normalize_mac(mac);
+        // SEC-4: if we're at the ceiling and this MAC is new, drop the
+        // update instead of unboundedly growing the map. Existing entries
+        // (real hosts) keep updating.
+        if !hosts.contains_key(&normalized) && hosts.len() >= MAX_TRACKED_HOSTS {
+            return;
+        }
         let entry = hosts
             .entry(normalized.clone())
             .or_insert_with(|| HostState {

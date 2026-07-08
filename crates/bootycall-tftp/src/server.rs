@@ -372,6 +372,12 @@ async fn read_fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Resul
     Ok((total, false))
 }
 
+/// Ceiling on simultaneous TFTP transfers. Each transfer spawns a task and
+/// opens a fresh UDP socket; without a bound a bogus RRQ flood exhausts
+/// sockets and file descriptors. RFC 1350 transfers are one-shot boot
+/// artefacts, so a modest limit is plenty for real workloads.
+const MAX_CONCURRENT_TRANSFERS: usize = 128;
+
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 pub async fn run_tftp_server(
     bind_addr: &str,
@@ -380,6 +386,7 @@ pub async fn run_tftp_server(
 ) -> Result<(), std::io::Error> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
+    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
 
     let mut buf = [0u8; 1500];
     loop {
@@ -516,6 +523,23 @@ pub async fn run_tftp_server(
             continue;
         }
 
+        // Bound concurrent transfers via a semaphore permit held for the
+        // lifetime of the spawned task. A flood of RRQs then fails fast
+        // (client sees a TFTP ERROR "Server busy") instead of exhausting
+        // sockets and file descriptors.
+        let permit = match transfer_slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(
+                    "Refusing TFTP transfer to {}: {} concurrent transfers already in flight",
+                    src_addr, MAX_CONCURRENT_TRANSFERS
+                );
+                let err = make_error_packet(0, "Server busy");
+                let _ = transfer_socket.send(&err).await;
+                continue;
+            }
+        };
+
         let transfer_state_store = state_store.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_tftp_transfer(
@@ -533,6 +557,7 @@ pub async fn run_tftp_server(
                     src_addr, e
                 );
             }
+            drop(permit);
         });
     }
 }

@@ -18,6 +18,13 @@ pub struct ServerConfig {
     pub default_bootloader_arm64: String,
     #[serde(default = "default_oled_enabled")]
     pub oled_enabled: bool,
+    /// Shared secret required on mutating dashboard endpoints
+    /// (POST /api/override). When absent, mutating endpoints run
+    /// unauthenticated — same behaviour as before P1-7. Populate this
+    /// (or bind the dashboard behind a reverse proxy) before exposing
+    /// the box beyond localhost.
+    #[serde(default)]
+    pub api_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

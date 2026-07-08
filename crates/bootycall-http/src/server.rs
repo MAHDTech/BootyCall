@@ -192,6 +192,12 @@ async fn poll_handler(
         .unwrap_or("localhost:8080");
 
     let mac_str = bootycall_core::normalize_mac(&mac);
+    // SEC-5: reject `%0a`-injected or otherwise malformed MACs before they
+    // reach the state store (would flood SEC-4's map) or the returned iPXE
+    // script (would inject newlines into the response body).
+    if !bootycall_core::is_valid_mac(&mac_str) {
+        return (StatusCode::BAD_REQUEST, "Invalid MAC address\n").into_response();
+    }
     let client_ip = client_addr.ip().to_string();
 
     let (boot_script, should_update_booting, target_mac_to_use) = {
@@ -416,12 +422,48 @@ async fn api_logs_handler(State(state): State<ServerState>) -> impl IntoResponse
     Json(logs)
 }
 
+/// Length-generic constant-time byte comparison so a wrong-length token
+/// can't be distinguished from a wrong-value token via response timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 // API endpoint: POST /api/override
 async fn api_override_handler(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(payload): Json<OverrideRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    // SEC-3: when an api_token is configured, mutating endpoints require it
+    // via the `X-API-Token` header. Absent config leaves the endpoint
+    // unauthenticated (backwards-compatible for hosts already sitting behind
+    // a reverse proxy or bound to localhost).
+    {
+        let config_guard = state.config.read();
+        if let Some(expected) = config_guard.server.api_token.as_deref() {
+            let provided = headers
+                .get("X-API-Token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+    }
+
     let mac_str = bootycall_core::normalize_mac(&payload.mac);
+    // SEC-5: reject malformed MACs early — otherwise the state store logs
+    // and stores whatever the client sent, feeding SEC-4.
+    if !bootycall_core::is_valid_mac(&mac_str) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Validate target configuration exists
     let target_exists = {

@@ -52,11 +52,16 @@ pub fn safe_join(root: &Path, requested: &str) -> Option<PathBuf> {
         return Some(canonical_candidate);
     }
 
-    // Non-existent candidate (the normal 404 case): fall back to a lexical
-    // containment check. The component filter above already guarantees this,
-    // but keep the assertion explicit so a future edit to the filter can't
-    // silently open an escape.
-    if !candidate.starts_with(&canonical_root) && !candidate.starts_with(root) {
+    // Non-existent candidate (the normal 404 case). A purely lexical check
+    // would miss a symlinked *parent* directory with a not-yet-existing leaf
+    // (`link/newfile` where `link` -> outside the root): the leaf can't be
+    // canonicalised, so the escape slips through. Canonicalise the nearest
+    // existing ancestor and confirm it still lives under the canonical root.
+    // The component filter already blocks `..`/absolute, so the remaining
+    // (non-existent) tail is plain `Normal` segments under that ancestor.
+    let existing_ancestor = candidate.ancestors().find(|a| a.exists())?;
+    let canonical_ancestor = existing_ancestor.canonicalize().ok()?;
+    if !canonical_ancestor.starts_with(&canonical_root) {
         return None;
     }
     Some(candidate)
@@ -127,5 +132,21 @@ mod tests {
         symlink(outside.path().join("secret"), dir.path().join("escape")).unwrap();
 
         assert!(safe_join(dir.path(), "escape").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_symlinked_parent_with_missing_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let dir = root();
+        let outside = TempDir::new().unwrap();
+
+        // `link` -> an existing directory outside the root. The requested
+        // leaf does not exist yet, so it can't be canonicalised — the missing
+        // -leaf branch must still reject it via the symlinked parent.
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        assert!(safe_join(dir.path(), "link/newfile").is_none());
     }
 }

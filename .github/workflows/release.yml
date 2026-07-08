@@ -34,6 +34,10 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          # INFRA-6: pull real LFS blobs so the assets derivation ships
+          # actual wallpapers instead of pointer files. iPXE builds don't
+          # depend on LFS but this checkout is shared.
+          lfs: true
 
       - id: check_default_branch
         name: Check if on Default Branch

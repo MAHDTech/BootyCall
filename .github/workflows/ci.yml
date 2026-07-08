@@ -377,6 +377,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          # INFRA-6: assets.nix consumes wallpapers tracked in git-lfs.
+          # Without lfs: true the checkout leaves 130-byte pointer files,
+          # so the assets derivation ends up "shipping" pointer text.
+          lfs: true
 
       - id: get_repository_owner
         name: Get lowercased repository owner

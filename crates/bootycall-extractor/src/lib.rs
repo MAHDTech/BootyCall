@@ -5,47 +5,39 @@ pub mod iso;
 use crate::error::ExtractorError;
 use bootycall_core::config::{Config, HostConfig};
 use bootycall_log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Persisted alongside the extracted kernel/initrd so we can decide whether
+/// re-extraction is needed. The set of fields is the full cache key: any
+/// field drifting between what was extracted and what the host config now
+/// says forces re-extraction.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct CacheMetadata {
     image_path: PathBuf,
     mtime_secs: u64,
     size: u64,
+    /// Explicit override for the kernel path inside the image. `None` means
+    /// "auto-detect", which is a distinct cache key from any concrete value.
+    #[serde(default)]
+    kernel_override: Option<String>,
+    /// Same idea for initrd.
+    #[serde(default)]
+    initrd_override: Option<String>,
 }
 
 impl CacheMetadata {
     fn write_to_file(&self, path: &Path) -> std::io::Result<()> {
-        let content = format!(
-            "{}\n{}\n{}\n",
-            self.image_path.display(),
-            self.mtime_secs,
-            self.size
-        );
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(path, content)
     }
 
     fn read_from_file(path: &Path) -> Result<Self, std::io::Error> {
         let content = fs::read_to_string(path)?;
-        let lines: Vec<&str> = content.lines().collect();
-        if lines.len() < 3 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Incomplete cache metadata",
-            ));
-        }
-        let image_path = PathBuf::from(lines[0]);
-        let mtime_secs = lines[1]
-            .parse::<u64>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let size = lines[2]
-            .parse::<u64>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(Self {
-            image_path,
-            mtime_secs,
-            size,
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
@@ -71,9 +63,13 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<(), ExtractorError> {
 /// Synchronises the cache directory for a single host.
 pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), ExtractorError> {
     let host_cache_dir = cache_dir.join(&host.mac);
-    let metadata_path = host_cache_dir.join("metadata.txt");
+    let metadata_path = host_cache_dir.join("metadata.json");
     let kernel_path = host_cache_dir.join("kernel");
     let initrd_path = host_cache_dir.join("initrd");
+    // Legacy 3-line text metadata written by earlier builds; if we see one,
+    // treat the cache as stale so re-extraction produces a JSON metadata file
+    // going forward. The stale legacy file is removed below.
+    let legacy_metadata_path = host_cache_dir.join("metadata.txt");
 
     // Get current image metadata
     if !host.image_path.exists() {
@@ -88,14 +84,26 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
         .as_secs();
     let current_size = file_meta.len();
 
-    // Check if cache is still valid
+    // Check if cache is still valid. The override paths participate in the
+    // cache key so that editing `kernel_path` / `initrd_path` in the host
+    // config invalidates the cache — the previous 3-line text format only
+    // compared image path/mtime/size and served old artefacts across an
+    // override change.
     let mut cache_valid = false;
     if metadata_path.exists() && kernel_path.exists() && initrd_path.exists() {
         cache_valid = CacheMetadata::read_from_file(&metadata_path).is_ok_and(|meta| {
             meta.image_path == host.image_path
                 && meta.mtime_secs == current_mtime
                 && meta.size == current_size
+                && meta.kernel_override.as_deref() == host.kernel_path.as_deref()
+                && meta.initrd_override.as_deref() == host.initrd_path.as_deref()
         });
+    }
+
+    // Drop the legacy text metadata file if it lingers alongside the JSON
+    // one — it's ignored by the new reader and would confuse manual audits.
+    if legacy_metadata_path.exists() {
+        let _ = fs::remove_file(&legacy_metadata_path);
     }
 
     if cache_valid {
@@ -148,6 +156,8 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
                 image_path: host.image_path.clone(),
                 mtime_secs: current_mtime,
                 size: current_size,
+                kernel_override: host.kernel_path.clone(),
+                initrd_override: host.initrd_path.clone(),
             };
             meta.write_to_file(&metadata_path)?;
             info!(

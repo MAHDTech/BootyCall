@@ -204,6 +204,7 @@ dependencies = [
  "gpt",
  "iso9660",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

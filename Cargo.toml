@@ -15,7 +15,6 @@ members = [
 [workspace.package]
 version = "0.1.3"
 edition = "2024"
-rust-version = "1.96"
 license = "Apache-2.0"
 
 # Strict lints applied to every member crate via `lints.workspace = true`

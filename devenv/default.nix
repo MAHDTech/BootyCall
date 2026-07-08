@@ -34,6 +34,7 @@ in
   packages = with pkgs; [
     bashInteractive
     bootycall
+    cargo-audit
     cargo-edit # Adds 'cargo upgrade'
     figlet
     gh

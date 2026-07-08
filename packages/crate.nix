@@ -17,5 +17,5 @@ pkgs.rustPlatform.buildRustPackage {
     "-p"
     name
   ];
-  doCheck = false;
+  doCheck = true;
 }

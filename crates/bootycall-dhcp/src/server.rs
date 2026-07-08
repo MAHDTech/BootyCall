@@ -53,6 +53,16 @@ fn resolve_local_ip(request: &v4::Message, socket: &UdpSocket) -> Ipv4Addr {
     get_default_local_ip()
 }
 
+/// Returns true iff DHCP Option 60 (Vendor Class Identifier) is present and
+/// contains the ASCII substring `PXEClient`. Per RFC 4578 a PXE proxy DHCP
+/// server MUST only answer clients advertising this identifier.
+fn is_pxe_client(request: &v4::Message) -> bool {
+    match request.opts().get(v4::OptionCode::ClassIdentifier) {
+        Some(v4::DhcpOption::ClassIdentifier(bytes)) => bytes.windows(9).any(|w| w == b"PXEClient"),
+        _ => false,
+    }
+}
+
 /// Runs the Proxy DHCP server UDP loop, handling configuration-based PXE redirection.
 pub async fn run_dhcp_server(
     bind_addr: &str,
@@ -95,6 +105,18 @@ pub async fn run_dhcp_server(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]
         );
+
+        // RFC 4578: only reply to clients advertising `PXEClient` in the
+        // vendor-class identifier (Option 60). Injecting PXE options into
+        // every DHCP message on the segment would disrupt non-PXE clients
+        // and violates the spec.
+        if !is_pxe_client(&request) {
+            debug!(
+                "Skipping non-PXE DHCP message from {} (mac {}): missing/unrecognised Option 60",
+                src_addr, mac_str
+            );
+            continue;
+        }
 
         // Parse client system architecture (Option 93)
         let arch = match request.opts().get(v4::OptionCode::ClientSystemArchitecture) {

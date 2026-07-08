@@ -43,3 +43,17 @@ libc = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 rusttype = "0.9.3"
 parking_lot = "0.12.5"
+
+# Release profile tuned for the aarch64 CloudKey Gen2+: minimise the
+# on-disk footprint of the appliance binary without giving up too much
+# throughput. `panic = "abort"` interacts with the LED panic hook in
+# main.rs — the hook still fires before abort, so the "solid white on
+# panic" behaviour is preserved. If `opt-level = "s"` ever measurably
+# hurts CLI/HTTP throughput on the box, revisit with `"z"` vs `2` and
+# note the pick in the bump commit.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "s"

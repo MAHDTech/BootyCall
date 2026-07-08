@@ -57,14 +57,16 @@ parking_lot = "0.12.5"
 
 # Release profile tuned for the aarch64 CloudKey Gen2+: minimise the
 # on-disk footprint of the appliance binary without giving up too much
-# throughput. `panic = "abort"` interacts with the LED panic hook in
-# main.rs — the hook still fires before abort, so the "solid white on
-# panic" behaviour is preserved. If `opt-level = "s"` ever measurably
-# hurts CLI/HTTP throughput on the box, revisit with `"z"` vs `2` and
-# note the pick in the bump commit.
+# throughput. We deliberately keep the default `panic = "unwind"`: the
+# config hot-reload watcher relies on `std::panic::catch_unwind`
+# (bootycall-core/src/config.rs) to survive a panic in a reload callback
+# and keep serving — `panic = "abort"` would silently defeat that in the
+# shipped binary. The LED panic hook in main.rs still fires on unwind, so
+# the "solid white on panic" behaviour is preserved either way. If
+# `opt-level = "s"` ever measurably hurts CLI/HTTP throughput on the box,
+# revisit with `"z"` vs `2` and note the pick in the bump commit.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
 opt-level = "s"

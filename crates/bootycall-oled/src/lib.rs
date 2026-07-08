@@ -53,6 +53,59 @@ enum DisplayMode {
 const VISIBLE_Y_START: usize = 28;
 const VISIBLE_HEIGHT: usize = 32;
 
+/// Vertical extent (px) of the screensaver "TARS" glyph block plus the
+/// braille dots drawn beneath it (`draw_y + 13` plus the dot rows). Used to
+/// keep the bounce box inside the visible window. Named const rather than a
+/// bare magic literal so the layout intent is documented in one place.
+const SCREENSAVER_BLOCK_HEIGHT: isize = 21;
+
+/// Bounding box the screensaver text reflects inside.
+#[derive(Clone, Copy)]
+struct BounceBox {
+    min_x: isize,
+    max_x: isize,
+    min_y: isize,
+    max_y: isize,
+}
+
+/// Advance the screensaver bounce one frame: move by `(dx, dy)`, then reflect
+/// off the box walls, clamping the position back inside in the same frame it
+/// moves. Returns the new `(x, y, dx, dy)`.
+///
+/// Pure so the `BUG-5` guarantee is unit-testable: the earlier clamp-then-move
+/// ordering could leave `x` at `-1` before the `as usize` cast in
+/// `draw_braille`, panicking in debug builds. Moving first then clamping keeps
+/// `x`/`y` within bounds (and thus non-negative) at every draw point.
+fn step_bounce(
+    x: isize,
+    y: isize,
+    dx: isize,
+    dy: isize,
+    b: BounceBox,
+) -> (isize, isize, isize, isize) {
+    let mut x = x + dx;
+    let mut y = y + dy;
+    let mut dx = dx;
+    let mut dy = dy;
+
+    if x >= b.max_x {
+        x = b.max_x;
+        dx = -dx.abs();
+    } else if x <= b.min_x {
+        x = b.min_x;
+        dx = dx.abs();
+    }
+    if y >= b.max_y {
+        y = b.max_y;
+        dy = -dy.abs();
+    } else if y <= b.min_y {
+        y = b.min_y;
+        dy = dy.abs();
+    }
+
+    (x, y, dx, dy)
+}
+
 /// Metric-page descriptor. Adding a page is one entry: label, icon,
 /// optional refresh callback (only pages backed by an expensive sysinfo
 /// query need one), and a value getter. The old `%8` + triple `match`
@@ -243,41 +296,25 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
             match current_mode {
                 DisplayMode::Screensaver => {
                     // Update bounce logic (TARS text moves every 1 second).
-                    // Measure "TARS" via the renderer instead of the old magic
-                    // `29` (QUAL-7 overlap folded in here since it's the fix).
+                    // Measure "TARS" via the renderer instead of a magic width;
+                    // the block height is a documented named const.
                     let width_tars = Renderer::measure_text("TARS", false) as isize;
-                    let height_tars = 21isize;
 
-                    let min_x = 0isize;
-                    let max_x = WIDTH as isize - width_tars;
-                    let min_y = VISIBLE_Y_START as isize;
-                    let max_y = (HEIGHT as isize) - height_tars;
+                    let bounds = BounceBox {
+                        min_x: 0,
+                        max_x: WIDTH as isize - width_tars,
+                        min_y: VISIBLE_Y_START as isize,
+                        max_y: (HEIGHT as isize) - SCREENSAVER_BLOCK_HEIGHT,
+                    };
 
-                    // Move first, then clamp. The old order clamped then
-                    // moved, so the +dx/dy step could push `ss_x` to -1
-                    // before the `ss_x as usize + 3` in draw_braille below
-                    // panicked in debug builds. `.max(0)` on the draw
-                    // coordinate is a belt-and-braces guard.
-                    ss_x += ss_dx;
-                    ss_y += ss_dy;
-
-                    if ss_x >= max_x {
-                        ss_x = max_x;
-                        ss_dx = -ss_dx.abs();
-                    } else if ss_x <= min_x {
-                        ss_x = min_x;
-                        ss_dx = ss_dx.abs();
-                    }
-                    if ss_y >= max_y {
-                        ss_y = max_y;
-                        ss_dy = -ss_dy.abs();
-                    } else if ss_y <= min_y {
-                        ss_y = min_y;
-                        ss_dy = ss_dy.abs();
-                    }
+                    // step_bounce moves then clamps, so ss_x/ss_y stay within
+                    // bounds (and non-negative) at every draw point — see the
+                    // BUG-5 note on the function. `.max(..)` below is a
+                    // belt-and-braces guard on the usize cast.
+                    (ss_x, ss_y, ss_dx, ss_dy) = step_bounce(ss_x, ss_y, ss_dx, ss_dy, bounds);
 
                     let draw_x = ss_x.max(0) as usize;
-                    let draw_y = ss_y.max(min_y) as usize;
+                    let draw_y = ss_y.max(bounds.min_y) as usize;
                     renderer.draw_text(draw_x, draw_y, "TARS", false);
                     renderer.draw_braille(draw_x + 3, draw_y + 13, 3, 3, 8);
                 }
@@ -421,5 +458,47 @@ mod tests {
         assert!(should_retry_detect(
             DETECT_RETRY_INTERVAL + Duration::from_secs(30)
         ));
+    }
+
+    #[test]
+    fn step_bounce_reflects_off_left_wall_without_underflow() {
+        // x=0 moving left (dx=-1): the pre-fix clamp-then-move ordering left
+        // x at -1 (BUG-5). step_bounce must keep x at the wall and flip dx.
+        let b = BounceBox {
+            min_x: 0,
+            max_x: 100,
+            min_y: 5,
+            max_y: 40,
+        };
+        let (x, _y, dx, _dy) = step_bounce(0, 10, -1, 1, b);
+        assert_eq!(x, 0, "x must not underflow past the left wall");
+        assert_eq!(dx, 1, "dx must flip to move right");
+    }
+
+    #[test]
+    fn step_bounce_stays_in_bounds_for_many_frames() {
+        let b = BounceBox {
+            min_x: 0,
+            max_x: 100,
+            min_y: 5,
+            max_y: 40,
+        };
+        // Start heading into the top-left corner — the worst case for BUG-5.
+        let mut state = (0isize, 5isize, -1isize, -1isize);
+        for _ in 0..1000 {
+            state = step_bounce(state.0, state.1, state.2, state.3, b);
+            assert!(
+                state.0 >= b.min_x && state.0 <= b.max_x,
+                "x out of bounds: {}",
+                state.0
+            );
+            assert!(
+                state.1 >= b.min_y && state.1 <= b.max_y,
+                "y out of bounds: {}",
+                state.1
+            );
+            // The draw coordinate casts to usize, so x/y must never be negative.
+            assert!(state.0 >= 0 && state.1 >= 0);
+        }
     }
 }

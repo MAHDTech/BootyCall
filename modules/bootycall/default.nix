@@ -121,6 +121,33 @@ in
       description = "Whether to automatically open firewall ports for BootyCall services.";
     };
 
+    hardware = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Relax the hardened systemd unit so the OLED display and status
+          LED can drive real hardware. Enabling this replaces
+          `PrivateDevices = true` with targeted `DeviceAllow` entries for
+          the GPIO chip and framebuffer, and adds the `video` supplementary
+          group so the DynamicUser can talk to `/dev/gpiochip0` and
+          `/dev/fb0`. Leave this off on hardware that does not have the
+          rackmount OLED (the default hardening will keep BootyCall away
+          from `/dev` entirely).
+        '';
+      };
+      gpioDevices = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "/dev/gpiochip0" ];
+        description = "GPIO chip character devices exposed to the unit when `hardware.enable` is true.";
+      };
+      framebufferDevices = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "/dev/fb0" ];
+        description = "Framebuffer character devices exposed to the unit when `hardware.enable` is true.";
+      };
+    };
+
     server = {
       httpBind = lib.mkOption {
         type = lib.types.str;
@@ -241,7 +268,23 @@ in
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         NoNewPrivileges = true;
-        PrivateDevices = true;
+        # `PrivateDevices = true` gives us a private /dev with no physical
+        # devices — great for the network-only path, but incompatible with
+        # the OLED/LED code, which needs /dev/gpiochip0 + /dev/fb0. Gate
+        # the relaxation behind `hardware.enable` so the strict default
+        # stands on boxes that don't have the rackmount accessory.
+        PrivateDevices = !cfg.hardware.enable;
+      }
+      // lib.optionalAttrs cfg.hardware.enable {
+        DeviceAllow = map (d: "${d} rw") (cfg.hardware.gpioDevices ++ cfg.hardware.framebufferDevices);
+        # DynamicUser doesn't inherit any group memberships by default, so
+        # spell out the ones needed to talk to those char devices.
+        SupplementaryGroups = [
+          "gpio"
+          "video"
+        ];
+      }
+      // {
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = [

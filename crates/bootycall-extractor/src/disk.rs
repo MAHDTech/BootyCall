@@ -185,6 +185,25 @@ fn find_file_recursive_fat<'a, T: ReadWriteSeek>(
     dir: &FatDir<'a, T>,
     filter: &dyn Fn(&str) -> bool,
 ) -> io::Result<Option<FatFile<'a, T>>> {
+    find_file_recursive_fat_bounded(dir, filter, 0)
+}
+
+/// Bound FAT directory recursion. `fatfs` abstracts cluster indices away, so
+/// a cycle-detection visited-set isn't practical from here — the depth cap is
+/// the pragmatic guard against pathological or cyclic images taking down the
+/// whole process via stack overflow.
+fn find_file_recursive_fat_bounded<'a, T: ReadWriteSeek>(
+    dir: &FatDir<'a, T>,
+    filter: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> io::Result<Option<FatFile<'a, T>>> {
+    if crate::iso::depth_exceeded(depth) {
+        bootycall_log::warn!(
+            "FAT walker hit MAX_DIR_DEPTH={} — refusing to recurse further",
+            crate::iso::MAX_DIR_DEPTH
+        );
+        return Ok(None);
+    }
     for entry_res in dir.iter() {
         let entry = entry_res?;
         let name = entry.file_name();
@@ -197,7 +216,7 @@ fn find_file_recursive_fat<'a, T: ReadWriteSeek>(
                 continue;
             }
             let subdir = entry.to_dir();
-            if let Some(found) = find_file_recursive_fat(&subdir, filter)? {
+            if let Some(found) = find_file_recursive_fat_bounded(&subdir, filter, depth + 1)? {
                 return Ok(Some(found));
             }
         }

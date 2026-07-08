@@ -17,8 +17,32 @@ const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
 /// Cadence at which the render loop redraws. The shutdown flag is checked
 /// once per tick, so this doubles as the shutdown latency ceiling.
 const TICK: Duration = Duration::from_millis(1000);
+/// How often to re-attempt acquiring the optional rackmount detect GPIO
+/// line after a startup failure (e.g. a udev-rule race during boot). We
+/// retry rather than pinning to "standalone" rotation for the whole
+/// process lifetime.
+const DETECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 use gpiocdev::line::Value;
+
+/// Whether enough time has elapsed since the last detect-line acquisition
+/// attempt to try again. Pulled out as a pure fn so the retry cadence is
+/// unit-testable without real GPIO hardware.
+fn should_retry_detect(since_last_attempt: Duration) -> bool {
+    since_last_attempt >= DETECT_RETRY_INTERVAL
+}
+
+/// Attempt to acquire GPIO line 44 (rackmount detect) as an input. Returns
+/// `None` when unavailable (optional hardware). Silent by design — callers
+/// own the logging so it can be log-once rather than per-attempt.
+fn request_detect_line() -> Option<gpiocdev::Request> {
+    gpiocdev::Request::builder()
+        .on_chip("/dev/gpiochip0")
+        .with_line(44)
+        .as_input()
+        .request()
+        .ok()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayMode {
@@ -126,18 +150,16 @@ pub async fn run_oled_manager(
 }
 
 fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
-    // Try to open GPIO chip and line 44 for rackmount detection on startup.
-    // Group permissions for video group on /dev/gpiochip0 are handled via udev rules.
-    let detect_request = gpiocdev::Request::builder()
-        .on_chip("/dev/gpiochip0")
-        .with_line(44)
-        .as_input()
-        .request()
-        .map_err(|e| {
-            info!("GPIO rackmount detection not available (optional): {:?}", e);
-            e
-        })
-        .ok();
+    // Rackmount detect line (GPIO 44) is optional. Acquire it once at
+    // startup; if it fails (e.g. a udev-rule race during boot) retry every
+    // DETECT_RETRY_INTERVAL rather than pinning to standalone rotation for
+    // the process lifetime. Log once on failure and once on recovery — never
+    // per tick. Group permissions on /dev/gpiochip0 are handled via udev.
+    let mut detect_request = request_detect_line();
+    if detect_request.is_none() {
+        info!("GPIO rackmount detection not available (optional); will retry periodically");
+    }
+    let mut last_detect_attempt = Instant::now();
 
     // Drive GPIO 46 high to enable power to the rackmount accessory slot.
     let _enable_request = gpiocdev::Request::builder()
@@ -171,6 +193,17 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
 
     loop {
         let now = Instant::now();
+
+        // 0. Retry the optional rackmount detect line if it wasn't available
+        //    yet (log once on recovery, silent on continued failure).
+        if detect_request.is_none() && should_retry_detect(now.duration_since(last_detect_attempt))
+        {
+            last_detect_attempt = now;
+            detect_request = request_detect_line();
+            if detect_request.is_some() {
+                info!("GPIO rackmount detection now available");
+            }
+        }
 
         // 1. Only poll active SSH sessions every 5 seconds to prevent procfs spam
         if now.duration_since(last_ssh_check) >= Duration::from_secs(5) {
@@ -372,4 +405,21 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
 
     fb.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_retry_waits_for_full_interval() {
+        assert!(!should_retry_detect(Duration::from_secs(0)));
+        assert!(!should_retry_detect(
+            DETECT_RETRY_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(should_retry_detect(DETECT_RETRY_INTERVAL));
+        assert!(should_retry_detect(
+            DETECT_RETRY_INTERVAL + Duration::from_secs(30)
+        ));
+    }
 }

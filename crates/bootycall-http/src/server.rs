@@ -191,7 +191,7 @@ async fn poll_handler(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost:8080");
 
-    let mac_str = mac.to_ascii_lowercase().replace('-', ":");
+    let mac_str = bootycall_core::normalize_mac(&mac);
     let client_ip = client_addr.ip().to_string();
 
     let (boot_script, should_update_booting, target_mac_to_use) = {
@@ -421,7 +421,7 @@ async fn api_override_handler(
     State(state): State<ServerState>,
     Json(payload): Json<OverrideRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let mac_str = payload.mac.to_ascii_lowercase().replace('-', ":");
+    let mac_str = bootycall_core::normalize_mac(&payload.mac);
 
     // Validate target configuration exists
     let target_exists = {

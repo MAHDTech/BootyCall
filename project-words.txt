@@ -142,3 +142,5 @@ vscodevim
 waderyan
 wakatime
 yzhang
+hexhyp
+hexdigit

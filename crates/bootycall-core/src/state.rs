@@ -61,7 +61,7 @@ impl StateStore {
         arch: Option<String>,
     ) {
         let mut hosts = self.hosts.write();
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let normalized = crate::mac::normalize_mac(mac);
         let entry = hosts
             .entry(normalized.clone())
             .or_insert_with(|| HostState {
@@ -92,7 +92,7 @@ impl StateStore {
 
     pub fn get_host(&self, mac: &str) -> Option<HostState> {
         let hosts = self.hosts.read();
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let normalized = crate::mac::normalize_mac(mac);
         hosts.get(&normalized).cloned()
     }
 
@@ -116,7 +116,7 @@ impl StateStore {
         logs.push(LogEvent {
             timestamp: SystemTime::now(),
             level: level.to_string(),
-            mac: mac.map(|m| m.to_ascii_lowercase().replace('-', ":")),
+            mac: mac.map(crate::mac::normalize_mac),
             message: message.to_string(),
         });
         let len = logs.len();

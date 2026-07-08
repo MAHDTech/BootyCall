@@ -44,14 +44,14 @@ impl Config {
 
         // Normalize MAC addresses to lowercase
         for host in &mut config.hosts {
-            host.mac = host.mac.to_ascii_lowercase().replace('-', ":");
+            host.mac = crate::mac::normalize_mac(&host.mac);
         }
 
         Ok(config)
     }
 
     pub fn find_host(&self, mac: &str) -> Option<&HostConfig> {
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let normalized = crate::mac::normalize_mac(mac);
         self.hosts.iter().find(|h| h.mac == normalized)
     }
 }

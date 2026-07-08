@@ -149,3 +149,9 @@ binfmt
 vulns
 Łukasz
 Dziedzic
+ihdr
+idat
+iend
+bfinal
+btype
+scanline

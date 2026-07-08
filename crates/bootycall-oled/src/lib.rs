@@ -453,9 +453,42 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
     Ok(())
 }
 
+/// Render a metrics-page-style sample (small label on top, bold value
+/// centred below) into a fresh grayscale framebuffer and return the raw
+/// `WIDTH * HEIGHT` 8-bit buffer. No `/dev/fb0` is touched, so this runs on
+/// any host — it powers the `oled_render` example and its smoke test, which
+/// capture the rendered glyphs to PNG for before/after font comparison
+/// (e.g. the rusttype → ab_glyph migration).
+pub fn render_sample_to_gray(label: &str, value: &str) -> Vec<u8> {
+    let mut fb = Framebuffer::new();
+    fb.clear();
+    {
+        let mut renderer = Renderer::new(&mut fb);
+        renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
+        let text_w = Renderer::measure_text(value, true);
+        let val_x = if text_w < WIDTH {
+            (WIDTH - text_w) / 2
+        } else {
+            0
+        };
+        renderer.draw_text(val_x, VISIBLE_Y_START + 16, value, true);
+    }
+    fb.buffer.to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_sample_has_expected_size_and_lit_pixels() {
+        let gray = render_sample_to_gray("UPTIME", "3d 14:22:07");
+        assert_eq!(gray.len(), WIDTH * HEIGHT);
+        assert!(
+            gray.iter().any(|&p| p > 0),
+            "a rendered text sample should light some pixels"
+        );
+    }
 
     #[test]
     fn detect_retry_waits_for_full_interval() {

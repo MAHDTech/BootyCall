@@ -129,11 +129,13 @@ in
           Relax the hardened systemd unit so the OLED display and status
           LED can drive real hardware. Enabling this replaces
           `PrivateDevices = true` with targeted `DeviceAllow` entries for
-          the GPIO chip and framebuffer, and adds the `video` supplementary
-          group so the DynamicUser can talk to `/dev/gpiochip0` and
-          `/dev/fb0`. Leave this off on hardware that does not have the
-          rackmount OLED (the default hardening will keep BootyCall away
-          from `/dev` entirely).
+          the GPIO chip and framebuffer, and adds the `gpio` and `video`
+          supplementary groups so the DynamicUser can talk to
+          `/dev/gpiochip0` and `/dev/fb0`. The `gpio` group is created
+          automatically (it is not a NixOS default); udev rules are
+          expected to assign the device nodes to it. Leave this off on
+          hardware that does not have the rackmount OLED (the default
+          hardening will keep BootyCall away from `/dev` entirely).
         '';
       };
       gpioDevices = lib.mkOption {
@@ -231,6 +233,14 @@ in
     networking.firewall = lib.mkIf cfg.openFirewall {
       allowedTCPPorts = cfg.firewallPorts.tcp;
       allowedUDPPorts = cfg.firewallPorts.udp;
+    };
+
+    # DynamicUser joins these supplementary groups when hardware.enable is
+    # set. `video` is standard on NixOS but `gpio` is not, so ensure it
+    # exists — otherwise the unit fails to start. udev rules are expected to
+    # assign the gpiochip device to this group.
+    users.groups = lib.mkIf cfg.hardware.enable {
+      gpio = { };
     };
 
     systemd.services.bootycall = {

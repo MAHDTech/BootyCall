@@ -150,28 +150,44 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
 
             match current_mode {
                 DisplayMode::Screensaver => {
-                    // Update bounce logic (TARS text moves every 1 second)
-                    let width_tars = 29;
-                    let height_tars = 21;
+                    // Update bounce logic (TARS text moves every 1 second).
+                    // Measure "TARS" via the renderer instead of the old magic
+                    // `29` (QUAL-7 overlap folded in here since it's the fix).
+                    let width_tars = Renderer::measure_text("TARS", false) as isize;
+                    let height_tars = 21isize;
 
+                    let min_x = 0isize;
+                    let max_x = WIDTH as isize - width_tars;
                     let min_y = VISIBLE_Y_START as isize;
-                    let max_y = (HEIGHT - height_tars) as isize;
+                    let max_y = (HEIGHT as isize) - height_tars;
 
-                    if ss_x + width_tars >= WIDTH as isize || ss_x <= 0 {
-                        ss_dx = -ss_dx;
-                    }
-                    if ss_y >= max_y || ss_y <= min_y {
-                        ss_dy = -ss_dy;
-                    }
-
-                    ss_x = ss_x.clamp(0, WIDTH as isize - width_tars);
-                    ss_y = ss_y.clamp(min_y, max_y);
-
+                    // Move first, then clamp. The old order clamped then
+                    // moved, so the +dx/dy step could push `ss_x` to -1
+                    // before the `ss_x as usize + 3` in draw_braille below
+                    // panicked in debug builds. `.max(0)` on the draw
+                    // coordinate is a belt-and-braces guard.
                     ss_x += ss_dx;
                     ss_y += ss_dy;
 
-                    renderer.draw_text(ss_x as usize, ss_y as usize, "TARS", false);
-                    renderer.draw_braille(ss_x as usize + 3, ss_y as usize + 13, 3, 3, 8);
+                    if ss_x >= max_x {
+                        ss_x = max_x;
+                        ss_dx = -ss_dx.abs();
+                    } else if ss_x <= min_x {
+                        ss_x = min_x;
+                        ss_dx = ss_dx.abs();
+                    }
+                    if ss_y >= max_y {
+                        ss_y = max_y;
+                        ss_dy = -ss_dy.abs();
+                    } else if ss_y <= min_y {
+                        ss_y = min_y;
+                        ss_dy = ss_dy.abs();
+                    }
+
+                    let draw_x = ss_x.max(0) as usize;
+                    let draw_y = ss_y.max(min_y) as usize;
+                    renderer.draw_text(draw_x, draw_y, "TARS", false);
+                    renderer.draw_braille(draw_x + 3, draw_y + 13, 3, 3, 8);
                 }
                 DisplayMode::Metrics => {
                     let (label, value, icon) = match page_index {

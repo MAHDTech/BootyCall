@@ -101,6 +101,7 @@ pngquant
 poweroff
 prek
 qcow
+gpiocdev
 rackmount
 ranlib
 rarr

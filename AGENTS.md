@@ -18,7 +18,7 @@ Welcome! This document outlines code standards, architectural constraints, and d
 ### Rust Design Rules
 
 - **Safety**: Do not use `unsafe` code blocks. All system integrations must rely on safe Rust wrappers.
-- **Error Handling**: Use `thiserror` for library crates and `anyhow` or custom wrappers in the main CLI app. All errors must be propagates cleanly.
+- **Error Handling**: Use `thiserror` for library crates and `anyhow` or custom wrappers in the main CLI app. All errors must be propagated cleanly.
 - **Asynchronous Runtime**: Standardise on `tokio` for UDP (DHCP/TFTP) sockets and TCP (HTTP) listeners.
 - **Logging/Observability**: Use the `tracing` library. Instrument important server loops, packet parsed functions, and file handlers with `tracing::instrument`.
 - **Formatting**: Code formatting is enforced via `rustfmt`. Clippy warnings are treated as compilation errors (`-D warnings`).
@@ -35,7 +35,7 @@ nix develop --impure --command prek run --all-files
 > To run commands inside the development shell non-interactively, always prefix them with `nix develop --impure --command`, for example:
 > `nix develop --impure --command cargo init` or `nix develop --impure --command cargo check`.
 
-This runs check-yaml, typos, action-validator, cargo-check, clippy, rustfmt, etc., to verify code correctness and clean style.
+This runs check-yaml, cspell, action-validator, cargo-check, clippy, rustfmt, statix, deadnix, shellcheck, markdownlint, lychee, and friends, to verify code correctness and clean style.
 
 ### Documentation & Link Standards
 
@@ -48,11 +48,14 @@ This runs check-yaml, typos, action-validator, cargo-check, clippy, rustfmt, etc
 
 The Cargo Workspace is located inside the root project directory and splits responsibilities across the following crates inside the `crates/` folder:
 
-- `bootycall-core`: Configuration definitions, file monitoring, event registry, and global status state.
-- `bootycall-dhcp`: Proxy DHCP server parsing Option 93 and serving architecture-specific PXE redirection.
-- `bootycall-tftp`: Asynchronous TFTP server serving UEFI bootloader binaries.
-- `bootycall-extractor`: User-space extraction of kernels/initrds from ISOs/disk images to a persistent cache.
-- `bootycall-http`: HTTP endpoints for dynamic iPXE scripts, file streaming, wallpaper picker, and UI.
+- `bootycall-core`: Configuration definitions, file monitoring, event registry, and global status state; shared helpers like `normalize_mac`, `is_valid_mac`, and `safe_join`.
+- `bootycall-dhcp`: Proxy DHCP server. Parses Option 60 (vendor class) and Option 93 (architecture) and serves architecture-specific PXE redirection to `PXEClient`s only.
+- `bootycall-tftp`: Asynchronous TFTP server serving UEFI bootloader binaries. Concurrent transfers are bounded by a semaphore.
+- `bootycall-extractor`: User-space extraction of kernels/initrds from ISOs/disk images to a persistent cache. Cache metadata is JSON.
+- `bootycall-http`: HTTP endpoints for dynamic iPXE scripts, file streaming, wallpaper picker, and UI. The mutating `/api/override` endpoint is gated on an optional `api_token`.
+- `bootycall-oled`: 256×64 OLED render loop, page state machine, and TrueType text rendering via `rusttype`. Runs on a dedicated OS thread.
+- `bootycall-led`: Rackmount status LED driver (blue/white/off) and a boot-blink pattern used during startup.
+- `bootycall-log`: Thin wrapper around `tracing`/`tracing-subscriber` so every crate emits structured logs the same way.
 - `bootycall-rs`: Main binary orchestrator running the Tokio runtime and reading CLI flags.
 
 ---

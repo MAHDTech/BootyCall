@@ -2,6 +2,7 @@
 name = "bootycall-extractor"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }

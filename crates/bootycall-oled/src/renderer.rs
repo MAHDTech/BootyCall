@@ -1,5 +1,5 @@
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
-use rusttype::{Font, Scale, point};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use std::sync::OnceLock;
 
 /// Font point size for regular (Lato) labels drawn on the OLED. Shared
@@ -15,8 +15,8 @@ pub const LARGE_SCALE: f32 = 15.0;
 pub const BOLD_THRESHOLD: usize = 13;
 
 pub struct FontSet {
-    pub regular: Font<'static>,
-    pub bold: Font<'static>,
+    pub regular: FontRef<'static>,
+    pub bold: FontRef<'static>,
 }
 
 pub static FONTS: OnceLock<FontSet> = OnceLock::new();
@@ -26,8 +26,9 @@ pub fn get_fonts() -> &'static FontSet {
         let regular_bytes = include_bytes!("../assets/Lato-Regular.ttf");
         let bold_bytes = include_bytes!("../assets/Rajdhani-Bold.ttf");
         FontSet {
-            regular: Font::try_from_bytes(regular_bytes).expect("Failed to load Lato-Regular.ttf"),
-            bold: Font::try_from_bytes(bold_bytes).expect("Failed to load Rajdhani-Bold.ttf"),
+            regular: FontRef::try_from_slice(regular_bytes)
+                .expect("Failed to load Lato-Regular.ttf"),
+            bold: FontRef::try_from_slice(bold_bytes).expect("Failed to load Rajdhani-Bold.ttf"),
         }
     })
 }
@@ -104,18 +105,22 @@ impl<'a> Renderer<'a> {
         } else {
             SMALL_SCALE
         };
-        let scale = Scale::uniform(scale_px);
-        let v_metrics = font.v_metrics(scale);
+        let scale = PxScale::from(scale_px);
+        let scaled = font.as_scaled(scale);
+        let baseline = y as f32 + scaled.ascent();
 
-        let glyphs: Vec<_> = font
-            .layout(text, scale, point(x as f32, y as f32 + v_metrics.ascent))
-            .collect();
-
-        for glyph in glyphs {
-            if let Some(bounding_box) = glyph.pixel_bounding_box() {
-                glyph.draw(|gx, gy, gv| {
-                    let px = bounding_box.min.x + gx as i32;
-                    let py = bounding_box.min.y + gy as i32;
+        // ab_glyph has no `font.layout` iterator, so advance the pen manually
+        // per glyph (mirroring what rusttype did internally). Alpha coverage
+        // is max-blended into the grayscale backbuffer, same as before.
+        let mut caret = x as f32;
+        for c in text.chars() {
+            let glyph_id = font.glyph_id(c);
+            let glyph = glyph_id.with_scale_and_position(scale, point(caret, baseline));
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, gv| {
+                    let px = bounds.min.x as i32 + gx as i32;
+                    let py = bounds.min.y as i32 + gy as i32;
                     if px >= 0 && px < WIDTH as i32 && py >= 0 && py < HEIGHT as i32 {
                         let alpha = (gv * 255.0) as u8;
                         if alpha > 0 {
@@ -126,6 +131,7 @@ impl<'a> Renderer<'a> {
                     }
                 });
             }
+            caret += scaled.h_advance(glyph_id);
         }
     }
 
@@ -140,13 +146,11 @@ impl<'a> Renderer<'a> {
         } else {
             SMALL_SCALE
         };
-        let scale = Scale::uniform(scale_px);
-        let glyphs: Vec<_> = font.layout(text, scale, point(0.0, 0.0)).collect();
-        if glyphs.is_empty() {
-            return 0;
-        }
-        let last_glyph = &glyphs[glyphs.len() - 1];
-        let width = last_glyph.position().x + last_glyph.unpositioned().h_metrics().advance_width;
+        let scaled = font.as_scaled(PxScale::from(scale_px));
+        let width: f32 = text
+            .chars()
+            .map(|c| scaled.h_advance(font.glyph_id(c)))
+            .sum();
         width.ceil() as usize
     }
 

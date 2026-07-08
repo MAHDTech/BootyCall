@@ -52,7 +52,7 @@ rand = "0.10.2"
 sysinfo = "0.39.5"
 libc = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-rusttype = "0.9.3"
+ab_glyph = "0.2"
 parking_lot = "0.12.5"
 
 # Release profile tuned for the aarch64 CloudKey Gen2+: minimise the

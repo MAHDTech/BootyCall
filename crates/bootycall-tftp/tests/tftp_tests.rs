@@ -362,3 +362,105 @@ async fn test_tftp_path_traversal_absolute_blocked() {
 async fn test_tftp_path_traversal_double_slash_absolute_blocked() {
     assert_tftp_traversal_rejected(25096, 25097, "//etc/passwd").await;
 }
+
+#[tokio::test]
+async fn test_tftp_transfer_non_multiple_blksize_intact() {
+    // File whose size is deliberately a non-multiple of the negotiated
+    // blksize. The old "any short read == EOF" heuristic could truncate
+    // mid-transfer if the underlying reader ever returned a short-but-
+    // nonzero read; the fill loop keeps the DATA blocks accurate.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    // 512 blksize + a small tail — the tail block is a short final block,
+    // exactly the boundary case where truncation used to bite.
+    let blksize = 512usize;
+    let payload: Vec<u8> = (0..(blksize + 137)).map(|i| (i % 256) as u8).collect();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &payload).unwrap();
+
+    let server_config = ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "127.0.0.1:25106".to_string(),
+        tftp_root: tftp_root.clone(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25106", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_socket = UdpSocket::bind("127.0.0.1:25107").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[
+            ("blksize", &blksize.to_string()),
+            ("timeout", "1"),
+            ("tsize", "0"),
+        ],
+    );
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25106")
+        .await
+        .unwrap();
+
+    // Consume the OACK and ack it.
+    let mut buf = [0u8; 2048];
+    let (n, server_tid) =
+        tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+    let _ = parse_oack(&buf[..n]);
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    // Receive DATA blocks, ack each in turn. Reassemble to compare byte-exact.
+    let mut received: Vec<u8> = Vec::new();
+    let mut expected_block: u16 = 1;
+    loop {
+        let (n, from) =
+            tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+        let (block, data) = parse_data(&buf[..n]);
+        assert_eq!(block, expected_block, "block numbering must be sequential");
+        received.extend_from_slice(&data);
+        client_socket
+            .send_to(&make_ack_packet(block), from)
+            .await
+            .unwrap();
+        // A DATA block strictly shorter than blksize marks the last one.
+        if data.len() < blksize {
+            break;
+        }
+        expected_block = expected_block.wrapping_add(1);
+    }
+
+    assert_eq!(
+        received.len(),
+        payload.len(),
+        "received {} bytes but source was {}",
+        received.len(),
+        payload.len()
+    );
+    assert_eq!(received, payload, "reassembled bytes must equal source");
+}

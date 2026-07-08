@@ -172,12 +172,22 @@ async fn handle_tftp_transfer(
     }
 
     // If options are negotiated, send OACK and wait for ACK 0
+    // Any receive that isn't the expected ACK (timeout OR wrong-block ACK OR
+    // random garbage) counts against the retry budget. Without this a
+    // malicious/broken client can wedge us in a busy loop by flooding
+    // wrong-block ACKs.
+    const MAX_RETRIES: u32 = 5;
+    // Overall per-transfer deadline so a slow drip of wrong-block ACKs can't
+    // keep the transfer alive indefinitely.
+    const TRANSFER_DEADLINE: Duration = Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + TRANSFER_DEADLINE;
+
     if !options.is_empty() {
         let oack_pkt = make_oack_packet(&options);
-        let mut retries = 0;
+        let mut retries: u32 = 0;
         let mut acked = false;
 
-        while retries < 5 {
+        while retries < MAX_RETRIES && std::time::Instant::now() < deadline {
             if let Err(e) = socket.send(&oack_pkt).await {
                 error!("Failed to send OACK to {}: {:?}", client_addr, e);
                 return Err(e);
@@ -203,6 +213,13 @@ async fn handle_tftp_transfer(
                         acked = true;
                         break;
                     }
+                    // Anything else (wrong block, wrong opcode, garbage) —
+                    // count it toward the retry bound, not just timeouts.
+                    debug!(
+                        "Unexpected packet during OACK negotiation from {}, retrying...",
+                        client_addr
+                    );
+                    retries += 1;
                 }
                 Ok(Err(e)) => {
                     error!("Error receiving OACK ACK from {}: {:?}", client_addr, e);
@@ -236,19 +253,19 @@ async fn handle_tftp_transfer(
     let mut read_buf = vec![0u8; negotiated_blksize];
     let mut current_block_data;
 
-    // Read first block
-    let bytes_read = file.read(&mut read_buf).await?;
+    // Read first block. Fill the buffer via a fill loop so a short read
+    // (which is legal for AsyncRead) is NOT mistaken for EOF — only a
+    // genuine `0` from `read()` marks the end.
+    let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
     current_block_data = read_buf[..bytes_read].to_vec();
-    if bytes_read < negotiated_blksize {
-        finished = true;
-    }
+    finished = finished || hit_eof || bytes_read < negotiated_blksize;
 
     loop {
         let data_pkt = make_data_packet(block_num, &current_block_data);
-        let mut retries = 0;
+        let mut retries: u32 = 0;
         let mut acked = false;
 
-        while retries < 5 {
+        while retries < MAX_RETRIES && std::time::Instant::now() < deadline {
             if let Err(e) = socket.send(&data_pkt).await {
                 error!(
                     "Failed to send TFTP block {} to {}: {:?}",
@@ -273,17 +290,19 @@ async fn handle_tftp_transfer(
                         );
                         return Ok(());
                     }
-                    if let Some(ack_block) = parse_ack_packet(rec) {
-                        if ack_block == block_num {
-                            acked = true;
-                            break;
-                        } else {
-                            debug!(
-                                "Received ACK for block {}, expected block {} from {}",
-                                ack_block, block_num, client_addr
-                            );
-                        }
+                    if let Some(ack_block) = parse_ack_packet(rec)
+                        && ack_block == block_num
+                    {
+                        acked = true;
+                        break;
                     }
+                    // Wrong-block ACK, junk, whatever — count toward the
+                    // retry bound so a flood can't wedge us in a busy loop.
+                    debug!(
+                        "Unexpected packet while waiting for ACK block {} from {}, retrying...",
+                        block_num, client_addr
+                    );
+                    retries += 1;
                 }
                 Ok(Err(e)) => {
                     error!("Error receiving TFTP ACK from {}: {:?}", client_addr, e);
@@ -328,14 +347,29 @@ async fn handle_tftp_transfer(
 
         // Read next block
         block_num = block_num.wrapping_add(1);
-        let bytes_read = file.read(&mut read_buf).await?;
+        let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
         current_block_data = read_buf[..bytes_read].to_vec();
-        if bytes_read < negotiated_blksize {
-            finished = true;
-        }
+        finished = hit_eof || bytes_read < negotiated_blksize;
     }
 
     Ok(())
+}
+
+/// Fill `buf` from `file`, looping over multiple `read` calls if needed.
+/// Returns `(bytes_read, hit_eof)`. `hit_eof` is true only when a `read`
+/// call returned `0` — that's the only reliable EOF signal from AsyncRead.
+/// A short-but-nonzero read from the underlying reader used to be treated
+/// as EOF and truncated the served file mid-transfer.
+async fn read_fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = file.read(&mut buf[total..]).await?;
+        if n == 0 {
+            return Ok((total, true));
+        }
+        total += n;
+    }
+    Ok((total, false))
 }
 
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
@@ -358,6 +392,29 @@ pub async fn run_tftp_server(
         };
 
         let packet = &buf[..len];
+        // Distinguish "not a valid RRQ" from "RRQ we can serve": WRQ and
+        // unknown opcodes deserve a proper TFTP ERROR reply so a bad client
+        // sees why it failed instead of silently timing out.
+        if packet.len() >= 2 {
+            let opcode = u16::from_be_bytes([packet[0], packet[1]]);
+            match opcode {
+                1 => {} // RRQ — normal path below
+                2 => {
+                    // WRQ — writes are not supported; RFC 1350 error code 4.
+                    let err = make_error_packet(4, "Illegal TFTP operation (WRQ not supported)");
+                    let _ = socket.send_to(&err, src_addr).await;
+                    continue;
+                }
+                _ => {
+                    // Any other opcode (DATA/ACK/OACK sent to the listener,
+                    // OACK from a client, etc.) — illegal on this socket.
+                    let err = make_error_packet(4, "Illegal TFTP operation");
+                    let _ = socket.send_to(&err, src_addr).await;
+                    continue;
+                }
+            }
+        }
+
         let request = match parse_rrq(packet) {
             Some(req) => req,
             None => {

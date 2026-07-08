@@ -155,15 +155,19 @@ pub fn extract_from_disk(
                     }
                 }
                 None => {
-                    if let Ok(Some(mut fat_file)) = find_file_recursive_fat(&root_dir, &|name| {
+                    // Propagate genuine walker I/O errors (`?`) instead of
+                    // masking them as "not found"; only Ok(None) falls through
+                    // to the next partition.
+                    match find_file_recursive_fat(&root_dir, &|name| {
                         let lower = name.to_lowercase();
                         lower == "vmlinuz" || lower == "bzimage" || lower == "kernel"
-                    }) {
-                        let mut out_file = File::create(out_kernel_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
-                        true
-                    } else {
-                        false
+                    })? {
+                        Some(mut fat_file) => {
+                            let mut out_file = File::create(out_kernel_path)?;
+                            io::copy(&mut fat_file, &mut out_file)?;
+                            true
+                        }
+                        None => false,
                     }
                 }
             };
@@ -187,15 +191,18 @@ pub fn extract_from_disk(
                     }
                 }
                 None => {
-                    if let Ok(Some(mut fat_file)) = find_file_recursive_fat(&root_dir, &|name| {
+                    // Propagate genuine walker I/O errors (`?`); Ok(None) means
+                    // no initrd on this (already kernel-bearing) partition.
+                    match find_file_recursive_fat(&root_dir, &|name| {
                         let lower = name.to_lowercase();
                         lower.contains("initrd") || lower.contains("initramfs")
-                    }) {
-                        let mut out_file = File::create(out_initrd_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
-                        true
-                    } else {
-                        false
+                    })? {
+                        Some(mut fat_file) => {
+                            let mut out_file = File::create(out_initrd_path)?;
+                            io::copy(&mut fat_file, &mut out_file)?;
+                            true
+                        }
+                        None => false,
                     }
                 }
             };

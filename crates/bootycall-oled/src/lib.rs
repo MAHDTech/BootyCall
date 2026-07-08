@@ -114,6 +114,10 @@ fn step_bounce(
 struct PageSpec {
     label: &'static str,
     icon: &'static [u8; 256],
+    /// Vertical nudge (px) applied to the icon so glyph-heavy icons line up
+    /// with the label. Data-driven instead of a `label == "UPTIME"` special
+    /// case at the draw site.
+    icon_dy: usize,
     refresh: Option<fn(&mut SystemMetrics)>,
     value: fn(&SystemMetrics) -> String,
 }
@@ -122,48 +126,56 @@ const PAGES: &[PageSpec] = &[
     PageSpec {
         label: "HOSTNAME",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: None,
         value: |m| m.get_hostname(),
     },
     PageSpec {
         label: "IP ADDRESS",
         icon: &crate::assets::ICON_NETWORK,
+        icon_dy: 0,
         refresh: None,
         value: |m| m.get_ip_address(),
     },
     PageSpec {
         label: "UPTIME",
         icon: &crate::assets::ICON_CLOCK,
+        icon_dy: 1,
         refresh: None,
         value: |m| m.get_uptime(),
     },
     PageSpec {
         label: "CPU TEMP",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: Some(SystemMetrics::refresh_components),
         value: |m| m.get_cpu_temp(),
     },
     PageSpec {
         label: "CPU USAGE",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: Some(SystemMetrics::refresh_cpu),
         value: |m| m.get_cpu_usage(),
     },
     PageSpec {
         label: "RAM USAGE",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: Some(SystemMetrics::refresh_memory),
         value: |m| m.get_ram_usage(),
     },
     PageSpec {
         label: "DISK USAGE",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: Some(SystemMetrics::refresh_disks),
         value: |m| m.get_disk_usage(),
     },
     PageSpec {
         label: "KERNEL",
         icon: &crate::assets::ICON_HOST,
+        icon_dy: 0,
         refresh: None,
         value: |m| m.get_kernel(),
     },
@@ -324,12 +336,9 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
                     let value = (page.value)(&sys_metrics);
                     let icon = page.icon;
 
-                    // Draw label (top aligned inside visible window)
-                    let icon_y = if label == "UPTIME" {
-                        VISIBLE_Y_START + 1
-                    } else {
-                        VISIBLE_Y_START
-                    };
+                    // Draw label (top aligned inside visible window). The
+                    // per-page icon_dy nudges glyph-heavy icons into alignment.
+                    let icon_y = VISIBLE_Y_START + page.icon_dy;
                     renderer.draw_bitmap(12, icon_y, icon, 16, 16);
                     renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
 

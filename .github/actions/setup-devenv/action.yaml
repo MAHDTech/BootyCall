@@ -67,13 +67,8 @@ runs:
     - id: install_devenv
       name: Install Devenv
       shell: bash
-      env:
-        # Pin to the same revision the repo already resolves via
-        # devenv.lock so CI, the release Nix build, and local devenv all
-        # agree. Bump this together with `devenv update` in a chore commit.
-        DEVENV_REV: d894e487bb23ed87e0555d2158710844bde65322
       run: |
-        nix profile install --accept-flake-config "github:cachix/devenv/${DEVENV_REV}"
+        nix profile install --accept-flake-config github:cachix/devenv
 
     - id: version_check
       name: Version Check
@@ -98,4 +93,3 @@ runs:
           echo "No devenv configuration found, why did you even set it up?"
           exit 1
         fi
-

@@ -39,10 +39,34 @@ impl<F: Read + Seek> Read for PartitionSlice<F> {
 
 impl<F: Seek> Seek for PartitionSlice<F> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::End(offset) => self.len as i64 + offset,
-            SeekFrom::Current(offset) => self.pos as i64 + offset,
+        // BUG-12: use checked arithmetic instead of raw `as` casts. GPT
+        // offsets are untrusted (a crafted image can hand us
+        // near-`u64::MAX` values), and `i64::MAX as u64` silently wraps
+        // an out-of-range Start offset to a very small number without
+        // returning an error.
+        let new_pos: i64 = match pos {
+            SeekFrom::Start(offset) => i64::try_from(offset).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Seek offset too large")
+            })?,
+            SeekFrom::End(offset) => {
+                let base = i64::try_from(self.len).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Partition length too large")
+                })?;
+                base.checked_add(offset).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Seek overflowed partition end")
+                })?
+            }
+            SeekFrom::Current(offset) => {
+                let base = i64::try_from(self.pos).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Partition position too large")
+                })?;
+                base.checked_add(offset).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Seek overflowed current position",
+                    )
+                })?
+            }
         };
 
         if new_pos < 0 {
@@ -147,6 +171,10 @@ pub fn extract_from_disk(
             if !kernel_extracted {
                 continue; // Try next partition
             }
+            // Once we've extracted a kernel we're committed to this
+            // partition — a missing initrd here is a genuine error, not
+            // a signal to keep hunting through other partitions and
+            // eventually claim the kernel is missing too (BUG-13).
 
             let initrd_extracted = match initrd_override {
                 Some(ip) => {
@@ -175,6 +203,7 @@ pub fn extract_from_disk(
             if initrd_extracted {
                 return Ok(());
             }
+            return Err(ExtractorError::InitrdNotFound);
         }
     }
 

@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
-serde = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 bootycall-log = { workspace = true }

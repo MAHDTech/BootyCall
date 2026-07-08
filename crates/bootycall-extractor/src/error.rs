@@ -20,7 +20,4 @@ pub enum ExtractorError {
 
     #[error("Initrd file not found inside the image")]
     InitrdNotFound,
-
-    #[error("GP error: {0}")]
-    Gpt(String),
 }

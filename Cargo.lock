@@ -178,7 +178,6 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -189,8 +188,6 @@ dependencies = [
  "bootycall-log",
  "dhcproto",
  "parking_lot",
- "serde",
- "thiserror",
  "tokio",
 ]
 
@@ -207,7 +204,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
 ]
 
 [[package]]

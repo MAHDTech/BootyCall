@@ -310,3 +310,24 @@ fn test_cache_invalidated_on_kernel_path_change() {
     let after = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     assert_eq!(before, after, "second override sync must not re-extract");
 }
+
+#[test]
+fn test_partition_slice_seek_guards_overflow() {
+    use std::io::{Cursor, Seek, SeekFrom};
+    // BUG-12: `SeekFrom::Start(u64::MAX)` used to cast straight to i64,
+    // wrap silently, and land somewhere valid. It should return an error.
+    let mut slice =
+        bootycall_extractor::disk::PartitionSlice::new(Cursor::new(vec![0u8; 1024]), 0, 1024);
+    let err = slice.seek(SeekFrom::Start(u64::MAX)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    // SeekFrom::Current with a positive offset that overflows the sum
+    // must return an error rather than wrapping around silently.
+    slice.seek(SeekFrom::Start(1)).unwrap();
+    let err = slice.seek(SeekFrom::Current(i64::MAX)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+    // Normal seeks still work.
+    assert_eq!(slice.seek(SeekFrom::Start(512)).unwrap(), 512);
+    assert_eq!(slice.seek(SeekFrom::End(-16)).unwrap(), 1008);
+}

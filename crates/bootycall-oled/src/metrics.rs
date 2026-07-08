@@ -21,10 +21,6 @@ impl SystemMetrics {
         }
     }
 
-    pub fn refresh(&mut self) {
-        // Deprecated, use targeted refresh methods instead.
-    }
-
     pub fn refresh_cpu(&mut self) {
         self.sys.refresh_cpu_all();
     }

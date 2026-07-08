@@ -146,8 +146,9 @@ mod tests {
     fn depth_cap_is_reasonable() {
         // Real ISO/FAT trees rarely go past ~10 levels; guard against a
         // future edit that either accidentally removes the cap or sets it
-        // absurdly low.
-        assert!(MAX_DIR_DEPTH >= 16);
-        assert!(MAX_DIR_DEPTH <= 1024);
+        // absurdly low. Evaluated in a const block so clippy's
+        // `assertions_on_constants` accepts the compile-time check.
+        const _: () = assert!(MAX_DIR_DEPTH >= 16);
+        const _: () = assert!(MAX_DIR_DEPTH <= 1024);
     }
 }

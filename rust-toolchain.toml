@@ -1,5 +1,9 @@
 [toolchain]
-channel = "stable"
+# Pin an explicit version instead of the floating `stable` channel so the
+# devenv shell, CI runners, and the Nix-built release binary all agree on
+# the compiler. Bump this together with the workspace `rust-version` and
+# the CI matrix when we intentionally roll forward.
+channel = "1.96.1"
 components = [
     "rustc",
     "cargo",

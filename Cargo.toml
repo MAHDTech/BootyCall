@@ -15,7 +15,18 @@ members = [
 [workspace.package]
 version = "0.1.2"
 edition = "2024"
+rust-version = "1.96"
 license = "Apache-2.0"
+
+# Strict lints applied to every member crate via `lints.workspace = true`
+# so local pre-commit, CI, and the Nix build all trip on the same rules.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "warn"
 
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

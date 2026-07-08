@@ -63,8 +63,8 @@ pub fn watch_config<F>(
 where
     F: FnMut(Config) + Send + 'static,
 {
-    use notify::{Config as WatcherConfig, EventKind, RecommendedWatcher, Watcher};
-    use std::sync::mpsc::channel;
+    use notify::{Config as WatcherConfig, RecommendedWatcher, Watcher};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
 
     let (tx, rx) = channel();
 
@@ -77,29 +77,116 @@ where
         WatcherConfig::default(),
     )?;
 
-    watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
+    // Watch the *parent directory*, not the file itself. Editors that save
+    // atomically (`vim`, `sed -i`, Ansible) rename a new file over the
+    // original; a watch bound to the old inode goes silent after the first
+    // save. Filtering by the target file name gives us the same signal
+    // without depending on the inode.
+    let watch_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let watch_name = path.file_name().map(std::ffi::OsString::from);
 
-    // Spawn block for reading channel events
+    watcher.watch(&watch_dir, notify::RecursiveMode::NonRecursive)?;
+
     std::thread::spawn(move || {
-        for res in rx {
-            match res {
-                Ok(event) => {
-                    if let EventKind::Modify(_) = event.kind {
-                        info!("Configuration file modified, reloading...");
-                        // Sleep briefly to allow filesystem writes to complete cleanly
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        match Config::load(&path) {
-                            Ok(config) => on_reload(config),
-                            Err(e) => warn!("Failed to reload configuration: {:?}", e),
+        let debounce = std::time::Duration::from_millis(200);
+
+        loop {
+            // Block until at least one event arrives; if the channel closes,
+            // the watcher is gone and we can exit the reload thread.
+            let first = match rx.recv() {
+                Ok(res) => res,
+                Err(_) => return,
+            };
+
+            let mut dirty = event_targets_config(&first, watch_name.as_deref());
+
+            // Drain follow-up events (typical for an atomic
+            // save: remove + create + modify all fire within a few ms).
+            loop {
+                match rx.recv_timeout(debounce) {
+                    Ok(res) => {
+                        if event_targets_config(&res, watch_name.as_deref()) {
+                            dirty = true;
                         }
                     }
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
                 }
-                Err(e) => warn!("Config watcher channel error: {:?}", e),
+            }
+
+            if !dirty {
+                continue;
+            }
+
+            info!("Configuration file changed, reloading...");
+            let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match Config::load(&path) {
+                    Ok(config) => Some(config),
+                    Err(e) => {
+                        warn!("Failed to reload configuration: {:?}", e);
+                        None
+                    }
+                }
+            }));
+            let config = match load_result {
+                Ok(Some(cfg)) => cfg,
+                Ok(None) => continue,
+                Err(_) => {
+                    warn!("Panic while reading config; keeping previous config live");
+                    continue;
+                }
+            };
+
+            // A panic inside on_reload used to kill the watcher thread and
+            // freeze reloads for the rest of the process lifetime.
+            let cb_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_reload(config);
+            }));
+            if cb_result.is_err() {
+                warn!("Config reload callback panicked; watcher stays alive");
             }
         }
     });
 
     Ok(watcher)
+}
+
+fn event_targets_config(
+    res: &Result<notify::Event, notify::Error>,
+    watch_name: Option<&std::ffi::OsStr>,
+) -> bool {
+    use notify::EventKind;
+
+    let event = match res {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Config watcher channel error: {:?}", e);
+            return false;
+        }
+    };
+
+    // Ignore remove-only events (transient during atomic replace); reload
+    // on Modify or Create — the new inode surfaces as Create when the
+    // temporary is renamed on top of the config file.
+    match event.kind {
+        EventKind::Modify(_) | EventKind::Create(_) => {}
+        _ => return false,
+    }
+
+    let Some(name) = watch_name else {
+        return true;
+    };
+
+    // Only fire when the event paths actually mention our target file —
+    // parent-directory watches otherwise flap on every sibling write.
+    event
+        .paths
+        .iter()
+        .any(|p| p.file_name().map(|f| f == name).unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -256,6 +343,89 @@ hosts: []
             "Empty hosts list should load as zero-length vec"
         );
         assert!(config.find_host("aa:bb:cc:dd:ee:ff").is_none());
+    }
+
+    fn minimal_yaml(mac: &str) -> String {
+        format!(
+            r#"
+server:
+  http_bind: "0.0.0.0:8080"
+  tftp_bind: "0.0.0.0:69"
+  tftp_root: "./tftpboot"
+  proxy_dhcp_bind: "0.0.0.0:4011"
+  cache_dir: "./cache"
+  default_bootloader_amd64: "boot/x64/ipxe.efi"
+  default_bootloader_arm64: "boot/arm64/ipxe.efi"
+
+hosts:
+  - mac: "{mac}"
+    name: "watch-host"
+    image_path: "/tmp/x.iso"
+"#
+        )
+    }
+
+    fn wait_for_mac(rx: &std::sync::mpsc::Receiver<Config>, expected: &str) -> Option<Config> {
+        // The debounce inside watch_config is ~200ms; poll for up to 3s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(cfg) if cfg.hosts.first().map(|h| h.mac.as_str()) == Some(expected) => {
+                    return Some(cfg);
+                }
+                Ok(_) => continue, // stale reload, keep waiting
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_watch_reload_on_atomic_replace() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootycall.yaml");
+        std::fs::write(&path, minimal_yaml("aa:aa:aa:aa:aa:aa")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = watch_config(path.clone(), move |cfg| {
+            let _ = tx.send(cfg);
+        })
+        .expect("watch_config");
+
+        // Give the watcher a moment to arm.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Atomic replace: write to a sibling temp, then rename onto the config.
+        let tmp = dir.path().join("bootycall.yaml.tmp");
+        std::fs::write(&tmp, minimal_yaml("bb:bb:bb:bb:bb:bb")).unwrap();
+        std::fs::rename(&tmp, &path).expect("rename");
+
+        let cfg = wait_for_mac(&rx, "bb:bb:bb:bb:bb:bb")
+            .expect("reload after atomic replace within deadline");
+        assert_eq!(cfg.hosts[0].mac, "bb:bb:bb:bb:bb:bb");
+    }
+
+    #[test]
+    fn test_watch_reload_on_in_place_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootycall.yaml");
+        std::fs::write(&path, minimal_yaml("aa:aa:aa:aa:aa:aa")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = watch_config(path.clone(), move |cfg| {
+            let _ = tx.send(cfg);
+        })
+        .expect("watch_config");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Plain overwrite of the same file (no rename).
+        std::fs::write(&path, minimal_yaml("cc:cc:cc:cc:cc:cc")).unwrap();
+
+        let cfg = wait_for_mac(&rx, "cc:cc:cc:cc:cc:cc")
+            .expect("reload after in-place write within deadline");
+        assert_eq!(cfg.hosts[0].mac, "cc:cc:cc:cc:cc:cc");
     }
 
     #[test]

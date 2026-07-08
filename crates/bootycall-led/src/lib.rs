@@ -46,70 +46,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_updates_on_successful_write() {
-        let mut last = None;
-        let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
-            writes.push(v);
-            Ok(())
-        });
-        assert_eq!(last, Some(255));
-        assert_eq!(writes, vec![255]);
-    }
-
-    #[test]
-    fn cache_stays_none_when_write_fails() {
-        let mut last = None;
-        let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
-            writes.push(v);
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
-        });
-        assert_eq!(
-            last, None,
-            "cache must not remember a value the hardware never accepted"
-        );
-        assert_eq!(writes, vec![255]);
-    }
-
-    #[test]
-    fn cache_hit_skips_write_entirely() {
-        let mut last = Some(255);
-        let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
-            writes.push(v);
-            Ok(())
-        });
-        assert!(
-            writes.is_empty(),
-            "identical value should not touch the hardware"
-        );
-    }
-
-    #[test]
-    fn failed_write_still_retries_on_next_call() {
-        // The regression BUG-14 covers: a failed first write must not
-        // poison `last_value`, so the next call still attempts the write.
-        let mut last = None;
-        let mut attempts = 0;
-        set_led_cached_with("led", 255, &mut last, |_, _| {
-            attempts += 1;
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
-        });
-        set_led_cached_with("led", 255, &mut last, |_, _| {
-            attempts += 1;
-            Ok(())
-        });
-        assert_eq!(attempts, 2, "second call must retry after a failed write");
-        assert_eq!(last, Some(255));
-    }
-}
-
 pub fn activate_blue_led() {
     let _ = set_led(LED_BLUE_PATH, 255);
     let _ = set_led(LED_WHITE_PATH, 0);
@@ -253,4 +189,68 @@ pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
     }
     info!("LED test complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_updates_on_successful_write() {
+        let mut last = None;
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Ok(())
+        });
+        assert_eq!(last, Some(255));
+        assert_eq!(writes, vec![255]);
+    }
+
+    #[test]
+    fn cache_stays_none_when_write_fails() {
+        let mut last = None;
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Err(std::io::Error::other("boom"))
+        });
+        assert_eq!(
+            last, None,
+            "cache must not remember a value the hardware never accepted"
+        );
+        assert_eq!(writes, vec![255]);
+    }
+
+    #[test]
+    fn cache_hit_skips_write_entirely() {
+        let mut last = Some(255);
+        let mut writes = Vec::new();
+        set_led_cached_with("led", 255, &mut last, |_, v| {
+            writes.push(v);
+            Ok(())
+        });
+        assert!(
+            writes.is_empty(),
+            "identical value should not touch the hardware"
+        );
+    }
+
+    #[test]
+    fn failed_write_still_retries_on_next_call() {
+        // The regression BUG-14 covers: a failed first write must not
+        // poison `last_value`, so the next call still attempts the write.
+        let mut last = None;
+        let mut attempts = 0;
+        set_led_cached_with("led", 255, &mut last, |_, _| {
+            attempts += 1;
+            Err(std::io::Error::other("boom"))
+        });
+        set_led_cached_with("led", 255, &mut last, |_, _| {
+            attempts += 1;
+            Ok(())
+        });
+        assert_eq!(attempts, 2, "second call must retry after a failed write");
+        assert_eq!(last, Some(255));
+    }
 }

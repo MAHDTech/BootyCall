@@ -98,30 +98,3 @@ impl Framebuffer {
         Ok(())
     }
 }
-
-impl embedded_graphics::geometry::OriginDimensions for Framebuffer {
-    fn size(&self) -> embedded_graphics::geometry::Size {
-        embedded_graphics::geometry::Size::new(WIDTH as u32, HEIGHT as u32)
-    }
-}
-
-impl embedded_graphics::draw_target::DrawTarget for Framebuffer {
-    type Color = embedded_graphics::pixelcolor::BinaryColor;
-    type Error = core::convert::Infallible;
-
-    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-    where
-        I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
-    {
-        for embedded_graphics::Pixel(pos, color) in pixels.into_iter() {
-            if pos.x >= 0 && pos.x < WIDTH as i32 && pos.y >= 0 && pos.y < HEIGHT as i32 {
-                let color_val = match color {
-                    embedded_graphics::pixelcolor::BinaryColor::On => 255,
-                    embedded_graphics::pixelcolor::BinaryColor::Off => 0,
-                };
-                self.set_pixel(pos.x as usize, pos.y as usize, color_val);
-            }
-        }
-        Ok(())
-    }
-}

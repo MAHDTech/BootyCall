@@ -244,7 +244,7 @@ pub async fn run_oled_manager(
     Ok(())
 }
 
-/// Dynamic OLED rendering test for testing font size and alignment using native pixel fonts.
+/// Dynamic OLED rendering test for testing font size and alignment using premium TrueType fonts.
 pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
     // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
     let parts: Vec<&str> = alignment.split('-').collect();
@@ -255,40 +255,10 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
     fb.clear();
 
     {
-        use embedded_graphics::{
-            mono_font::{
-                MonoTextStyle,
-                ascii::{
-                    FONT_4X6, FONT_5X7, FONT_5X8, FONT_6X9, FONT_6X10, FONT_6X12, FONT_6X13,
-                    FONT_7X14, FONT_9X15, FONT_9X18, FONT_10X20,
-                },
-            },
-            pixelcolor::BinaryColor,
-            prelude::*,
-            text::{Baseline, Text, TextStyleBuilder},
-        };
-
-        // Map target height size to nearest available MonoFont
-        let font = match size {
-            1..=6 => &FONT_4X6,
-            7 => &FONT_5X7,
-            8 => &FONT_5X8,
-            9 => &FONT_6X9,
-            10 => &FONT_6X10,
-            11 | 12 => &FONT_6X12,
-            13 => &FONT_6X13,
-            14 => &FONT_7X14,
-            15 | 16 => &FONT_9X15,
-            17 | 18 => &FONT_9X18,
-            _ => &FONT_10X20,
-        };
-
-        let text_style = MonoTextStyle::new(font, BinaryColor::On);
-        let style = TextStyleBuilder::new().baseline(Baseline::Top).build();
-        let text_obj = Text::with_text_style(text, Point::zero(), text_style, style);
-
-        let text_w = text_obj.bounding_box().size.width as usize;
-        let text_h = text_obj.bounding_box().size.height as usize;
+        let mut renderer = Renderer::new(&mut fb);
+        let use_large_font = size > 13;
+        let text_w = Renderer::measure_text(text, use_large_font);
+        let text_h = if use_large_font { 15 } else { 11 };
 
         let x = match horiz {
             "center" => {
@@ -326,9 +296,7 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
             } // middle
         };
 
-        let text_obj =
-            Text::with_text_style(text, Point::new(x as i32, y as i32), text_style, style);
-        let _ = text_obj.draw(&mut fb);
+        renderer.draw_text(x, y, text, use_large_font);
     }
 
     fb.flush()?;

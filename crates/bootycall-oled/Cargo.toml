@@ -11,5 +11,4 @@ bootycall-log = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
 rusttype = { workspace = true }
-embedded-graphics = "0.8.2"
 gpiocdev = "0.8.0"

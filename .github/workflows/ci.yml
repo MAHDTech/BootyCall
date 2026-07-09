@@ -475,7 +475,11 @@ jobs:
 
       - id: check_statix
         name: Check Statix
-        run: nix run nixpkgs#statix -- check
+        # Use the flake-locked statix from the dev shell rather than
+        # `nix run nixpkgs#statix`, which resolves from the ambient registry
+        # (non-reproducible; breaks when the channel moves).
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: statix check
 
   ##################################################
   # CI Status Aggregator

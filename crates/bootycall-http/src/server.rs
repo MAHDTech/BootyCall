@@ -453,14 +453,21 @@ async fn api_logs_handler(State(state): State<ServerState>) -> impl IntoResponse
     Json(logs)
 }
 
-/// Length-generic constant-time byte comparison so a wrong-length token
-/// can't be distinguished from a wrong-value token via response timing.
+/// Length-generic constant-time token comparison so neither the value nor the
+/// length of the secret token is observable via response timing.
+///
+/// Both inputs are first hashed to a fixed 32-byte SHA-256 digest, then the
+/// digests are compared byte-for-byte with no early return. Because the compare
+/// is always over 32 bytes regardless of input length, a wrong-length token is
+/// indistinguishable from a wrong-value one — the previous `a.len() != b.len()`
+/// early return leaked the secret's length. Different-length inputs still
+/// compare unequal (their digests differ), so correctness is preserved.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    use sha2::{Digest, Sha256};
+    let ha = Sha256::digest(a);
+    let hb = Sha256::digest(b);
     let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in ha.iter().zip(hb.iter()) {
         diff |= x ^ y;
     }
     diff == 0
@@ -572,4 +579,42 @@ pub async fn run_http_server(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_matches_equal_tokens() {
+        assert!(constant_time_eq(b"secret-token", b"secret-token"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_values() {
+        assert!(!constant_time_eq(b"secret-token", b"secret-toke0"));
+        assert!(!constant_time_eq(b"token", b"other"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different_lengths() {
+        // The hash-then-compare approach must still reject unequal-length
+        // tokens (previously the length branch handled this).
+        assert!(!constant_time_eq(b"short", b"a-much-longer-token"));
+        assert!(!constant_time_eq(b"token", b"tokenX"));
+        assert!(!constant_time_eq(b"", b"nonempty"));
+    }
+
+    #[test]
+    fn content_type_for_covers_key_extensions() {
+        assert_eq!(
+            content_type_for("boot/x64/ipxe.efi"),
+            "application/octet-stream"
+        );
+        assert_eq!(content_type_for("wallpapers/bg.png"), "image/png");
+        assert_eq!(content_type_for("data.json"), "application/json");
+        assert_eq!(content_type_for("script.ipxe"), "text/plain");
+        assert_eq!(content_type_for("some-file"), "application/octet-stream");
+    }
 }

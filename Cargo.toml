@@ -53,6 +53,7 @@ libc = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 ab_glyph = "0.2"
 parking_lot = "0.12.5"
+sha2 = "0.10.9"
 
 # Release profile tuned for the aarch64 CloudKey Gen2+: minimise the
 # on-disk footprint of the appliance binary without giving up too much

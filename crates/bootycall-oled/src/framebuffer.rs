@@ -5,7 +5,7 @@ use std::os::unix::fs::OpenOptionsExt;
 
 pub const WIDTH: usize = 160;
 pub const HEIGHT: usize = 60;
-const FB_PATH: &str = "/dev/fb0";
+pub const FB_PATH: &str = "/dev/fb0";
 
 pub struct Framebuffer {
     // 8-bit grayscale backbuffer
@@ -52,9 +52,12 @@ impl Framebuffer {
         }
     }
 
-    pub fn flush(&mut self) -> std::io::Result<()> {
-        let packed = pack_buffer(&self.buffer, &self.lut, self.rotation);
-
+    /// (Re)acquire the framebuffer fd if we don't already hold one. Returns
+    /// `true` iff a usable fd is now held. Separated from [`write_packed`] so
+    /// callers can distinguish "device never present" (`ensure_open` stays
+    /// `false`) from "a write failed on an open fd" — the two want different
+    /// logging (log-once vs every failure).
+    pub fn ensure_open(&mut self) -> bool {
         if self.file.is_none() {
             self.file = OpenOptions::new()
                 .write(true)
@@ -62,17 +65,41 @@ impl Framebuffer {
                 .open(FB_PATH)
                 .ok();
         }
+        self.file.is_some()
+    }
 
-        if let Some(ref mut file) = self.file {
-            file.seek(SeekFrom::Start(0))?;
-            file.write_all(&packed)?;
+    /// Write the packed backbuffer to the held fd. Returns `Ok(true)` on a
+    /// successful write, `Ok(false)` when no fd is held (device absent — call
+    /// [`ensure_open`] first), and `Err` when the write itself fails on an
+    /// open fd. A failed write drops the fd so the next [`ensure_open`]
+    /// re-opens it.
+    pub fn write_packed(&mut self) -> std::io::Result<bool> {
+        if self.file.is_none() {
+            return Ok(false);
+        }
+        let packed = pack_buffer(&self.buffer, &self.lut, self.rotation);
+        let file = self.file.as_mut().expect("fd present (checked above)");
+        if let Err(e) = file
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| file.write_all(&packed))
+        {
+            // Drop the fd so a transient error re-opens on the next tick.
+            self.file = None;
+            return Err(e);
+        }
+        Ok(true)
+    }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.ensure_open();
+        if self.write_packed()? {
+            Ok(())
         } else {
-            return Err(std::io::Error::new(
+            Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Framebuffer device file not available",
-            ));
+            ))
         }
-        Ok(())
     }
 }
 
@@ -154,5 +181,22 @@ mod tests {
         let buf = vec![0u8; 32];
         assert_eq!(pack_buffer(&buf, &lut, 0).len(), 64);
         assert_eq!(pack_buffer(&buf, &lut, 180).len(), 64);
+    }
+
+    #[test]
+    fn write_packed_reports_absence_without_error() {
+        // On a host with no panel, write_packed must report Ok(false)
+        // (absent), not Err — that is what lets the render loop log once
+        // instead of erroring every tick (BUG-C).
+        if std::path::Path::new(FB_PATH).exists() {
+            return; // real panel present (rare in CI) — skip
+        }
+        let mut fb = Framebuffer::new();
+        assert!(!fb.ensure_open(), "no {FB_PATH} → ensure_open is false");
+        assert!(
+            !fb.write_packed()
+                .expect("absent device must be Ok(false), not Err"),
+            "absent device → Ok(false)"
+        );
     }
 }

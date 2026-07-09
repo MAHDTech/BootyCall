@@ -7,7 +7,7 @@ use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 use crate::metrics::SystemMetrics;
 use crate::renderer::Renderer;
 use bootycall_core::state::StateStore;
-use bootycall_log::{error, info};
+use bootycall_log::{error, info, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -272,6 +272,12 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
     let mut last_ssh_check = Instant::now() - Duration::from_secs(10);
     let mut active_ssh = false;
 
+    // The framebuffer is optional hardware (absent on dev laptops, or during a
+    // boot race). Track availability so its absence/recovery logs exactly once
+    // rather than every tick (BUG-C). Optimistic to start; the first write
+    // corrects it.
+    let mut fb_available = true;
+
     loop {
         let now = Instant::now();
 
@@ -371,8 +377,31 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
 
         fb.rotation = if is_docked { 0 } else { 180 };
 
-        if let Err(e) = fb.flush() {
-            error!("Failed to write to framebuffer: {:?}", e);
+        // Log-once on the framebuffer appearing/disappearing; a genuine write
+        // error on an open fd is always logged (it is not the "absent" case).
+        fb.ensure_open();
+        match fb.write_packed() {
+            Ok(true) => {
+                if !fb_available {
+                    info!("Framebuffer {} is now available", framebuffer::FB_PATH);
+                    fb_available = true;
+                }
+            }
+            Ok(false) => {
+                if fb_available {
+                    warn!(
+                        "Framebuffer {} not available (optional hardware); suppressing further messages until it returns",
+                        framebuffer::FB_PATH
+                    );
+                    fb_available = false;
+                }
+            }
+            Err(e) => {
+                error!("Failed to write to framebuffer: {:?}", e);
+                // The fd was dropped inside write_packed; a later success will
+                // log recovery once.
+                fb_available = false;
+            }
         }
 
         if shutdown.load(Ordering::Relaxed) {

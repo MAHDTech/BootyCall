@@ -260,7 +260,9 @@ jobs:
       - id: run_cargo_tests
         name: Cargo Test
         shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: cargo test --workspace
+        # --all-features so feature-gated tests (e.g. the OLED `sim` feature)
+        # actually run; clippy already lints with --all-features.
+        run: cargo test --workspace --all-features
 
   ci-cargo-clippy:
     name: Cargo Clippy (${{ matrix.arch }})

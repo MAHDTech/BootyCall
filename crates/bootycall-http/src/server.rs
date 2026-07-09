@@ -206,6 +206,79 @@ async fn start_handler(headers: HeaderMap) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/plain")], script)
 }
 
+/// What the `/poll/{mac}` endpoint decided to do for a client, separated from
+/// the side effects (state updates, events, response building) so the decision
+/// logic — including the render-failure branch — is unit-testable.
+enum PollOutcome {
+    /// Serve the rendered boot script; `cache_mac` is the MAC whose cached
+    /// kernel/initrd the script points at.
+    Boot { script: String, cache_mac: String },
+    /// The boot template failed to render — surface an error, do not boot.
+    RenderFailed,
+    /// No boot target yet — keep the client polling.
+    Poll,
+}
+
+/// Decide what to serve for a `/poll/{mac}` request: boot a directly-configured
+/// host, boot a manually-overridden target, report a render failure, or keep
+/// polling. Pure (no state mutation) so every branch can be tested directly.
+fn decide_poll_outcome(
+    boot_template: &minijinja::Template<'_, '_>,
+    config: &Config,
+    state_store: &StateStore,
+    mac_str: &str,
+    host_hdr: &str,
+) -> PollOutcome {
+    // 1. Host configured directly in yaml.
+    if let Some(host_config) = config.find_host(mac_str) {
+        return match boot_template.render(context! {
+            name => host_config.name.as_str(),
+            server_ip_port => host_hdr,
+            mac => host_config.mac.as_str(),
+            cmdline => host_config.cmdline.as_deref().unwrap_or(""),
+            target_of => None::<&str>,
+        }) {
+            Ok(script) => PollOutcome::Boot {
+                script,
+                cache_mac: host_config.mac.clone(),
+            },
+            Err(e) => {
+                error!("Failed to render boot script for host {}: {:?}", mac_str, e);
+                PollOutcome::RenderFailed
+            }
+        };
+    }
+
+    // 2. Host registered with a manual override target that exists in config.
+    if let Some(hs) = state_store.get_host(mac_str)
+        && let Some(target_name) = hs.assigned_target.as_ref()
+        && let Some(target_config) = config.hosts.iter().find(|h| &h.name == target_name)
+    {
+        return match boot_template.render(context! {
+            name => target_config.name.as_str(),
+            server_ip_port => host_hdr,
+            mac => target_config.mac.as_str(),
+            cmdline => target_config.cmdline.as_deref().unwrap_or(""),
+            target_of => Some(mac_str),
+        }) {
+            Ok(script) => PollOutcome::Boot {
+                script,
+                cache_mac: target_config.mac.clone(),
+            },
+            Err(e) => {
+                error!(
+                    "Failed to render boot script for override target {}: {:?}",
+                    mac_str, e
+                );
+                PollOutcome::RenderFailed
+            }
+        };
+    }
+
+    // 3. Nothing to boot yet — keep polling.
+    PollOutcome::Poll
+}
+
 // /poll/{mac} endpoint
 async fn poll_handler(
     State(state): State<ServerState>,
@@ -234,53 +307,19 @@ async fn poll_handler(
         }
     };
 
-    let (boot_script, should_update_booting, target_mac_to_use) = {
+    let outcome = {
         let config_guard = state.config.read();
-
-        // 1. Check if host is configured directly in yaml
-        if let Some(host_config) = config_guard.find_host(&mac_str) {
-            let script = boot_template
-                .render(context! {
-                    name => host_config.name.as_str(),
-                    server_ip_port => host_hdr,
-                    mac => host_config.mac.as_str(),
-                    cmdline => host_config.cmdline.as_deref().unwrap_or(""),
-                    target_of => None::<&str>,
-                })
-                .unwrap_or_default();
-            (Some(script), true, Some(host_config.mac.clone()))
-        } else {
-            // 2. Check if host is registered and has a manual override target
-            let host_state = state.state_store.get_host(&mac_str);
-            if let Some(hs) = host_state {
-                if let Some(ref target_name) = hs.assigned_target {
-                    if let Some(target_config) =
-                        config_guard.hosts.iter().find(|h| &h.name == target_name)
-                    {
-                        let script = boot_template
-                            .render(context! {
-                                name => target_config.name.as_str(),
-                                server_ip_port => host_hdr,
-                                mac => target_config.mac.as_str(),
-                                cmdline => target_config.cmdline.as_deref().unwrap_or(""),
-                                target_of => Some(mac_str.as_str()),
-                            })
-                            .unwrap_or_default();
-                        (Some(script), true, Some(target_config.mac.clone()))
-                    } else {
-                        (None, false, None)
-                    }
-                } else {
-                    (None, false, None)
-                }
-            } else {
-                (None, false, None)
-            }
-        }
+        decide_poll_outcome(
+            &boot_template,
+            &config_guard,
+            &state.state_store,
+            &mac_str,
+            host_hdr,
+        )
     };
 
-    if let Some(script) = boot_script {
-        if should_update_booting {
+    match outcome {
+        PollOutcome::Boot { script, cache_mac } => {
             state.state_store.update_host_status(
                 &mac_str,
                 HostStatus::Booting,
@@ -293,37 +332,63 @@ async fn poll_handler(
                 "INFO",
                 Some(&mac_str),
                 &format!(
-                    "Serving boot execution script for target (mapped cache MAC: {:?})",
-                    target_mac_to_use
+                    "Serving boot execution script for target (mapped cache MAC: {cache_mac})"
                 ),
             );
             bootycall_log::event!(
                 "http_boot_served",
                 mac = %mac_str,
-                target_mac = target_mac_to_use.as_deref().unwrap_or(""),
+                target_mac = %cache_mac,
                 client_ip = %client_ip,
             );
+            ([(header::CONTENT_TYPE, "text/plain")], script).into_response()
         }
-        return ([(header::CONTENT_TYPE, "text/plain")], script).into_response();
+        PollOutcome::RenderFailed => {
+            // The boot template failed to render (a server-side data/template
+            // fault). Do NOT transition the host to Booting — mark it Failed,
+            // emit an event, and return a non-empty HTTP 500 body rather than
+            // the old empty-200 that left the client stuck with no signal.
+            state.state_store.update_host_status(
+                &mac_str,
+                HostStatus::Failed,
+                None,
+                None,
+                Some(client_ip.clone()),
+                None,
+            );
+            state
+                .state_store
+                .log_event("ERROR", Some(&mac_str), "Boot script render failed");
+            bootycall_log::event!(
+                "http_boot_render_failed",
+                mac = %mac_str,
+                client_ip = %client_ip,
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "#!ipxe\necho BootyCall: internal error rendering boot script\n",
+            )
+                .into_response()
+        }
+        PollOutcome::Poll => {
+            state.state_store.update_host_status(
+                &mac_str,
+                HostStatus::Polling,
+                None,
+                None,
+                Some(client_ip),
+                None,
+            );
+            // Return the poll retry script (endless loop until a target
+            // configuration is assigned).
+            let retry_script = format!(
+                "#!ipxe\nprompt --key 0x02 --timeout 4000 BootyCall: Press Ctrl-B for manual override... \\\n  && chain --autofree http://{}/ipxemenu \\\n  || chain --autofree http://{}/poll/{}\n",
+                host_hdr, host_hdr, mac_str
+            );
+            ([(header::CONTENT_TYPE, "text/plain")], retry_script).into_response()
+        }
     }
-
-    // Update state store to Polling if not booted
-    state.state_store.update_host_status(
-        &mac_str,
-        HostStatus::Polling,
-        None,
-        None,
-        Some(client_ip),
-        None,
-    );
-
-    // Return the poll retry script (endless loop until target configuration is assigned)
-    let retry_script = format!(
-        "#!ipxe\nprompt --key 0x02 --timeout 4000 BootyCall: Press Ctrl-B for manual override... \\\n  && chain --autofree http://{}/ipxemenu \\\n  || chain --autofree http://{}/poll/{}\n",
-        host_hdr, host_hdr, mac_str
-    );
-
-    ([(header::CONTENT_TYPE, "text/plain")], retry_script).into_response()
 }
 
 // /ipxemenu endpoint fallback for manual choice

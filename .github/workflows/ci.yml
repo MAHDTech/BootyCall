@@ -217,6 +217,18 @@ jobs:
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: devenv test
 
+      # `devenv test` installs the git hooks but does not run them against the
+      # tree, and pre-commit-style hooks only lint staged files — so on a fresh
+      # CI checkout with nothing staged the lint hooks (actionlint, cspell,
+      # markdownlint, lychee, nixfmt, deadnix, prettier, shellcheck, yamllint,
+      # etc.) would check zero files. Run the full battery against ALL files,
+      # independent of git staging, so a lint regression fails CI. `prek` is the
+      # hook runner provisioned by the dev shell.
+      - id: run_hooks_all_files
+        name: Run Pre-commit Hooks (all files)
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: prek run --all-files --show-diff-on-failure
+
   ci-cargo-test:
     name: Cargo Test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

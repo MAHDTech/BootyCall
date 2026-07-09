@@ -90,6 +90,17 @@ nix develop --impure --command cargo build
 nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
+### Validate Configuration
+
+Load and validate the configuration file, then exit **without** starting any
+servers or touching hardware. Exits `0` when the configuration is valid and
+non-zero (printing the validation error) when it is not — ideal as a pre-deploy
+gate before atomically renaming a new config into place:
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml check-config
+```
+
 ### Run Tests
 
 ```bash

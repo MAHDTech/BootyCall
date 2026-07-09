@@ -41,6 +41,9 @@ enum Commands {
         #[arg(long)]
         blinking: bool,
     },
+    /// Load and validate the configuration file, then exit without starting any
+    /// servers or touching hardware (0 = valid, non-zero = invalid).
+    CheckConfig,
 }
 
 #[tokio::main]
@@ -104,6 +107,23 @@ async fn main() -> Result<(), anyhow::Error> {
                     "Running LED test... (Note: stop the bootycall service to prevent overwriting)"
                 );
                 bootycall_led::led_test(&color, blinking)?;
+                return Ok(());
+            }
+            Commands::CheckConfig => {
+                // Load + validate (Config::load runs Config::validate) without
+                // spawning servers or touching hardware. Exit 0 on success,
+                // non-zero (via the propagated error) on any validation failure
+                // — the safe pre-deploy check for the atomic-save workflow.
+                let config_path = PathBuf::from(&args.config);
+                if !config_path.exists() {
+                    return Err(anyhow::anyhow!(
+                        "Configuration file not found: {}",
+                        args.config
+                    ));
+                }
+                Config::load(&config_path)
+                    .with_context(|| format!("Configuration '{}' is invalid", args.config))?;
+                println!("OK: configuration '{}' is valid", args.config);
                 return Ok(());
             }
         }

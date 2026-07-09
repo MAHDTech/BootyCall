@@ -27,6 +27,22 @@ struct CacheMetadata {
     initrd_override: Option<String>,
 }
 
+/// Kernel filename heuristic for auto-detection, shared by the ISO and GPT/FAT
+/// walkers so the two never drift. Case-insensitive. `Image` (capitalised) is
+/// the conventional arm64 kernel name — this is an aarch64 appliance, so it
+/// must be recognised alongside the x86 `vmlinuz`/`bzimage` names.
+pub(crate) fn is_kernel_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "vmlinuz" | "bzimage" | "kernel" | "image")
+}
+
+/// Initrd filename heuristic (case-insensitive substring match), shared by both
+/// walkers.
+pub(crate) fn is_initrd_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("initrd") || lower.contains("initramfs")
+}
+
 impl CacheMetadata {
     fn write_to_file(&self, path: &Path) -> std::io::Result<()> {
         let content = serde_json::to_string_pretty(self)
@@ -71,12 +87,17 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
     // going forward. The stale legacy file is removed below.
     let legacy_metadata_path = host_cache_dir.join("metadata.txt");
 
-    // Get current image metadata
-    if !host.image_path.exists() {
-        return Err(ExtractorError::ImageNotFound(host.image_path.clone()));
-    }
-
-    let file_meta = fs::metadata(&host.image_path)?;
+    // Get current image metadata. Single stat (no `exists()` pre-check): a
+    // `NotFound` maps to the friendlier `ImageNotFound`, other stat errors
+    // propagate faithfully. This closes the time-of-check/time-of-use race
+    // where the image vanished between an `exists()` check and `metadata()`.
+    let file_meta = match fs::metadata(&host.image_path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ExtractorError::ImageNotFound(host.image_path.clone()));
+        }
+        Err(e) => return Err(ExtractorError::Io(e)),
+    };
     let current_mtime = file_meta
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
@@ -199,6 +220,46 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
             let _ = fs::remove_file(&initrd_path);
             let _ = fs::remove_file(&metadata_path);
             Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_initrd_name, is_kernel_name};
+
+    #[test]
+    fn kernel_name_heuristic() {
+        for good in [
+            "vmlinuz", "bzImage", "BZIMAGE", "kernel", "Image", "image", "IMAGE",
+        ] {
+            assert!(is_kernel_name(good), "{good:?} should match a kernel");
+        }
+        for bad in [
+            "initrd.img",
+            "grub.cfg",
+            "vmlinuz.old",
+            "images",
+            "kernel.efi",
+            "",
+        ] {
+            assert!(!is_kernel_name(bad), "{bad:?} should NOT match a kernel");
+        }
+    }
+
+    #[test]
+    fn initrd_name_heuristic() {
+        for good in [
+            "initrd",
+            "initrd.img",
+            "initramfs-linux.img",
+            "INITRAMFS",
+            "boot-initrd.gz",
+        ] {
+            assert!(is_initrd_name(good), "{good:?} should match an initrd");
+        }
+        for bad in ["vmlinuz", "kernel", "root.squashfs", ""] {
+            assert!(!is_initrd_name(bad), "{bad:?} should NOT match an initrd");
         }
     }
 }

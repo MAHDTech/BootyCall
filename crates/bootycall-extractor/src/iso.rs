@@ -26,11 +26,8 @@ pub fn extract_from_iso(
         }
     } else {
         // Search recursively
-        find_file_recursive(&iso.root, &|name| {
-            let lower = name.to_lowercase();
-            lower == "vmlinuz" || lower == "bzimage" || lower == "kernel"
-        })?
-        .ok_or(ExtractorError::KernelNotFound)?
+        find_file_recursive(&iso.root, &|name| crate::is_kernel_name(name))?
+            .ok_or(ExtractorError::KernelNotFound)?
     };
 
     // 2. Resolve Initrd
@@ -45,11 +42,8 @@ pub fn extract_from_iso(
         }
     } else {
         // Search recursively
-        find_file_recursive(&iso.root, &|name| {
-            let lower = name.to_lowercase();
-            lower.contains("initrd") || lower.contains("initramfs")
-        })?
-        .ok_or(ExtractorError::InitrdNotFound)?
+        find_file_recursive(&iso.root, &|name| crate::is_initrd_name(name))?
+            .ok_or(ExtractorError::InitrdNotFound)?
     };
 
     // 3. Extract Kernel

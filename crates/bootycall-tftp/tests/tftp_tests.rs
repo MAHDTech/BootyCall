@@ -64,6 +64,7 @@ async fn test_tftp_server_negotiation_and_transfer() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -203,6 +204,7 @@ async fn test_tftp_file_not_found() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -271,6 +273,7 @@ async fn assert_tftp_traversal_rejected(bind_port: u16, client_port: u16, reques
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -365,6 +368,7 @@ async fn test_tftp_transfer_non_multiple_blksize_intact() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -471,6 +475,7 @@ async fn test_tftp_timeout_marks_host_failed() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -560,6 +565,7 @@ fn base_server_config(bind: &str, tftp_root: &std::path::Path) -> ServerConfig {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     }

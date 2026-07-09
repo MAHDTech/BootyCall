@@ -40,6 +40,10 @@ server:
   # option ROM cannot execute an EFI image, so it needs a real-mode NBP such as
   # iPXE's undionly.kpxe. Optional; defaults to "boot/x64/undionly.kpxe".
   default_bootloader_bios: "boot/x64/undionly.kpxe"
+  # OLED panel brightness (0–255). Scales the grayscale→RGB565 LUT; lower values
+  # dim the display (and reduce burn-in/power). Optional; defaults to 255 (full).
+  # The panel dims further automatically while the screensaver is active.
+  oled_brightness: 255
 
 hosts:
   - mac: "52:54:00:10:10:10"

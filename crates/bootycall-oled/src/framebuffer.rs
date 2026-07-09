@@ -48,11 +48,17 @@ pub fn read_fb_geometry(sysfs_dir: &str) -> Option<FbGeometry> {
     parse_fb_geometry(&virtual_size, &bits_per_pixel)
 }
 
+/// Full brightness — the identity LUT, i.e. the behaviour before brightness
+/// control existed.
+pub const FULL_BRIGHTNESS: u8 = 255;
+
 pub struct Framebuffer {
     // 8-bit grayscale backbuffer
     pub buffer: [u8; WIDTH * HEIGHT],
     // LUT to convert grayscale to RGB565
     lut: [u16; 256],
+    // Brightness the current LUT was built for (0–255).
+    brightness: u8,
     // Cached file descriptor to the framebuffer
     file: Option<File>,
     // Rotation state: 0 or 180 (defaults to 180 standalone)
@@ -67,7 +73,13 @@ impl Default for Framebuffer {
 
 impl Framebuffer {
     pub fn new() -> Self {
-        let lut = build_lut();
+        Self::with_brightness(FULL_BRIGHTNESS)
+    }
+
+    /// Construct a framebuffer whose grayscale→RGB565 LUT is scaled by
+    /// `brightness` (255 = full/unchanged, 0 = black).
+    pub fn with_brightness(brightness: u8) -> Self {
+        let lut = build_lut(brightness);
 
         let file = OpenOptions::new()
             .write(true)
@@ -78,8 +90,18 @@ impl Framebuffer {
         Self {
             buffer: [0; WIDTH * HEIGHT],
             lut,
+            brightness,
             file,
             rotation: 180,
+        }
+    }
+
+    /// Rebuild the LUT for a new brightness. No-op when unchanged, so it is
+    /// cheap to call every tick (used to dim the panel in screensaver mode).
+    pub fn set_brightness(&mut self, brightness: u8) {
+        if brightness != self.brightness {
+            self.brightness = brightness;
+            self.lut = build_lut(brightness);
         }
     }
 
@@ -169,15 +191,19 @@ pub fn pack_buffer(buffer: &[u8], lut: &[u16; 256], rotation: u16) -> Vec<u8> {
     packed
 }
 
-/// Construct the same LUT that `Framebuffer::new` builds. Exposed for
-/// tests so the invariant "black gray → 0x0000, white gray → 0xFFFF
-/// (byte-swapped)" can be verified.
-pub fn build_lut() -> [u16; 256] {
+/// Build the grayscale→RGB565 LUT, scaling each grayscale level by
+/// `brightness`/255 before packing. `brightness == 255` is the identity map
+/// (`Framebuffer::new`'s original behaviour); `0` blacks the panel out.
+/// Exposed for tests so the invariant "black gray → 0x0000, white gray →
+/// 0xFFFF (byte-swapped) at full brightness" can be verified.
+pub fn build_lut(brightness: u8) -> [u16; 256] {
     let mut lut = [0u16; 256];
     for (g, lut_entry) in lut.iter_mut().enumerate() {
-        let r5 = (g >> 3) & 0x1F;
-        let g6 = (g >> 2) & 0x3F;
-        let b5 = (g >> 3) & 0x1F;
+        // Scale the grayscale intensity by the brightness factor first.
+        let scaled = (g as u32 * brightness as u32 / 255) as usize;
+        let r5 = (scaled >> 3) & 0x1F;
+        let g6 = (scaled >> 2) & 0x3F;
+        let b5 = (scaled >> 3) & 0x1F;
         let val = (r5 << 11) | (g6 << 5) | b5;
         // Swap bytes for little endian framebuffer
         *lut_entry = ((val as u16 & 0xFF) << 8) | ((val as u16 >> 8) & 0xFF);
@@ -191,7 +217,7 @@ mod tests {
 
     #[test]
     fn lut_black_maps_to_zero_and_white_is_full() {
-        let lut = build_lut();
+        let lut = build_lut(FULL_BRIGHTNESS);
         assert_eq!(lut[0], 0, "gray 0 should pack to 0x0000");
         // Gray 255: r5 = 31, g6 = 63, b5 = 31 → 0xFFFF, then byte-swapped
         // stays 0xFFFF because it's palindromic in bytes.
@@ -199,10 +225,32 @@ mod tests {
     }
 
     #[test]
+    fn lut_brightness_scales_intensity() {
+        // brightness 0 blacks everything out, including white.
+        let off = build_lut(0);
+        assert_eq!(off[0], 0);
+        assert_eq!(off[255], 0, "brightness 0 must black out even white");
+        // Partial brightness dims white to neither full nor off.
+        let half = build_lut(128);
+        assert_ne!(half[255], 0xFFFF, "dimmed white must not be full");
+        assert_ne!(half[255], 0, "dimmed white must not be black");
+    }
+
+    #[test]
+    fn set_brightness_rebuilds_lut() {
+        let mut fb = Framebuffer::with_brightness(FULL_BRIGHTNESS);
+        assert_eq!(fb.lut, build_lut(FULL_BRIGHTNESS));
+        fb.set_brightness(64);
+        assert_eq!(fb.lut, build_lut(64));
+        fb.set_brightness(FULL_BRIGHTNESS);
+        assert_eq!(fb.lut, build_lut(FULL_BRIGHTNESS));
+    }
+
+    #[test]
     fn pack_rotation_180_yields_reversed_byte_order() {
         // A 4-pixel gradient: iterating forward vs reversed must produce
         // mirrored output.
-        let lut = build_lut();
+        let lut = build_lut(FULL_BRIGHTNESS);
         let buf = [0u8, 64, 128, 255];
         let normal = pack_buffer(&buf, &lut, 180);
         let rotated = pack_buffer(&buf, &lut, 0);
@@ -218,7 +266,7 @@ mod tests {
 
     #[test]
     fn packed_length_is_two_bytes_per_pixel() {
-        let lut = build_lut();
+        let lut = build_lut(FULL_BRIGHTNESS);
         let buf = vec![0u8; 32];
         assert_eq!(pack_buffer(&buf, &lut, 0).len(), 64);
         assert_eq!(pack_buffer(&buf, &lut, 180).len(), 64);

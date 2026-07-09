@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 
 const PAGE_DURATION: Duration = Duration::from_secs(3);
 const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Screensaver brightness as a percentage of the configured brightness — the
+/// panel dims while idle to cut burn-in and power draw.
+const SCREENSAVER_BRIGHTNESS_PERCENT: u16 = 40;
 /// Cadence at which the render loop redraws. The shutdown flag is checked
 /// once per tick, so this doubles as the shutdown latency ceiling.
 const TICK: Duration = Duration::from_millis(1000);
@@ -115,6 +118,16 @@ impl OptionalGpioLine {
 enum DisplayMode {
     Screensaver,
     Metrics,
+}
+
+/// Brightness to apply in a given mode: the full configured brightness for
+/// Metrics, dimmed by [`SCREENSAVER_BRIGHTNESS_PERCENT`] for the screensaver.
+/// Pure so the dim math is unit-testable.
+fn mode_brightness(base: u8, mode: DisplayMode) -> u8 {
+    match mode {
+        DisplayMode::Metrics => base,
+        DisplayMode::Screensaver => (base as u16 * SCREENSAVER_BRIGHTNESS_PERCENT / 100) as u8,
+    }
 }
 
 const VISIBLE_Y_START: usize = 28;
@@ -272,6 +285,7 @@ const PAGES: &[PageSpec] = &[
 /// caller in `main.rs` doesn't have to know.
 pub async fn run_oled_manager(
     state_store: StateStore,
+    brightness: u8,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), anyhow::Error> {
     info!("Starting OLED Manager Task...");
@@ -282,7 +296,7 @@ pub async fn run_oled_manager(
 
     let render_thread = std::thread::Builder::new()
         .name("bootycall-oled".to_string())
-        .spawn(move || render_loop(state_for_thread, flag_for_thread))?;
+        .spawn(move || render_loop(state_for_thread, brightness, flag_for_thread))?;
 
     // Bridge the async shutdown channel to the sync loop.
     let _ = shutdown_rx.recv().await;
@@ -297,7 +311,11 @@ pub async fn run_oled_manager(
     }
 }
 
-fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
+fn render_loop(
+    state_store: StateStore,
+    brightness: u8,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), anyhow::Error> {
     // Hardware-absent (headless) short-circuit: on a host with neither the
     // framebuffer nor the GPIO chip — a dev laptop, or a CloudKey mid-boot with
     // nothing wired — spinning the 1 Hz loop just to no-op is pointless. Log
@@ -359,7 +377,7 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         now0,
     );
 
-    let mut fb = Framebuffer::new();
+    let mut fb = Framebuffer::with_brightness(brightness);
     let mut sys_metrics = SystemMetrics::new();
 
     let mut last_activity = Instant::now();
@@ -404,6 +422,9 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         } else if last_activity.elapsed() > SCREENSAVER_TIMEOUT {
             current_mode = DisplayMode::Screensaver;
         }
+
+        // Dim the panel while idle (no-op when the brightness is unchanged).
+        fb.set_brightness(mode_brightness(brightness, current_mode));
 
         // 3. Only refresh display-specific metrics if we are in Metrics mode
         if current_mode == DisplayMode::Metrics {
@@ -685,6 +706,20 @@ mod tests {
         assert!(optional_hw_retry_due(
             OPTIONAL_HW_RETRY_INTERVAL + Duration::from_secs(30)
         ));
+    }
+
+    #[test]
+    fn mode_brightness_dims_only_the_screensaver() {
+        // Metrics uses the configured brightness unchanged.
+        assert_eq!(mode_brightness(200, DisplayMode::Metrics), 200);
+        assert_eq!(mode_brightness(255, DisplayMode::Metrics), 255);
+        // Screensaver dims to the configured percentage.
+        assert_eq!(
+            mode_brightness(200, DisplayMode::Screensaver),
+            (200 * SCREENSAVER_BRIGHTNESS_PERCENT / 100) as u8
+        );
+        // Brightness 0 stays 0 in both modes.
+        assert_eq!(mode_brightness(0, DisplayMode::Screensaver), 0);
     }
 
     #[test]

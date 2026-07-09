@@ -798,6 +798,7 @@ mod tests {
                 default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
                 default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
                 oled_enabled: false,
+                oled_brightness: 255,
                 api_token: None,
                 max_artifact_bytes: None,
             },

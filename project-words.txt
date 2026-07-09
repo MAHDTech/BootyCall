@@ -69,6 +69,7 @@ glassmorphic
 gnumake
 gnused
 gpiochip
+grayscale
 gruntfuggly
 hediet
 horiz

@@ -73,6 +73,7 @@ async fn test_http_server_endpoints() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -240,6 +241,7 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };
@@ -688,6 +690,7 @@ async fn test_static_served_from_configured_dir() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
     };

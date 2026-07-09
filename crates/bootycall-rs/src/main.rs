@@ -253,12 +253,18 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     let oled_store = state_store.clone();
-    let oled_enabled = shared_config.read().server.oled_enabled;
+    let (oled_enabled, oled_brightness) = {
+        let guard = shared_config.read();
+        (guard.server.oled_enabled, guard.server.oled_brightness)
+    };
     let (oled_shutdown_tx, oled_shutdown_rx) = tokio::sync::mpsc::channel(1);
     let mut oled_manager_handle = None;
     if oled_enabled {
         oled_manager_handle = Some(tokio::spawn(async move {
-            if let Err(e) = bootycall_oled::run_oled_manager(oled_store, oled_shutdown_rx).await {
+            if let Err(e) =
+                bootycall_oled::run_oled_manager(oled_store, oled_brightness, oled_shutdown_rx)
+                    .await
+            {
                 error!("OLED Manager encountered a fatal error: {:?}", e);
             }
         }));

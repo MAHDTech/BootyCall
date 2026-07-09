@@ -7,6 +7,10 @@ fn default_oled_enabled() -> bool {
     true
 }
 
+fn default_oled_brightness() -> u8 {
+    255
+}
+
 fn default_static_dir() -> PathBuf {
     PathBuf::from("./static")
 }
@@ -40,6 +44,10 @@ pub struct ServerConfig {
     pub default_bootloader_bios: String,
     #[serde(default = "default_oled_enabled")]
     pub oled_enabled: bool,
+    /// OLED panel brightness (0–255, default full). Scales the grayscale→RGB565
+    /// LUT; lower values dim the display (and reduce burn-in/power).
+    #[serde(default = "default_oled_brightness")]
+    pub oled_brightness: u8,
     /// Shared secret required on mutating dashboard endpoints
     /// (POST /api/override). When absent, mutating endpoints run
     /// unauthenticated — same behaviour as before P1-7. Populate this
@@ -630,6 +638,7 @@ hosts:
             default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
             default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
             oled_enabled: true,
+            oled_brightness: 255,
             api_token: None,
             max_artifact_bytes: None,
         }

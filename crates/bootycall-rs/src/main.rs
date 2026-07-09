@@ -248,12 +248,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let outcome: anyhow::Result<()> = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received (SIGINT). Cleaning up services...");
-            let _ = led_shutdown_tx.send(()).await;
-            let _ = oled_shutdown_tx.send(()).await;
-            let _ = led_manager_handle.await;
-            if let Some(handle) = oled_manager_handle {
-                let _ = handle.await;
-            }
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Ok(())
         }
         _ = async {
@@ -267,38 +268,87 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         } => {
             info!("Shutdown signal received (SIGTERM). Cleaning up services...");
-            let _ = led_shutdown_tx.send(()).await;
-            let _ = oled_shutdown_tx.send(()).await;
-            let _ = led_manager_handle.await;
-            if let Some(handle) = oled_manager_handle {
-                let _ = handle.await;
-            }
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Ok(())
         }
         res = dhcp_handle => {
             let err = join_result_to_error("Proxy DHCP", res);
             error!("Proxy DHCP Server exited: {err:?}");
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Err(err)
         }
         res = tftp_handle => {
             let err = join_result_to_error("TFTP", res);
             error!("TFTP Server exited: {err:?}");
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Err(err)
         }
         res = http_handle => {
             let err = join_result_to_error("HTTP", res);
             error!("HTTP Server exited: {err:?}");
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Err(err)
         }
         _ = cleaner_handle => {
             let err = anyhow::anyhow!("Host state cleaner task exited unexpectedly");
             error!("{err}");
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle,
+                oled_manager_handle,
+            )
+            .await;
             Err(err)
         }
     };
 
     info!("BootyCall shutdown complete.");
     outcome
+}
+
+/// Signal the LED and OLED managers to stop and await their tasks so the
+/// hardware is left in a defined shutdown state rather than mid-render.
+///
+/// Shared by every shutdown path — the SIGINT/SIGTERM arms and the fatal
+/// server-exit arms (issue 007) — so hardware is always blanked before the
+/// process exits, whether that exit is clean or fatal.
+async fn graceful_shutdown(
+    led_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
+    oled_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
+    led_manager_handle: tokio::task::JoinHandle<()>,
+    oled_manager_handle: Option<tokio::task::JoinHandle<()>>,
+) {
+    let _ = led_shutdown_tx.send(()).await;
+    let _ = oled_shutdown_tx.send(()).await;
+    let _ = led_manager_handle.await;
+    if let Some(handle) = oled_manager_handle {
+        let _ = handle.await;
+    }
 }
 
 /// Apply the cache-sync restart policy (issue 020) and log the outcome.

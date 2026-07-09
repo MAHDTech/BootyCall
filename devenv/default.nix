@@ -36,6 +36,7 @@ in
     bootycall
     cargo-audit
     cargo-edit # Adds 'cargo upgrade'
+    cargo-machete # Detects unused workspace dependencies
     figlet
     gh
     hello

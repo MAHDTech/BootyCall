@@ -495,18 +495,18 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
     {
         let mut renderer = Renderer::new(&mut fb);
         let use_large_font = size > crate::renderer::BOLD_THRESHOLD;
-        let text_w = Renderer::measure_text(text, use_large_font);
-        // Text height matches the font point size rounded to whole pixels.
-        let text_h = if use_large_font {
-            crate::renderer::LARGE_SCALE as usize
-        } else {
-            crate::renderer::SMALL_SCALE as usize
-        };
+        // `--size` drives the actual render scale (points ≈ pixels), not just
+        // the bold/regular switch, so e.g. `--size 6` and `--size 40` visibly
+        // differ. The production render loop keeps its fixed SMALL/LARGE scales.
+        let scale_px = size as f32;
+        let text_w = Renderer::measure_text_scaled(text, use_large_font, scale_px);
+        // Glyph height ≈ the requested point size in pixels.
+        let text_h = size;
 
         let x = align_x(horiz, text_w);
         let y = align_y(vert, text_h);
 
-        renderer.draw_text(x, y, text, use_large_font);
+        renderer.draw_text_scaled(x, y, text, use_large_font, scale_px);
     }
 
     fb.flush()?;

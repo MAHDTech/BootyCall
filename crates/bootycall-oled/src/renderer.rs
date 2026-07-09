@@ -95,15 +95,30 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn draw_text(&mut self, x: usize, y: usize, text: &str, use_large_font: bool) {
-        let font = if use_large_font {
-            &get_fonts().bold
-        } else {
-            &get_fonts().regular
-        };
         let scale_px = if use_large_font {
             LARGE_SCALE
         } else {
             SMALL_SCALE
+        };
+        self.draw_text_scaled(x, y, text, use_large_font, scale_px);
+    }
+
+    /// Like [`draw_text`](Self::draw_text) but renders at an explicit point
+    /// size rather than the fixed `SMALL_SCALE`/`LARGE_SCALE`. This lets
+    /// `oled-test --size` actually drive the glyph scale; the production render
+    /// loop keeps calling `draw_text` and is unaffected.
+    pub fn draw_text_scaled(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        use_large_font: bool,
+        scale_px: f32,
+    ) {
+        let font = if use_large_font {
+            &get_fonts().bold
+        } else {
+            &get_fonts().regular
         };
         let scale = PxScale::from(scale_px);
         let scaled = font.as_scaled(scale);
@@ -136,15 +151,22 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn measure_text(text: &str, use_large_font: bool) -> usize {
-        let font = if use_large_font {
-            &get_fonts().bold
-        } else {
-            &get_fonts().regular
-        };
         let scale_px = if use_large_font {
             LARGE_SCALE
         } else {
             SMALL_SCALE
+        };
+        Self::measure_text_scaled(text, use_large_font, scale_px)
+    }
+
+    /// Like [`measure_text`](Self::measure_text) but at an explicit point size,
+    /// so `oled-test` can align text drawn via
+    /// [`draw_text_scaled`](Self::draw_text_scaled).
+    pub fn measure_text_scaled(text: &str, use_large_font: bool, scale_px: f32) -> usize {
+        let font = if use_large_font {
+            &get_fonts().bold
+        } else {
+            &get_fonts().regular
         };
         let scaled = font.as_scaled(PxScale::from(scale_px));
         let width: f32 = text
@@ -247,5 +269,33 @@ mod tests {
     fn measure_text_bold_matches_regular_shape() {
         // Large font should also be non-zero for a non-empty string.
         assert!(Renderer::measure_text("HELLO", true) > 0);
+    }
+
+    #[test]
+    fn measure_text_scaled_grows_with_point_size() {
+        // The whole point of issue 015: the scale actually varies with size,
+        // so a larger point size measures strictly wider.
+        let small = Renderer::measure_text_scaled("HELLO", false, 6.0);
+        let large = Renderer::measure_text_scaled("HELLO", false, 40.0);
+        assert!(
+            large > small,
+            "larger point size must measure wider ({large} !> {small})"
+        );
+    }
+
+    #[test]
+    fn draw_text_scaled_lights_more_pixels_at_larger_size() {
+        let lit_at = |px: f32| {
+            let mut fb = Framebuffer::new();
+            {
+                let mut r = Renderer::new(&mut fb);
+                r.draw_text_scaled(0, 0, "M", false, px);
+            }
+            fb.buffer.iter().filter(|&&p| p > 0).count()
+        };
+        assert!(
+            lit_at(30.0) > lit_at(8.0),
+            "a larger point size must light more pixels on the panel"
+        );
     }
 }

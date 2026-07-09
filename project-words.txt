@@ -83,6 +83,7 @@ mkhl
 mlittle
 mtools
 netboot
+netascii
 nhoizey
 nixfmt
 nixos

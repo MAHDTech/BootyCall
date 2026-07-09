@@ -12,7 +12,6 @@ use bootycall_core::state::{HostStatus, StateStore};
 #[derive(Debug)]
 struct RrqRequest {
     filename: String,
-    #[allow(dead_code)]
     mode: String,
     blksize: Option<usize>,
     timeout: Option<u64>,
@@ -138,6 +137,20 @@ async fn handle_tftp_transfer(
     mac_addr: Option<String>,
 ) -> Result<(), std::io::Error> {
     let transfer_start = std::time::Instant::now();
+
+    // RFC 1350: we only implement `octet` (binary) mode. A `netascii` client
+    // would need CR/LF translation, and `mail` is illegal — reject anything
+    // that isn't octet with an explicit ERROR instead of silently serving raw
+    // octet bytes a strict client would mis-handle.
+    if !request.mode.eq_ignore_ascii_case("octet") {
+        warn!(
+            "Rejecting TFTP transfer to {}: unsupported transfer mode {:?} (octet only)",
+            client_addr, request.mode
+        );
+        let err_pkt = make_error_packet(4, "Illegal TFTP operation (only octet mode supported)");
+        let _ = socket.send(&err_pkt).await;
+        return Ok(());
+    }
 
     // 1. Open file
     let mut file = match tokio::fs::File::open(&file_path).await {

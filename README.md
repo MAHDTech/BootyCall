@@ -84,3 +84,5 @@ cargo test --all
 
 - [Specification Guide](docs/spec.md) - Deep architectural and schema details.
 - [Development Usage Guide](docs/usage.md) - How to setup directory trees, configure yaml, and bind privileged ports.
+- [Operations Runbook](docs/operations.md) - Day-two operations: cache reset, GPIO/udev requirements, unit recovery, and logs.
+- [Observability Guide](docs/observability.md) - Structured event schema and shipping boot activity into ClickHouse.

@@ -172,3 +172,5 @@ btype
 scanline
 clickhouse
 evented
+journalctl
+udevadm

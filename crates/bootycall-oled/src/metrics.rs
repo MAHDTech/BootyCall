@@ -1,5 +1,9 @@
 use sysinfo::{Components, Disks, ProcessesToUpdate, System};
 
+/// Bytes per GiB (1024³) — the divisor turning `sysinfo`'s byte counts into the
+/// "G" figures shown on the metrics pages.
+const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+
 pub struct SystemMetrics {
     sys: System,
     components: Components,
@@ -113,8 +117,8 @@ impl SystemMetrics {
     }
 
     pub fn get_ram_usage(&self) -> String {
-        let total = self.sys.total_memory() as f64 / 1_073_741_824.0;
-        let used = self.sys.used_memory() as f64 / 1_073_741_824.0;
+        let total = self.sys.total_memory() as f64 / BYTES_PER_GIB;
+        let used = self.sys.used_memory() as f64 / BYTES_PER_GIB;
         format!("{:.1}G / {:.1}G", used, total)
     }
 
@@ -129,8 +133,8 @@ impl SystemMetrics {
             }
         }
         if total > 0 {
-            let total_gb = total as f64 / 1_073_741_824.0;
-            let used_gb = used as f64 / 1_073_741_824.0;
+            let total_gb = total as f64 / BYTES_PER_GIB;
+            let used_gb = used as f64 / BYTES_PER_GIB;
             format!("{:.1}G / {:.1}G", used_gb, total_gb)
         } else {
             "N/A".to_string()

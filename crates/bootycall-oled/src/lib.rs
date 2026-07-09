@@ -53,6 +53,22 @@ enum DisplayMode {
 const VISIBLE_Y_START: usize = 28;
 const VISIBLE_HEIGHT: usize = 32;
 
+// Metrics-page intra-page layout, in pixels, all relative to the visible
+// window. The 16×16 status icon sits at the left margin; label and value text
+// start past it; a separator line spans between symmetric left/right margins.
+/// Left (and, mirrored as `WIDTH - `, right) margin for the icon and separator.
+const METRICS_MARGIN_X: usize = 12;
+/// X where label/value text begins — clear of the left-margin icon.
+const METRICS_TEXT_X: usize = 32;
+/// Label baseline offset below `VISIBLE_Y_START`.
+const METRICS_LABEL_DY: usize = 2;
+/// Separator-line offset below `VISIBLE_Y_START`.
+const METRICS_SEPARATOR_DY: usize = 15;
+/// Bold value baseline offset below `VISIBLE_Y_START`.
+const METRICS_VALUE_DY: usize = 16;
+/// Grayscale brightness (0–255) of the separator line.
+const METRICS_SEPARATOR_BRIGHTNESS: u8 = 128;
+
 /// Vertical extent (px) of the screensaver "TARS" glyph block plus the
 /// braille dots drawn beneath it (`draw_y + 13` plus the dot rows). Used to
 /// keep the bounce box inside the visible window. Named const rather than a
@@ -339,16 +355,21 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
                     // Draw label (top aligned inside visible window). The
                     // per-page icon_dy nudges glyph-heavy icons into alignment.
                     let icon_y = VISIBLE_Y_START + page.icon_dy;
-                    renderer.draw_bitmap(12, icon_y, icon, 16, 16);
-                    renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
+                    renderer.draw_bitmap(METRICS_MARGIN_X, icon_y, icon, 16, 16);
+                    renderer.draw_text(
+                        METRICS_TEXT_X,
+                        VISIBLE_Y_START + METRICS_LABEL_DY,
+                        label,
+                        false,
+                    );
 
                     // Draw separator in the middle of visible window
                     renderer.draw_line(
-                        12,
-                        VISIBLE_Y_START + 15,
-                        WIDTH - 12,
-                        VISIBLE_Y_START + 15,
-                        128,
+                        METRICS_MARGIN_X,
+                        VISIBLE_Y_START + METRICS_SEPARATOR_DY,
+                        WIDTH - METRICS_MARGIN_X,
+                        VISIBLE_Y_START + METRICS_SEPARATOR_DY,
+                        METRICS_SEPARATOR_BRIGHTNESS,
                     );
 
                     // Draw metric value (bottom aligned inside visible window)
@@ -358,7 +379,7 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
                     } else {
                         0
                     };
-                    renderer.draw_text(val_x, VISIBLE_Y_START + 16, &value, true);
+                    renderer.draw_text(val_x, VISIBLE_Y_START + METRICS_VALUE_DY, &value, true);
                 }
             }
         }
@@ -464,14 +485,19 @@ pub fn render_sample_to_gray(label: &str, value: &str) -> Vec<u8> {
     fb.clear();
     {
         let mut renderer = Renderer::new(&mut fb);
-        renderer.draw_text(32, VISIBLE_Y_START + 2, label, false);
+        renderer.draw_text(
+            METRICS_TEXT_X,
+            VISIBLE_Y_START + METRICS_LABEL_DY,
+            label,
+            false,
+        );
         let text_w = Renderer::measure_text(value, true);
         let val_x = if text_w < WIDTH {
             (WIDTH - text_w) / 2
         } else {
             0
         };
-        renderer.draw_text(val_x, VISIBLE_Y_START + 16, value, true);
+        renderer.draw_text(val_x, VISIBLE_Y_START + METRICS_VALUE_DY, value, true);
     }
     fb.buffer.to_vec()
 }

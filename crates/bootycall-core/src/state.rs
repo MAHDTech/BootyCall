@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -10,6 +10,11 @@ use std::time::SystemTime;
 /// dropped by `update_host_status`; the periodic cleaner sweeps stale
 /// entries so headroom returns on its own.
 pub const MAX_TRACKED_HOSTS: usize = 4096;
+
+/// Upper bound on retained log events. The dashboard shows a rolling window, so
+/// once the ring is full the oldest events are evicted in O(1) from the front
+/// of the `VecDeque`, bounding memory under a chatty event stream.
+pub const MAX_LOGS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostStatus {
@@ -41,7 +46,7 @@ pub struct LogEvent {
 #[derive(Debug, Clone)]
 pub struct StateStore {
     hosts: Arc<RwLock<HashMap<String, HostState>>>,
-    logs: Arc<RwLock<Vec<LogEvent>>>,
+    logs: Arc<RwLock<VecDeque<LogEvent>>>,
 }
 
 impl Default for StateStore {
@@ -54,7 +59,7 @@ impl StateStore {
     pub fn new() -> Self {
         Self {
             hosts: Arc::new(RwLock::new(HashMap::new())),
-            logs: Arc::new(RwLock::new(Vec::new())),
+            logs: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -126,21 +131,21 @@ impl StateStore {
 
     pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
         let mut logs = self.logs.write();
-        logs.push(LogEvent {
+        logs.push_back(LogEvent {
             timestamp: SystemTime::now(),
             level: level.to_string(),
             mac: mac.map(crate::mac::normalize_mac),
             message: message.to_string(),
         });
-        let len = logs.len();
-        if len > 200 {
-            logs.drain(0..len - 200);
+        // Evict oldest first (O(1) per pop) until back within the ring cap.
+        while logs.len() > MAX_LOGS {
+            logs.pop_front();
         }
     }
 
     pub fn list_logs(&self) -> Vec<LogEvent> {
         let logs = self.logs.read();
-        logs.clone()
+        logs.iter().cloned().collect()
     }
 
     pub fn clean_stale_hosts(&self, max_idle_secs: u64) {

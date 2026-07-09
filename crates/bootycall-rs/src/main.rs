@@ -8,6 +8,20 @@ use std::sync::Arc;
 use bootycall_core::config::{Config, watch_config};
 use bootycall_core::state::StateStore;
 
+/// How often the background task sweeps out stale hosts.
+const STALE_HOST_SWEEP_INTERVAL_SECS: u64 = 60;
+/// A host not seen for this long is considered stale and evicted. Policy value:
+/// long enough to survive a slow PXE boot, short enough to keep the dashboard
+/// from showing ghosts.
+const STALE_HOST_TTL_SECS: u64 = 300;
+/// Minimum time the boot-blink pattern runs so the LED transition is visible
+/// before the steady-state manager takes over.
+const BOOT_BLINK_MIN_SECS: u64 = 3;
+/// Effectively-forever sleep used as the non-Unix stand-in for a SIGTERM wait
+/// (~10 years). Unix uses a real signal handler; other platforms just park.
+#[cfg(not(unix))]
+const NON_UNIX_SIGTERM_PARK_SECS: u64 = 315_360_000;
+
 #[derive(Parser, Debug)]
 #[command(name = "bootycall-rs", version, about = "UEFI PXE Server Suite")]
 struct Cli {
@@ -230,8 +244,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let cleaner_store = state_store.clone();
     let cleaner_handle = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            cleaner_store.clean_stale_hosts(300); // Clean hosts not seen in 5 minutes
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                STALE_HOST_SWEEP_INTERVAL_SECS,
+            ))
+            .await;
+            cleaner_store.clean_stale_hosts(STALE_HOST_TTL_SECS);
         }
     });
 
@@ -248,8 +265,8 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // 10. Wait for interrupt or termination signal
-    // Keep boot blink running for at least 3 seconds so the transition pattern is visible
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    // Keep boot blink running briefly so the transition pattern is visible.
+    tokio::time::sleep(tokio::time::Duration::from_secs(BOOT_BLINK_MIN_SECS)).await;
     let _ = led_stop_tx.send(()).await;
 
     // Spawn regular LED manager task after boot blink stops
@@ -284,7 +301,8 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             #[cfg(not(unix))]
             {
-                tokio::time::sleep(tokio::time::Duration::from_secs(315360000)).await; // 10 years
+                tokio::time::sleep(tokio::time::Duration::from_secs(NON_UNIX_SIGTERM_PARK_SECS))
+                    .await;
             }
         } => {
             info!("Shutdown signal received (SIGTERM). Cleaning up services...");

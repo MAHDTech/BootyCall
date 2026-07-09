@@ -146,18 +146,18 @@ async fn handle_tftp_transfer(
 
     // 3. Negotiate options
     let mut options = Vec::new();
-    let mut negotiated_blksize = 512;
-    let mut negotiated_timeout = 3;
+    let mut negotiated_blksize = DEFAULT_BLKSIZE;
+    let mut negotiated_timeout = DEFAULT_TIMEOUT_SECS;
     let mut negotiated_windowsize: u16 = 1;
 
     if let Some(blksize) = request.blksize {
         // Clamp to a safe MTU range
-        negotiated_blksize = blksize.clamp(512, 1432);
+        negotiated_blksize = blksize.clamp(DEFAULT_BLKSIZE, MAX_BLKSIZE);
         options.push(("blksize", negotiated_blksize.to_string()));
     }
 
     if let Some(timeout) = request.timeout {
-        negotiated_timeout = timeout.clamp(1, 10);
+        negotiated_timeout = timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
         options.push(("timeout", negotiated_timeout.to_string()));
     }
 
@@ -572,6 +572,21 @@ const MAX_CONCURRENT_TRANSFERS: usize = 128;
 /// buffered in memory (`window * blksize` bytes per transfer), so this caps a
 /// client's ability to force us to buffer unboundedly.
 const MAX_WINDOWSIZE: u16 = 32;
+
+/// RFC 1350 default TFTP block size, and the smallest `blksize` we negotiate
+/// down to (also the initial value before any `blksize` option is seen).
+const DEFAULT_BLKSIZE: usize = 512;
+/// Upper bound on a negotiated `blksize`. Kept under the common 1500-byte
+/// Ethernet MTU (less the 20-byte IP + 8-byte UDP + 4-byte TFTP headers) so a
+/// single DATA packet is not IP-fragmented on a standard LAN.
+const MAX_BLKSIZE: usize = 1432;
+
+/// RFC 2349 default per-packet retransmission timeout, in seconds — the value
+/// used before any `timeout` option is negotiated.
+const DEFAULT_TIMEOUT_SECS: u64 = 3;
+/// Clamp range, in seconds, for a client-requested `timeout` option.
+const MIN_TIMEOUT_SECS: u64 = 1;
+const MAX_TIMEOUT_SECS: u64 = 10;
 
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 ///

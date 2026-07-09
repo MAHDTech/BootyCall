@@ -35,6 +35,7 @@ in
     bashInteractive
     bootycall
     cargo-audit
+    cargo-deny # RustSec advisories + license/ban/source policy
     cargo-edit # Adds 'cargo upgrade'
     cargo-machete # Detects unused workspace dependencies
     figlet

@@ -119,6 +119,7 @@ ranlib
 rarr
 ripsecrets
 rustc
+rustsec
 rusttype
 secretspec
 serde

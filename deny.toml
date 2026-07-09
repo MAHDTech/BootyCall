@@ -1,0 +1,55 @@
+# cargo-deny policy (https://embarkstudios.github.io/cargo-deny/).
+# Gates: RustSec advisories, dependency licenses, bans, and sources.
+# Run: `cargo deny check` (CI) or `nix develop --impure -c cargo deny check`.
+
+[graph]
+# Check all target platforms' dependency graphs.
+all-features = true
+
+[advisories]
+version = 2
+# Security *vulnerabilities* are always denied (the point of this gate).
+# `yanked` crates warn (a yank is not a vuln, but worth surfacing).
+yanked = "warn"
+# Scope "unmaintained" advisories to workspace members only. A transitive crate
+# going unmaintained is not a vulnerability and is outside our control (e.g.
+# ttf-parser via ab_glyph, RUSTSEC-2026-0192) — failing CI on it would just
+# force blanket ignores. Unmaintained *direct* deps still fail. Actual
+# vulnerabilities are denied regardless of this setting.
+unmaintained = "workspace"
+# Add specific `RUSTSEC-YYYY-NNNN` ids here only when a real vuln has no fixed
+# release yet, with a comment and a tracking note.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses present in the dependency tree plus the project's own
+# Apache-2.0. Add a license here (not a blanket allow) if a new dependency
+# introduces one, after confirming it is acceptable.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "0BSD",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions and wildcard requirements are hygiene smells, not hard
+# errors — warn so they are visible without blocking every transitive skew.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io — an unknown registry or git source is a supply-chain risk.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

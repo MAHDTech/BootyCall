@@ -348,38 +348,14 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
                 }
                 DisplayMode::Metrics => {
                     let page = &PAGES[page_index % PAGES.len()];
-                    let label = page.label;
                     let value = (page.value)(&sys_metrics);
-                    let icon = page.icon;
-
-                    // Draw label (top aligned inside visible window). The
-                    // per-page icon_dy nudges glyph-heavy icons into alignment.
-                    let icon_y = VISIBLE_Y_START + page.icon_dy;
-                    renderer.draw_bitmap(METRICS_MARGIN_X, icon_y, icon, 16, 16);
-                    renderer.draw_text(
-                        METRICS_TEXT_X,
-                        VISIBLE_Y_START + METRICS_LABEL_DY,
-                        label,
-                        false,
+                    draw_metrics_page(
+                        &mut renderer,
+                        page.label,
+                        &value,
+                        Some(page.icon),
+                        page.icon_dy,
                     );
-
-                    // Draw separator in the middle of visible window
-                    renderer.draw_line(
-                        METRICS_MARGIN_X,
-                        VISIBLE_Y_START + METRICS_SEPARATOR_DY,
-                        WIDTH - METRICS_MARGIN_X,
-                        VISIBLE_Y_START + METRICS_SEPARATOR_DY,
-                        METRICS_SEPARATOR_BRIGHTNESS,
-                    );
-
-                    // Draw metric value (bottom aligned inside visible window)
-                    let text_w = Renderer::measure_text(&value, true);
-                    let val_x = if text_w < WIDTH {
-                        (WIDTH - text_w) / 2
-                    } else {
-                        0
-                    };
-                    renderer.draw_text(val_x, VISIBLE_Y_START + METRICS_VALUE_DY, &value, true);
                 }
             }
         }
@@ -408,6 +384,51 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         std::thread::sleep(TICK);
     }
     Ok(())
+}
+
+/// Draw a Metrics page: left status icon, top label, mid separator, and the
+/// centred bold value. Shared by the live render loop and the PNG sample so
+/// the two layouts cannot drift. When `icon` is `Some`, the icon and separator
+/// are drawn (`icon_dy` nudges glyph-heavy icons into alignment); `None` draws
+/// label + value only.
+fn draw_metrics_page(
+    renderer: &mut Renderer,
+    label: &str,
+    value: &str,
+    icon: Option<&[u8; 256]>,
+    icon_dy: usize,
+) {
+    if let Some(icon_bytes) = icon {
+        renderer.draw_bitmap(
+            METRICS_MARGIN_X,
+            VISIBLE_Y_START + icon_dy,
+            icon_bytes,
+            16,
+            16,
+        );
+        renderer.draw_line(
+            METRICS_MARGIN_X,
+            VISIBLE_Y_START + METRICS_SEPARATOR_DY,
+            WIDTH - METRICS_MARGIN_X,
+            VISIBLE_Y_START + METRICS_SEPARATOR_DY,
+            METRICS_SEPARATOR_BRIGHTNESS,
+        );
+    }
+
+    renderer.draw_text(
+        METRICS_TEXT_X,
+        VISIBLE_Y_START + METRICS_LABEL_DY,
+        label,
+        false,
+    );
+
+    let text_w = Renderer::measure_text(value, true);
+    let val_x = if text_w < WIDTH {
+        (WIDTH - text_w) / 2
+    } else {
+        0
+    };
+    renderer.draw_text(val_x, VISIBLE_Y_START + METRICS_VALUE_DY, value, true);
 }
 
 /// Small left/right edge inset (px) used by `oled_test`'s horizontal alignment.
@@ -492,30 +513,25 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Render a metrics-page-style sample (small label on top, bold value
-/// centred below) into a fresh grayscale framebuffer and return the raw
-/// `WIDTH * HEIGHT` 8-bit buffer. No `/dev/fb0` is touched, so this runs on
-/// any host — it powers the `oled_render` example and its smoke test, which
-/// capture the rendered glyphs to PNG for before/after font comparison
-/// (e.g. the rusttype → ab_glyph migration).
+/// Render a full Metrics page (icon, label, separator, centred bold value) into
+/// a fresh grayscale framebuffer and return the raw `WIDTH * HEIGHT` 8-bit
+/// buffer. No `/dev/fb0` is touched, so this runs on any host — it powers the
+/// `oled_render` example and its smoke test, which capture the rendered glyphs
+/// to PNG for before/after font comparison (e.g. the rusttype → ab_glyph
+/// migration). Shares `draw_metrics_page` with the live loop so the sample
+/// matches the real panel.
 pub fn render_sample_to_gray(label: &str, value: &str) -> Vec<u8> {
     let mut fb = Framebuffer::new();
     fb.clear();
     {
         let mut renderer = Renderer::new(&mut fb);
-        renderer.draw_text(
-            METRICS_TEXT_X,
-            VISIBLE_Y_START + METRICS_LABEL_DY,
+        draw_metrics_page(
+            &mut renderer,
             label,
-            false,
+            value,
+            Some(&crate::assets::ICON_HOST),
+            0,
         );
-        let text_w = Renderer::measure_text(value, true);
-        let val_x = if text_w < WIDTH {
-            (WIDTH - text_w) / 2
-        } else {
-            0
-        };
-        renderer.draw_text(val_x, VISIBLE_Y_START + METRICS_VALUE_DY, value, true);
     }
     fb.buffer.to_vec()
 }

@@ -14,6 +14,20 @@ pub fn normalize_mac(mac: &str) -> String {
     mac.trim().to_ascii_lowercase().replace('-', ":")
 }
 
+/// Format a raw 6-byte hardware address as the canonical lower-hex,
+/// colon-separated MAC string (`aa:bb:cc:dd:ee:ff`).
+///
+/// The output shape matches [`normalize_mac`] so a formatted `chaddr` can be
+/// compared directly against normalised config MACs. Prefer this over an
+/// inline `format!` so every caller benefits from any future normalisation
+/// change (this is why the DHCP server no longer hand-rolls the format).
+pub fn format_mac(bytes: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
+
 /// Validate the normalised form: six colon-separated pairs of lower-hex
 /// digits, exactly 17 characters, nothing else. This is what the HTTP
 /// handlers use to reject junk paths before it reaches the state store.
@@ -49,6 +63,24 @@ mod tests {
     #[test]
     fn normalizes_uppercase_and_hyphens() {
         assert_eq!(normalize_mac("AA-BB-CC-11-22-33"), "aa:bb:cc:11:22:33");
+    }
+
+    #[test]
+    fn format_mac_produces_canonical_lower_hex() {
+        assert_eq!(
+            format_mac(&[0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03]),
+            "aa:bb:cc:01:02:03"
+        );
+        // Zero-padding and all-zero / all-ones edges.
+        assert_eq!(format_mac(&[0, 0, 0, 0, 0, 0]), "00:00:00:00:00:00");
+        assert_eq!(
+            format_mac(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            "ff:ff:ff:ff:ff:ff"
+        );
+        // The output round-trips through the validator.
+        assert!(is_valid_mac(&format_mac(&[
+            0x52, 0x54, 0x00, 0x10, 0x10, 0x10
+        ])));
     }
 
     #[test]

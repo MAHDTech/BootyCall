@@ -101,10 +101,14 @@ pub async fn run_dhcp_server(
             );
             continue;
         }
-        let mac_str = format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac_bytes[0], mac_bytes[1], mac_bytes[2], mac_bytes[3], mac_bytes[4], mac_bytes[5]
-        );
+        // Guarded above: `mac_bytes.len() >= 6`, so the fixed-size conversion
+        // cannot fail. Route through the shared core helper rather than a
+        // bespoke `format!` (issue 030).
+        let mac_array: [u8; 6] = match mac_bytes[..6].try_into() {
+            Ok(arr) => arr,
+            Err(_) => continue,
+        };
+        let mac_str = bootycall_core::format_mac(&mac_array);
 
         // RFC 4578: only reply to clients advertising `PXEClient` in the
         // vendor-class identifier (Option 60). Injecting PXE options into

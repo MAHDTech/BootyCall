@@ -35,6 +35,16 @@ nix develop --impure --command prek run --all-files
 > To run commands inside the development shell non-interactively, always prefix them with `nix develop --impure --command`, for example:
 > `nix develop --impure --command cargo init` or `nix develop --impure --command cargo check`.
 
+#### Stage changes so Nix can see them
+
+**Nix and devenv only see files that git tracks.** `nix develop`, `devenv`, and the Nix package build (`packages/crate.nix`) evaluate from the git source, so anything you have not staged with `git add` is invisible to them:
+
+- A **new** file (e.g. a new module) fails the build with `file not found for module ...`.
+- Edits to existing files build from the last staged/committed version, not your working copy.
+- This is exactly what the `warning: Git tree '...' is dirty` message is telling you.
+
+Always `git add` your changes before running `nix develop`/`devenv` (or committing, which builds via the hooks) — stage new files in particular _before_ the first `nix develop` invocation that needs them.
+
 This runs check-yaml, cspell, action-validator, cargo-check, clippy, rustfmt, statix, deadnix, shellcheck, markdownlint, lychee, and friends, to verify code correctness and clean style.
 
 ### Documentation & Link Standards

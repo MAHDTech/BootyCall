@@ -224,13 +224,18 @@ async fn poll_handler(
     }
     let client_ip = client_addr.ip().to_string();
 
+    // A missing or invalid boot template is a server misconfiguration, not a
+    // client error — log it and return 500 rather than panicking per request.
+    let boot_template = match state.jinja_env.get_template("boot") {
+        Ok(t) => t,
+        Err(e) => {
+            error!("boot template unavailable for /poll/{}: {:?}", mac_str, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error\n").into_response();
+        }
+    };
+
     let (boot_script, should_update_booting, target_mac_to_use) = {
         let config_guard = state.config.read();
-
-        let boot_template = state
-            .jinja_env
-            .get_template("boot")
-            .expect("boot template registered at startup");
 
         // 1. Check if host is configured directly in yaml
         if let Some(host_config) = config_guard.find_host(&mac_str) {
@@ -330,14 +335,21 @@ async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> i
         config_guard.hosts.clone()
     };
 
-    let rendered = match state
-        .jinja_env
-        .get_template("ipxemenu")
-        .unwrap()
-        .render(context!(
-            server_ip_port => host_hdr,
-            hosts => hosts_list
-        )) {
+    let menu_template = match state.jinja_env.get_template("ipxemenu") {
+        Ok(t) => t,
+        Err(e) => {
+            error!("iPXE menu template unavailable: {:?}", e);
+            return (
+                [(header::CONTENT_TYPE, "text/plain")],
+                "#!ipxe\necho Menu error\nexit\n".to_string(),
+            );
+        }
+    };
+
+    let rendered = match menu_template.render(context!(
+        server_ip_port => host_hdr,
+        hosts => hosts_list
+    )) {
         Ok(res) => res,
         Err(e) => {
             error!("Failed to render minijinja iPXE menu: {:?}", e);
@@ -543,10 +555,22 @@ pub async fn run_http_server(
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
 ) -> Result<(), std::io::Error> {
-    // Initialise minijinja environment
+    // Initialise minijinja environment. A template that fails to compile (e.g.
+    // after a bad edit to MENU_TEMPLATE/BOOT_TEMPLATE) surfaces as a clean
+    // startup error instead of a panic — run_http_server returns io::Error.
     let mut env = minijinja::Environment::new();
-    env.add_template("ipxemenu", MENU_TEMPLATE).unwrap();
-    env.add_template("boot", BOOT_TEMPLATE).unwrap();
+    env.add_template("ipxemenu", MENU_TEMPLATE).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to register ipxemenu template: {e}"),
+        )
+    })?;
+    env.add_template("boot", BOOT_TEMPLATE).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to register boot template: {e}"),
+        )
+    })?;
     let jinja_env = Arc::new(env);
 
     let server_state = ServerState {

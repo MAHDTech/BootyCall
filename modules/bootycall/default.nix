@@ -10,13 +10,43 @@ let
   bootycallPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   assetsPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
 
-  # Extract port number from a "host:port" bind address string
-  extractPort =
+  # Parse the port out of a "host:port" bind address, returning null when the
+  # address has no ":port" (e.g. a bare IP). Returning null rather than calling
+  # lib.toInt on the whole string lets the assertions below report a clear
+  # error instead of crashing deep inside the firewall port defaults.
+  bindPort =
     bind:
     let
       parts = lib.splitString ":" bind;
+      portStr = lib.last parts;
     in
-    lib.toInt (lib.last parts);
+    if lib.length parts >= 2 && portStr != "" then lib.toInt portStr else null;
+
+  # The firewall port defaults need a concrete port; fall back to a harmless
+  # placeholder for a malformed bind. The matching assertion fails the build
+  # before the firewall is ever configured, so the placeholder never ships.
+  extractPort =
+    bind:
+    let
+      port = bindPort bind;
+    in
+    if port == null then 0 else port;
+
+  # Bind options that must carry a ":port", checked by assertions below.
+  portBinds = [
+    {
+      name = "server.httpBind";
+      value = cfg.server.httpBind;
+    }
+    {
+      name = "server.tftpBind";
+      value = cfg.server.tftpBind;
+    }
+    {
+      name = "server.proxyDhcpBind";
+      value = cfg.server.proxyDhcpBind;
+    }
+  ];
 
   # Generate the bootycall.yaml configuration file from Nix options
   generatedConfigFile = pkgs.writeText "bootycall.yaml" (
@@ -136,8 +166,9 @@ in
           the GPIO chip and framebuffer, and adds the `gpio` and `video`
           supplementary groups so the DynamicUser can talk to
           `/dev/gpiochip0` and `/dev/fb0`. The `gpio` group is created
-          automatically (it is not a NixOS default); udev rules are
-          expected to assign the device nodes to it. Leave this off on
+          automatically (it is not a NixOS default), and — unless
+          `hardware.manageUdevRules` is disabled — a udev rule assigning the
+          `gpiochip*` devices to it is installed too. Leave this off on
           hardware that does not have the rackmount OLED (the default
           hardening will keep BootyCall away from `/dev` entirely).
         '';
@@ -151,6 +182,17 @@ in
         type = lib.types.listOf lib.types.str;
         default = [ "/dev/fb0" ];
         description = "Framebuffer character devices exposed to the unit when `hardware.enable` is true.";
+      };
+      manageUdevRules = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          When `hardware.enable` is set, install a udev rule assigning the GPIO
+          character devices (`gpiochip*`) to the `gpio` group, so the service's
+          DynamicUser (a member of that group) can actually open them. The
+          framebuffer already belongs to the standard `video` group. Set this
+          to false to manage the udev rule yourself. See `docs/operations.md`.
+        '';
       };
     };
 
@@ -240,15 +282,48 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions =
+      # Every bind address must carry a ":port" — otherwise extractPort (used
+      # for the firewall defaults) has nothing to parse. Report it clearly at
+      # eval instead of crashing inside lib.toInt.
+      (map (b: {
+        assertion = bindPort b.value != null;
+        message = ''
+          services.bootycall.${b.name}: bind address "${b.value}" is missing a
+          ":port" (expected e.g. "0.0.0.0:8080").
+        '';
+      }) portBinds)
+      ++ [
+        # configFile fully replaces the generated config, so declaring hosts
+        # alongside it silently drops them. Make the operator pick one source.
+        {
+          assertion = !(cfg.configFile != null && cfg.hosts != [ ]);
+          message = ''
+            services.bootycall: `configFile` is set together with declarative
+            `hosts`. An external `configFile` fully replaces the generated
+            configuration, so the declarative `hosts` would be silently ignored.
+            Provide either an external `configFile` or the declarative
+            `server`/`hosts` options, not both.
+          '';
+        }
+      ];
+
     networking.firewall = lib.mkIf cfg.openFirewall {
       allowedTCPPorts = cfg.firewallPorts.tcp;
       allowedUDPPorts = cfg.firewallPorts.udp;
     };
 
+    # Assign the GPIO character devices to the `gpio` group the service's
+    # DynamicUser joins, turning the "udev rules are expected to assign the
+    # device nodes" note into a shipped default. See docs/operations.md.
+    services.udev.extraRules = lib.mkIf (cfg.hardware.enable && cfg.hardware.manageUdevRules) ''
+      SUBSYSTEM=="gpio", KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"
+    '';
+
     # DynamicUser joins these supplementary groups when hardware.enable is
     # set. `video` is standard on NixOS but `gpio` is not, so ensure it
-    # exists — otherwise the unit fails to start. udev rules are expected to
-    # assign the gpiochip device to this group.
+    # exists — otherwise the unit fails to start. The gpiochip device is
+    # assigned to this group by the udev rule below (hardware.manageUdevRules).
     users.groups = lib.mkIf cfg.hardware.enable {
       gpio = { };
     };

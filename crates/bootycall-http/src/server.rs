@@ -514,20 +514,50 @@ async fn wallpaper_handler(
 }
 
 // API endpoint: GET /api/status
-async fn api_status_handler(State(state): State<ServerState>) -> impl IntoResponse {
+async fn api_status_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Gated behind api_token when configured (exposes host MACs/IPs).
+    check_api_token(&state, &headers)?;
+
     let hosts = state.state_store.list_hosts();
     let configs = {
         let config_guard = state.config.read();
         config_guard.hosts.clone()
     };
 
-    Json(StatusResponse { hosts, configs })
+    Ok(Json(StatusResponse { hosts, configs }))
 }
 
 // API endpoint: GET /api/logs
-async fn api_logs_handler(State(state): State<ServerState>) -> impl IntoResponse {
+async fn api_logs_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Gated behind api_token when configured (exposes log history).
+    check_api_token(&state, &headers)?;
+
     let logs = state.state_store.list_logs();
-    Json(logs)
+    Ok(Json(logs))
+}
+
+/// Enforce the optional `api_token`: when one is configured, require a matching
+/// `X-API-Token` header (constant-time), else `Err(UNAUTHORIZED)`. When no token
+/// is configured the endpoint stays open (backwards-compatible). Shared by the
+/// mutating `/api/override` and the read `/api/status` + `/api/logs` endpoints.
+fn check_api_token(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    let config_guard = state.config.read();
+    if let Some(expected) = config_guard.server.api_token.as_deref() {
+        let provided = headers
+            .get("X-API-Token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(())
 }
 
 /// Length-generic constant-time token comparison so neither the value nor the
@@ -556,22 +586,11 @@ async fn api_override_handler(
     headers: HeaderMap,
     Json(payload): Json<OverrideRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // SEC-3: when an api_token is configured, mutating endpoints require it
-    // via the `X-API-Token` header. Absent config leaves the endpoint
-    // unauthenticated (backwards-compatible for hosts already sitting behind
-    // a reverse proxy or bound to localhost).
-    {
-        let config_guard = state.config.read();
-        if let Some(expected) = config_guard.server.api_token.as_deref() {
-            let provided = headers
-                .get("X-API-Token")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-                return Err(StatusCode::UNAUTHORIZED);
-            }
-        }
-    }
+    // SEC-3: when an api_token is configured, mutating endpoints require it via
+    // the `X-API-Token` header. Absent config leaves the endpoint
+    // unauthenticated (backwards-compatible for hosts already sitting behind a
+    // reverse proxy or bound to localhost).
+    check_api_token(&state, &headers)?;
 
     let mac_str = bootycall_core::normalize_mac(&payload.mac);
     // SEC-5: reject malformed MACs early — otherwise the state store logs

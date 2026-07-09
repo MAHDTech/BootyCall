@@ -645,3 +645,60 @@ async fn test_poll_missing_override_target_keeps_polling() {
         "must not serve a boot script for a missing override target"
     );
 }
+
+#[tokio::test]
+async fn test_read_apis_require_token_when_configured() {
+    // With api_token set, /api/status and /api/logs must 401 without the header
+    // and 200 with it (issue 037). The unauthenticated-open case is covered by
+    // test_api_status_endpoint / test_api_logs_endpoint (which set no token).
+    let port: u16 = 26104;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.api_token = Some("read-secret".to_string());
+    }
+
+    for path in ["/api/status", "/api/logs"] {
+        // No token → 401
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("401"),
+            "{path} without token must be 401, got: {status}"
+        );
+
+        // Correct token → 200
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-API-Token: read-secret\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("200"),
+            "{path} with correct token must be 200, got: {status}"
+        );
+    }
+}

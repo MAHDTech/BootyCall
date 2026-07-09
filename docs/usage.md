@@ -39,6 +39,23 @@ hosts:
     image_path: "/var/lib/bootycall/images/nixos-minimal-23.11-x86_64-linux.iso"
 ```
 
+### Optional API token
+
+Set `server.api_token` to require an `X-API-Token` header on the API endpoints:
+
+```yaml
+server:
+  api_token: "a-long-random-secret"
+```
+
+When set, it gates the mutating `POST /api/override` **and** the read endpoints
+`GET /api/status` and `GET /api/logs` (which expose host MACs, client IPs, and
+log history) — requests without a matching token get `401`. When unset, all API
+endpoints are open (backwards-compatible). The bundled dashboard sends the token
+automatically when present in the browser's `localStorage` under the key
+`bootycall_api_token` (set it once via the browser console:
+`localStorage.setItem("bootycall_api_token", "a-long-random-secret")`).
+
 ---
 
 ## 3. Running on Privileged Ports (69/UDP & 67/UDP)

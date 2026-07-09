@@ -165,70 +165,36 @@ async fn handle_tftp_transfer(
     // Overall per-transfer deadline so a slow drip of wrong-block ACKs can't
     // keep the transfer alive indefinitely.
     const TRANSFER_DEADLINE: Duration = Duration::from_secs(120);
-    let deadline = std::time::Instant::now() + TRANSFER_DEADLINE;
+    let retry_policy = RetryPolicy {
+        per_try_timeout: Duration::from_secs(negotiated_timeout),
+        max_retries: MAX_RETRIES,
+        deadline: std::time::Instant::now() + TRANSFER_DEADLINE,
+    };
 
     if !options.is_empty() {
         let oack_pkt = make_oack_packet(&options);
-        let mut retries: u32 = 0;
-        let mut acked = false;
-
-        while retries < MAX_RETRIES && std::time::Instant::now() < deadline {
-            if let Err(e) = socket.send(&oack_pkt).await {
-                error!("Failed to send OACK to {}: {:?}", client_addr, e);
-                return Err(e);
+        match send_and_await_ack(
+            &socket,
+            &oack_pkt,
+            0,
+            retry_policy,
+            client_addr,
+            "OACK negotiation",
+        )
+        .await?
+        {
+            AckOutcome::Acked => {}
+            AckOutcome::ClientError => return Ok(()),
+            AckOutcome::GaveUp => {
+                error!(
+                    "OACK negotiation with {} timed out after max retries",
+                    client_addr
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "OACK negotiation timed out",
+                ));
             }
-
-            let mut ack_buf = [0u8; 1024];
-            match tokio::time::timeout(
-                Duration::from_secs(negotiated_timeout),
-                socket.recv(&mut ack_buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) => {
-                    let rec = &ack_buf[..n];
-                    if is_error_packet(rec) {
-                        warn!(
-                            "Received TFTP error from client {} during option negotiation",
-                            client_addr
-                        );
-                        return Ok(());
-                    }
-                    if let Some(0) = parse_ack_packet(rec) {
-                        acked = true;
-                        break;
-                    }
-                    // Anything else (wrong block, wrong opcode, garbage) —
-                    // count it toward the retry bound, not just timeouts.
-                    debug!(
-                        "Unexpected packet during OACK negotiation from {}, retrying...",
-                        client_addr
-                    );
-                    retries += 1;
-                }
-                Ok(Err(e)) => {
-                    error!("Error receiving OACK ACK from {}: {:?}", client_addr, e);
-                    return Err(e);
-                }
-                Err(_) => {
-                    debug!(
-                        "Timeout waiting for OACK ACK from {}, retrying...",
-                        client_addr
-                    );
-                    retries += 1;
-                }
-            }
-        }
-
-        if !acked {
-            error!(
-                "OACK negotiation with {} timed out after max retries",
-                client_addr
-            );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "OACK negotiation timed out",
-            ));
         }
     }
 
@@ -247,71 +213,28 @@ async fn handle_tftp_transfer(
 
     loop {
         let data_pkt = make_data_packet(block_num, &current_block_data);
-        let mut retries: u32 = 0;
-        let mut acked = false;
-
-        while retries < MAX_RETRIES && std::time::Instant::now() < deadline {
-            if let Err(e) = socket.send(&data_pkt).await {
+        match send_and_await_ack(
+            &socket,
+            &data_pkt,
+            block_num,
+            retry_policy,
+            client_addr,
+            "data transfer",
+        )
+        .await?
+        {
+            AckOutcome::Acked => {}
+            AckOutcome::ClientError => return Ok(()),
+            AckOutcome::GaveUp => {
                 error!(
-                    "Failed to send TFTP block {} to {}: {:?}",
-                    block_num, client_addr, e
+                    "TFTP transfer to {} timed out waiting for ACK block {}",
+                    client_addr, block_num
                 );
-                return Err(e);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TFTP block ack timed out",
+                ));
             }
-
-            let mut ack_buf = [0u8; 1024];
-            match tokio::time::timeout(
-                Duration::from_secs(negotiated_timeout),
-                socket.recv(&mut ack_buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) => {
-                    let rec = &ack_buf[..n];
-                    if is_error_packet(rec) {
-                        warn!(
-                            "Received TFTP error from client {} during transfer",
-                            client_addr
-                        );
-                        return Ok(());
-                    }
-                    if let Some(ack_block) = parse_ack_packet(rec)
-                        && ack_block == block_num
-                    {
-                        acked = true;
-                        break;
-                    }
-                    // Wrong-block ACK, junk, whatever — count toward the
-                    // retry bound so a flood can't wedge us in a busy loop.
-                    debug!(
-                        "Unexpected packet while waiting for ACK block {} from {}, retrying...",
-                        block_num, client_addr
-                    );
-                    retries += 1;
-                }
-                Ok(Err(e)) => {
-                    error!("Error receiving TFTP ACK from {}: {:?}", client_addr, e);
-                    return Err(e);
-                }
-                Err(_) => {
-                    debug!(
-                        "Timeout waiting for ACK block {} from {}, retrying...",
-                        block_num, client_addr
-                    );
-                    retries += 1;
-                }
-            }
-        }
-
-        if !acked {
-            error!(
-                "TFTP transfer to {} timed out waiting for ACK block {}",
-                client_addr, block_num
-            );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TFTP block ack timed out",
-            ));
         }
 
         if finished {
@@ -346,6 +269,94 @@ async fn handle_tftp_transfer(
     }
 
     Ok(())
+}
+
+/// Result of sending a packet and waiting for the matching ACK.
+enum AckOutcome {
+    /// The expected block number was acknowledged.
+    Acked,
+    /// The client sent a TFTP ERROR packet — abort the transfer cleanly.
+    ClientError,
+    /// The retry budget or the overall deadline was exhausted.
+    GaveUp,
+}
+
+/// Retry-bounding parameters shared by every send-and-await-ack step of a
+/// single transfer: identical for OACK negotiation and every DATA block.
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    /// How long to wait for one ACK before counting a retry.
+    per_try_timeout: Duration,
+    /// Maximum number of retries before giving up.
+    max_retries: u32,
+    /// Overall per-transfer deadline; retries stop once it passes.
+    deadline: std::time::Instant,
+}
+
+/// Send `packet` and wait for an ACK of `expected_block`, retrying on timeout
+/// or unexpected packets until either `max_retries` is reached or `deadline`
+/// passes.
+///
+/// Any receive that isn't the expected ACK (timeout, wrong-block ACK, or
+/// random garbage) counts against the retry budget so a malicious/broken
+/// client cannot wedge us in a busy loop by flooding wrong-block ACKs. A
+/// client-sent ERROR packet aborts immediately with [`AckOutcome::ClientError`].
+/// Genuine send/recv I/O errors are propagated to the caller.
+async fn send_and_await_ack(
+    socket: &UdpSocket,
+    packet: &[u8],
+    expected_block: u16,
+    policy: RetryPolicy,
+    client_addr: SocketAddr,
+    what: &str,
+) -> std::io::Result<AckOutcome> {
+    let mut retries: u32 = 0;
+
+    while retries < policy.max_retries && std::time::Instant::now() < policy.deadline {
+        if let Err(e) = socket.send(packet).await {
+            error!("Failed to send during {} to {}: {:?}", what, client_addr, e);
+            return Err(e);
+        }
+
+        let mut ack_buf = [0u8; 1024];
+        match tokio::time::timeout(policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
+            Ok(Ok(n)) => {
+                let rec = &ack_buf[..n];
+                if is_error_packet(rec) {
+                    warn!(
+                        "Received TFTP error from client {} during {}",
+                        client_addr, what
+                    );
+                    return Ok(AckOutcome::ClientError);
+                }
+                if let Some(ack_block) = parse_ack_packet(rec)
+                    && ack_block == expected_block
+                {
+                    return Ok(AckOutcome::Acked);
+                }
+                // Anything else (wrong block, wrong opcode, garbage) —
+                // count it toward the retry bound, not just timeouts.
+                debug!(
+                    "Unexpected packet during {} from {}, retrying...",
+                    what, client_addr
+                );
+                retries += 1;
+            }
+            Ok(Err(e)) => {
+                error!(
+                    "Error receiving ACK from {} during {}: {:?}",
+                    client_addr, what, e
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                debug!("Timeout during {} from {}, retrying...", what, client_addr);
+                retries += 1;
+            }
+        }
+    }
+
+    Ok(AckOutcome::GaveUp)
 }
 
 /// Fill `buf` from `file`, looping over multiple `read` calls if needed.

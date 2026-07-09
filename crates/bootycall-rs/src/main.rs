@@ -240,8 +240,8 @@ async fn main() -> Result<(), anyhow::Error> {
     });
 
     #[cfg(unix)]
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("register SIGTERM handler")?;
 
     // A signal exits cleanly (Ok); a protocol server dying is treated as
     // fatal and returns Err so the process exit code is non-zero.

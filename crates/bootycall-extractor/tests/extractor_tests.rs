@@ -513,3 +513,128 @@ fn test_partition_slice_seek_guards_overflow() {
     assert_eq!(slice.seek(SeekFrom::Start(512)).unwrap(), 512);
     assert_eq!(slice.seek(SeekFrom::End(-16)).unwrap(), 1008);
 }
+
+/// Build a GPT/FAT image with `depth` nested directories, placing a kernel
+/// (`vmlinuz`) and initrd (`initrd.img`) in the deepest directory.
+fn build_deeply_nested_gpt_image(disk_path: &std::path::Path, depth: usize) {
+    let disk_size = 8 * 1024 * 1024;
+    {
+        let f = File::create(disk_path).unwrap();
+        f.set_len(disk_size as u64).unwrap();
+    }
+    {
+        let mut f = File::options()
+            .read(true)
+            .write(true)
+            .open(disk_path)
+            .unwrap();
+        let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(
+            std::convert::TryFrom::try_from((disk_size / 512) - 1).unwrap(),
+        );
+        mbr.overwrite_lba0(&mut f).unwrap();
+    }
+    let (start_byte, len_byte) = {
+        let f = File::options()
+            .read(true)
+            .write(true)
+            .open(disk_path)
+            .unwrap();
+        let mut gdisk = gpt::GptConfig::default()
+            .writable(true)
+            .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+            .create_from_device(Box::new(f), None)
+            .unwrap();
+        gdisk
+            .update_partitions(std::collections::BTreeMap::new())
+            .unwrap();
+        gdisk
+            .add_partition(
+                "boot",
+                6 * 1024 * 1024,
+                gpt::partition_types::BASIC,
+                0,
+                None,
+            )
+            .unwrap();
+        let p = gdisk.partitions().get(&1).unwrap();
+        let s = p.bytes_start(gpt::disk::LogicalBlockSize::Lb512).unwrap();
+        let l = p.bytes_len(gpt::disk::LogicalBlockSize::Lb512).unwrap();
+        gdisk.write().unwrap();
+        (s, l)
+    };
+    let part_file = File::options()
+        .read(true)
+        .write(true)
+        .open(disk_path)
+        .unwrap();
+    let mut slice = bootycall_extractor::disk::PartitionSlice::new(part_file, start_byte, len_byte);
+    fatfs::format_volume(&mut slice, fatfs::FormatVolumeOptions::new()).unwrap();
+    let fs = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+    let root_dir = fs.root_dir();
+    let mut path = String::new();
+    for i in 0..depth {
+        if i > 0 {
+            path.push('/');
+        }
+        path.push_str(&format!("d{i}"));
+        root_dir.create_dir(&path).unwrap();
+    }
+    root_dir
+        .create_file(&format!("{path}/vmlinuz"))
+        .unwrap()
+        .write_all(b"deep_kernel")
+        .unwrap();
+    root_dir
+        .create_file(&format!("{path}/initrd.img"))
+        .unwrap()
+        .write_all(b"deep_initrd")
+        .unwrap();
+}
+
+#[test]
+fn test_fat_recursion_depth_cap() {
+    // A kernel buried past MAX_DIR_DEPTH (64) must NOT be found: the FAT walker
+    // bails at the cap (Ok(None) internally) rather than recursing / stack-
+    // overflowing. Observable outcome: KernelNotFound, no panic. Issue 040.
+    let dir = tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+
+    let deep = dir.path().join("deep.img");
+    build_deeply_nested_gpt_image(&deep, 70);
+    let deep_host = HostConfig {
+        mac: "00:11:22:33:44:cc".to_string(),
+        name: "deep".to_string(),
+        image_path: deep,
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    let err = bootycall_extractor::sync_host_cache(&deep_host, &cache_dir, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            bootycall_extractor::error::ExtractorError::KernelNotFound
+        ),
+        "deep walk should bail at the cap -> KernelNotFound, got {err:?}"
+    );
+
+    // Control: the same structure at a shallow depth (10) IS found, proving it
+    // is the depth cap — not a builder bug — that blocks the deep case.
+    let shallow = dir.path().join("shallow.img");
+    build_deeply_nested_gpt_image(&shallow, 10);
+    let shallow_host = HostConfig {
+        mac: "00:11:22:33:44:dd".to_string(),
+        name: "shallow".to_string(),
+        image_path: shallow,
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    bootycall_extractor::sync_host_cache(&shallow_host, &cache_dir, None).unwrap();
+    assert_eq!(
+        fs::read_to_string(cache_dir.join(&shallow_host.mac).join("kernel")).unwrap(),
+        "deep_kernel"
+    );
+}

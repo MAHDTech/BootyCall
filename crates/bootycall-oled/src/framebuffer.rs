@@ -6,6 +6,47 @@ use std::os::unix::fs::OpenOptionsExt;
 pub const WIDTH: usize = 160;
 pub const HEIGHT: usize = 60;
 pub const FB_PATH: &str = "/dev/fb0";
+/// Bits per pixel the packing assumes (RGB565 → 2 bytes/pixel). Surfaced so a
+/// geometry mismatch against the real panel can be diagnosed.
+pub const BITS_PER_PIXEL: u32 = 16;
+
+/// sysfs attribute directory for the primary framebuffer. Geometry is read
+/// from here (plain-text `virtual_size` + `bits_per_pixel`) rather than via an
+/// `FBIOGET_VSCREENINFO` ioctl: the workspace forbids `unsafe` (see
+/// `Cargo.toml`), and the ioctl requires an unsafe FFI call. sysfs exposes the
+/// same numbers with a safe `read_to_string`.
+pub const FB_SYSFS_DIR: &str = "/sys/class/graphics/fb0";
+
+/// Framebuffer geometry as reported by the kernel via sysfs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FbGeometry {
+    pub xres: u32,
+    pub yres: u32,
+    pub bits_per_pixel: u32,
+}
+
+/// Parse the sysfs `virtual_size` (`"xres,yres"`) and `bits_per_pixel` strings
+/// into an [`FbGeometry`]. Pure, so the parsing is unit-testable without a real
+/// framebuffer. Returns `None` on any malformed field.
+pub fn parse_fb_geometry(virtual_size: &str, bits_per_pixel: &str) -> Option<FbGeometry> {
+    let (x, y) = virtual_size.trim().split_once(',')?;
+    Some(FbGeometry {
+        xres: x.trim().parse().ok()?,
+        yres: y.trim().parse().ok()?,
+        bits_per_pixel: bits_per_pixel.trim().parse().ok()?,
+    })
+}
+
+/// Read the real panel geometry from the framebuffer's sysfs attributes.
+/// Returns `None` when the device is absent or the attributes are unreadable
+/// (not a framebuffer) — callers fall back to the compiled
+/// `WIDTH`/`HEIGHT`/`BITS_PER_PIXEL` without panicking.
+pub fn read_fb_geometry(sysfs_dir: &str) -> Option<FbGeometry> {
+    let dir = std::path::Path::new(sysfs_dir);
+    let virtual_size = std::fs::read_to_string(dir.join("virtual_size")).ok()?;
+    let bits_per_pixel = std::fs::read_to_string(dir.join("bits_per_pixel")).ok()?;
+    parse_fb_geometry(&virtual_size, &bits_per_pixel)
+}
 
 pub struct Framebuffer {
     // 8-bit grayscale backbuffer
@@ -181,6 +222,29 @@ mod tests {
         let buf = vec![0u8; 32];
         assert_eq!(pack_buffer(&buf, &lut, 0).len(), 64);
         assert_eq!(pack_buffer(&buf, &lut, 180).len(), 64);
+    }
+
+    #[test]
+    fn parse_fb_geometry_reads_sysfs_format() {
+        let g = parse_fb_geometry("160,60\n", "16\n").expect("well-formed");
+        assert_eq!(
+            g,
+            FbGeometry {
+                xres: 160,
+                yres: 60,
+                bits_per_pixel: 16
+            }
+        );
+        // Malformed inputs → None, never a panic.
+        assert!(parse_fb_geometry("160", "16").is_none()); // no comma
+        assert!(parse_fb_geometry("garbage", "16").is_none());
+        assert!(parse_fb_geometry("160,60", "xx").is_none());
+    }
+
+    #[test]
+    fn geometry_is_none_when_sysfs_absent() {
+        // Absent framebuffer sysfs dir → None (read fails), not a panic.
+        assert!(read_fb_geometry("/nonexistent/graphics/fb0").is_none());
     }
 
     #[test]

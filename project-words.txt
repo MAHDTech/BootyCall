@@ -57,6 +57,10 @@ esac
 esbenp
 failback
 fatfs
+fbioget
+vscreeninfo
+xres
+yres
 figlet
 gdisk
 giaddr

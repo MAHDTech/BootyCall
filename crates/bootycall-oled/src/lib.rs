@@ -311,6 +311,41 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         return Ok(());
     }
 
+    // Validate the real panel geometry against the compiled assumption once at
+    // startup so a mismatch (which tears or is silently rejected on write) is
+    // diagnosable from logs rather than invisible. The ioctl failing (device
+    // absent / not a framebuffer) is fine — we keep the compiled defaults.
+    match framebuffer::read_fb_geometry(framebuffer::FB_SYSFS_DIR) {
+        Some(geo) => {
+            info!(
+                "Framebuffer geometry: {}x{}x{}bpp",
+                geo.xres, geo.yres, geo.bits_per_pixel
+            );
+            if geo.xres != WIDTH as u32
+                || geo.yres != HEIGHT as u32
+                || geo.bits_per_pixel != framebuffer::BITS_PER_PIXEL
+            {
+                warn!(
+                    "Framebuffer geometry {}x{}x{} differs from the compiled {}x{}x{} (RGB565); output may tear or be rejected",
+                    geo.xres,
+                    geo.yres,
+                    geo.bits_per_pixel,
+                    WIDTH,
+                    HEIGHT,
+                    framebuffer::BITS_PER_PIXEL
+                );
+            }
+        }
+        None => {
+            info!(
+                "Framebuffer geometry unavailable (device absent or not a framebuffer); using compiled {}x{}x{} defaults",
+                WIDTH,
+                HEIGHT,
+                framebuffer::BITS_PER_PIXEL
+            );
+        }
+    }
+
     // Rackmount detect (GPIO 44) and power-enable (GPIO 46) lines are optional
     // and coupled: without power the accessory slot is unpowered, so detect
     // always reads "standalone". Both share one retry-and-log-once discipline

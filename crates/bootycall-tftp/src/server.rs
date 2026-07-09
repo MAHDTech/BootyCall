@@ -152,16 +152,24 @@ async fn handle_tftp_transfer(
         return Ok(());
     }
 
-    // 1. Open file
+    // 1. Open file. Distinguish a genuine 404 from a permissions/FD-exhaustion
+    // problem: reporting everything as "File not found" hides the real cause
+    // both on the wire and in observability.
     let mut file = match tokio::fs::File::open(&file_path).await {
         Ok(f) => f,
         Err(e) => {
+            let (code, msg): (u16, &str) = match e.kind() {
+                std::io::ErrorKind::NotFound => (1, "File not found"),
+                std::io::ErrorKind::PermissionDenied => (2, "Access violation"),
+                _ => (0, "File open failed"),
+            };
             bootycall_log::event!(
                 "tftp_transfer_error",
                 file = %file_path.display(),
                 error = "file_open_failed",
+                kind = %format!("{:?}", e.kind()),
             );
-            let err_pkt = make_error_packet(1, "File not found");
+            let err_pkt = make_error_packet(code, msg);
             let _ = socket.send(&err_pkt).await;
             return Err(e);
         }

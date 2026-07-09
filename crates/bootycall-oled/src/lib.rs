@@ -17,19 +17,29 @@ const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
 /// Cadence at which the render loop redraws. The shutdown flag is checked
 /// once per tick, so this doubles as the shutdown latency ceiling.
 const TICK: Duration = Duration::from_millis(1000);
-/// How often to re-attempt acquiring the optional rackmount detect GPIO
-/// line after a startup failure (e.g. a udev-rule race during boot). We
-/// retry rather than pinning to "standalone" rotation for the whole
+/// How often to re-attempt acquiring an optional hardware resource (the GPIO
+/// detect/power-enable lines) after a startup failure — e.g. a udev-rule race
+/// during boot. We retry rather than pinning to a degraded state for the whole
 /// process lifetime.
-const DETECT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+const OPTIONAL_HW_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The GPIO character device the rackmount detect/power lines live on.
+const GPIOCHIP_PATH: &str = "/dev/gpiochip0";
 
 use gpiocdev::line::Value;
 
-/// Whether enough time has elapsed since the last detect-line acquisition
+/// Whether enough time has elapsed since the last optional-hardware acquisition
 /// attempt to try again. Pulled out as a pure fn so the retry cadence is
-/// unit-testable without real GPIO hardware.
-fn should_retry_detect(since_last_attempt: Duration) -> bool {
-    since_last_attempt >= DETECT_RETRY_INTERVAL
+/// unit-testable without real hardware.
+fn optional_hw_retry_due(since_last_attempt: Duration) -> bool {
+    since_last_attempt >= OPTIONAL_HW_RETRY_INTERVAL
+}
+
+/// Whether any OLED/LED hardware is present. When neither the framebuffer nor
+/// the GPIO chip node exists (a dev laptop, or a CloudKey with nothing wired),
+/// the render loop runs headless instead of spinning uselessly at 1 Hz.
+fn oled_hardware_present(fb_path: &str, gpiochip_path: &str) -> bool {
+    std::path::Path::new(fb_path).exists() || std::path::Path::new(gpiochip_path).exists()
 }
 
 /// Attempt to acquire GPIO line 44 (rackmount detect) as an input. Returns
@@ -37,7 +47,7 @@ fn should_retry_detect(since_last_attempt: Duration) -> bool {
 /// own the logging so it can be log-once rather than per-attempt.
 fn request_detect_line() -> Option<gpiocdev::Request> {
     gpiocdev::Request::builder()
-        .on_chip("/dev/gpiochip0")
+        .on_chip(GPIOCHIP_PATH)
         .with_line(44)
         .as_input()
         .request()
@@ -49,11 +59,56 @@ fn request_detect_line() -> Option<gpiocdev::Request> {
 /// hardware). Silent for the same log-once reason as [`request_detect_line`].
 fn request_power_enable_line() -> Option<gpiocdev::Request> {
     gpiocdev::Request::builder()
-        .on_chip("/dev/gpiochip0")
+        .on_chip(GPIOCHIP_PATH)
         .with_line(46)
         .as_output(Value::Active)
         .request()
         .ok()
+}
+
+/// An optional GPIO line held for the process lifetime, with a shared
+/// retry-and-log-once discipline. While the line is unavailable it is
+/// re-requested every [`OPTIONAL_HW_RETRY_INTERVAL`] and logged once on
+/// recovery; a still-failing request stays silent (no per-tick spam). The
+/// guard is only re-requested while `None`, so a held line is never dropped
+/// (which would revert its output). Shared by the detect and power-enable
+/// lines so both behave identically.
+struct OptionalGpioLine {
+    request: Option<gpiocdev::Request>,
+    last_attempt: Instant,
+    acquire: fn() -> Option<gpiocdev::Request>,
+    label: &'static str,
+}
+
+impl OptionalGpioLine {
+    fn new(label: &'static str, acquire: fn() -> Option<gpiocdev::Request>, now: Instant) -> Self {
+        let request = acquire();
+        if request.is_none() {
+            info!("{label} not available (optional); will retry periodically");
+        }
+        Self {
+            request,
+            last_attempt: now,
+            acquire,
+            label,
+        }
+    }
+
+    /// Re-request the line if it is absent and the retry interval has elapsed.
+    /// No-op while the line is held.
+    fn poll(&mut self, now: Instant) {
+        if self.request.is_none() && optional_hw_retry_due(now.duration_since(self.last_attempt)) {
+            self.last_attempt = now;
+            self.request = (self.acquire)();
+            if self.request.is_some() {
+                info!("{} now available", self.label);
+            }
+        }
+    }
+
+    fn get(&self) -> Option<&gpiocdev::Request> {
+        self.request.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,28 +298,31 @@ pub async fn run_oled_manager(
 }
 
 fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
-    // Rackmount detect line (GPIO 44) is optional. Acquire it once at
-    // startup; if it fails (e.g. a udev-rule race during boot) retry every
-    // DETECT_RETRY_INTERVAL rather than pinning to standalone rotation for
-    // the process lifetime. Log once on failure and once on recovery — never
-    // per tick. Group permissions on /dev/gpiochip0 are handled via udev.
-    let mut detect_request = request_detect_line();
-    if detect_request.is_none() {
-        info!("GPIO rackmount detection not available (optional); will retry periodically");
+    // Hardware-absent (headless) short-circuit: on a host with neither the
+    // framebuffer nor the GPIO chip — a dev laptop, or a CloudKey mid-boot with
+    // nothing wired — spinning the 1 Hz loop just to no-op is pointless. Log
+    // once and return so the manager simply idles until shutdown.
+    if !oled_hardware_present(framebuffer::FB_PATH, GPIOCHIP_PATH) {
+        info!(
+            "OLED/LED hardware not detected (no {} or {}) — running headless",
+            framebuffer::FB_PATH,
+            GPIOCHIP_PATH
+        );
+        return Ok(());
     }
-    let mut last_detect_attempt = Instant::now();
 
-    // Rackmount power-enable line (GPIO 46) is optional and coupled to the
-    // detect line: without it the accessory slot is never powered, so detect
-    // then always reads "standalone". Acquire once, retry on the same cadence
-    // as the detect line, and hold the guard for the process lifetime —
-    // dropping it reverts the output and cuts power. BUG-D: this used to be a
-    // one-shot request before the loop with no retry.
-    let mut enable_request = request_power_enable_line();
-    if enable_request.is_none() {
-        info!("GPIO rackmount power enable not available (optional); will retry periodically");
-    }
-    let mut last_enable_attempt = Instant::now();
+    // Rackmount detect (GPIO 44) and power-enable (GPIO 46) lines are optional
+    // and coupled: without power the accessory slot is unpowered, so detect
+    // always reads "standalone". Both share one retry-and-log-once discipline
+    // (never per tick). Group permissions on the chip are handled via udev.
+    let now0 = Instant::now();
+    let mut detect_line =
+        OptionalGpioLine::new("GPIO rackmount detection", request_detect_line, now0);
+    let mut enable_line = OptionalGpioLine::new(
+        "GPIO rackmount power enable",
+        request_power_enable_line,
+        now0,
+    );
 
     let mut fb = Framebuffer::new();
     let mut sys_metrics = SystemMetrics::new();
@@ -290,29 +348,10 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
     loop {
         let now = Instant::now();
 
-        // 0. Retry the optional rackmount detect line if it wasn't available
-        //    yet (log once on recovery, silent on continued failure).
-        if detect_request.is_none() && should_retry_detect(now.duration_since(last_detect_attempt))
-        {
-            last_detect_attempt = now;
-            detect_request = request_detect_line();
-            if detect_request.is_some() {
-                info!("GPIO rackmount detection now available");
-            }
-        }
-
-        // 0b. Retry the optional power-enable line while it is unavailable.
-        //     Only re-request while `None` so a held guard is never dropped
-        //     (which would cut power to the accessory slot). Log once on
-        //     recovery.
-        if enable_request.is_none() && should_retry_detect(now.duration_since(last_enable_attempt))
-        {
-            last_enable_attempt = now;
-            enable_request = request_power_enable_line();
-            if enable_request.is_some() {
-                info!("GPIO rackmount power enable now available");
-            }
-        }
+        // 0. Retry the optional detect + power-enable lines while unavailable
+        //    (log once on recovery, silent on continued failure).
+        detect_line.poll(now);
+        enable_line.poll(now);
 
         // 1. Only poll active SSH sessions every 5 seconds to prevent procfs spam
         if now.duration_since(last_ssh_check) >= Duration::from_secs(5) {
@@ -389,7 +428,7 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
         }
 
         // Read rackmount detection state: low (0) = docked (rotation 0), high/error = standalone (rotation 180)
-        let is_docked = if let Some(ref req) = detect_request {
+        let is_docked = if let Some(req) = detect_line.get() {
             req.lone_value()
                 .map(|val| val == Value::Inactive)
                 .unwrap_or(false)
@@ -602,15 +641,28 @@ mod tests {
     }
 
     #[test]
-    fn detect_retry_waits_for_full_interval() {
-        assert!(!should_retry_detect(Duration::from_secs(0)));
-        assert!(!should_retry_detect(
-            DETECT_RETRY_INTERVAL - Duration::from_millis(1)
+    fn optional_hw_retry_waits_for_full_interval() {
+        assert!(!optional_hw_retry_due(Duration::from_secs(0)));
+        assert!(!optional_hw_retry_due(
+            OPTIONAL_HW_RETRY_INTERVAL - Duration::from_millis(1)
         ));
-        assert!(should_retry_detect(DETECT_RETRY_INTERVAL));
-        assert!(should_retry_detect(
-            DETECT_RETRY_INTERVAL + Duration::from_secs(30)
+        assert!(optional_hw_retry_due(OPTIONAL_HW_RETRY_INTERVAL));
+        assert!(optional_hw_retry_due(
+            OPTIONAL_HW_RETRY_INTERVAL + Duration::from_secs(30)
         ));
+    }
+
+    #[test]
+    fn hardware_absent_when_neither_node_exists() {
+        // Neither node present → headless.
+        assert!(!oled_hardware_present(
+            "/nonexistent/fb0",
+            "/nonexistent/gpiochip0"
+        ));
+        // Either node present → run the loop. `/dev/null` always exists and
+        // stands in for a present device node.
+        assert!(oled_hardware_present("/dev/null", "/nonexistent/gpiochip0"));
+        assert!(oled_hardware_present("/nonexistent/fb0", "/dev/null"));
     }
 
     #[test]

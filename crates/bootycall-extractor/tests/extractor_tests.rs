@@ -440,6 +440,60 @@ fn test_sync_host_cache_size_ceiling() {
 }
 
 #[test]
+fn test_corrupt_images_error_not_panic() {
+    // The extractor parses semi-trusted image bytes; hostile/degenerate input
+    // must return Err, never panic (a panic fails this test). Issue 039.
+    let dir = tempdir().unwrap();
+    let out_k = dir.path().join("k");
+    let out_i = dir.path().join("i");
+
+    let assert_both_err = |img: &std::path::Path, label: &str| {
+        let iso = bootycall_extractor::iso::extract_from_iso(img, None, None, &out_k, &out_i, None);
+        assert!(iso.is_err(), "{label}: ISO extraction should Err");
+        let disk =
+            bootycall_extractor::disk::extract_from_disk(img, None, None, &out_k, &out_i, None);
+        assert!(disk.is_err(), "{label}: disk extraction should Err");
+    };
+
+    // (a) A buffer of pseudo-random bytes (deterministic, no rand dep).
+    let rnd = dir.path().join("random.img");
+    let data: Vec<u8> = (0..65536u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    File::create(&rnd).unwrap().write_all(&data).unwrap();
+    assert_both_err(&rnd, "random");
+
+    // (b) A zero-length file.
+    let empty = dir.path().join("empty.img");
+    File::create(&empty).unwrap();
+    assert_both_err(&empty, "empty");
+
+    // (c) A valid-looking-but-empty (zero-filled) 1 MiB image.
+    let zeros = dir.path().join("zeros.img");
+    File::create(&zeros).unwrap().set_len(1024 * 1024).unwrap();
+    assert_both_err(&zeros, "zeros");
+
+    // (d) A truncated GPT: protective MBR present but no GPT table behind it.
+    let truncated_img = dir.path().join("truncated_img.img");
+    File::create(&truncated_img)
+        .unwrap()
+        .set_len(1024 * 1024)
+        .unwrap();
+    {
+        let mut f = File::options()
+            .read(true)
+            .write(true)
+            .open(&truncated_img)
+            .unwrap();
+        let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(
+            std::convert::TryFrom::try_from((1024 * 1024 / 512) - 1).unwrap(),
+        );
+        mbr.overwrite_lba0(&mut f).unwrap();
+    }
+    assert_both_err(&truncated_img, "truncated-gpt");
+}
+
+#[test]
 fn test_partition_slice_seek_guards_overflow() {
     use std::io::{Cursor, Seek, SeekFrom};
     // BUG-12: `SeekFrom::Start(u64::MAX)` used to cast straight to i64,

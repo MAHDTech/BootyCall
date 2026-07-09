@@ -10,4 +10,7 @@ pub enum CoreError {
 
     #[error("File watcher error: {0}")]
     Watcher(#[from] notify::Error),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }

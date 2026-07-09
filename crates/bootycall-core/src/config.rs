@@ -54,7 +54,98 @@ impl Config {
             host.mac = crate::mac::normalize_mac(&host.mac);
         }
 
+        // IMP-A: reject bad configs at load rather than letting a typo surface
+        // late as an obscure bind failure or a host that silently never
+        // matches. The watcher reload path also goes through `load`, so a bad
+        // hot-reload is rejected and the previous good config keeps serving.
+        config.validate()?;
+
         Ok(config)
+    }
+
+    /// Validate a freshly parsed (and MAC-normalised) config.
+    ///
+    /// Checks, with per-field error messages naming the offending value/host:
+    /// - the three bind fields parse as `std::net::SocketAddr`;
+    /// - `default_bootloader_amd64` / `_arm64` are non-empty;
+    /// - each host MAC is a valid normalised MAC;
+    /// - host MACs and host names are unique;
+    /// - `api_token`, when set, is non-empty (an empty token would
+    ///   authenticate a caller sending an empty `X-API-Token` header).
+    pub fn validate(&self) -> Result<(), CoreError> {
+        use std::collections::HashSet;
+        use std::net::SocketAddr;
+
+        let invalid = |msg: String| CoreError::InvalidConfig(msg);
+
+        // Bind addresses must parse as a concrete host:port socket address.
+        for (field, value) in [
+            ("http_bind", &self.server.http_bind),
+            ("tftp_bind", &self.server.tftp_bind),
+            ("proxy_dhcp_bind", &self.server.proxy_dhcp_bind),
+        ] {
+            if value.parse::<SocketAddr>().is_err() {
+                return Err(invalid(format!(
+                    "server.{field} = {value:?} is not a valid socket address (expected e.g. \"0.0.0.0:69\")"
+                )));
+            }
+        }
+
+        // Default bootloaders must be non-empty (a blank BootfileName would be
+        // handed to PXE clients).
+        for (field, value) in [
+            (
+                "default_bootloader_amd64",
+                &self.server.default_bootloader_amd64,
+            ),
+            (
+                "default_bootloader_arm64",
+                &self.server.default_bootloader_arm64,
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(invalid(format!("server.{field} must not be empty")));
+            }
+        }
+
+        // An empty api_token would authenticate an empty header — reject it.
+        if let Some(token) = &self.server.api_token
+            && token.is_empty()
+        {
+            return Err(invalid(
+                "server.api_token is set but empty; unset it to disable auth or provide a real secret"
+                    .to_string(),
+            ));
+        }
+
+        // Per-host: valid MAC syntax, and no duplicate MAC or name.
+        let mut seen_macs: HashSet<&str> = HashSet::new();
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for host in &self.hosts {
+            if !crate::mac::is_valid_mac(&host.mac) {
+                return Err(invalid(format!(
+                    "host {:?} has an invalid MAC address {:?} (expected aa:bb:cc:dd:ee:ff)",
+                    host.name, host.mac
+                )));
+            }
+            if !seen_macs.insert(host.mac.as_str()) {
+                return Err(invalid(format!(
+                    "duplicate host MAC {:?} (each host MAC must be unique)",
+                    host.mac
+                )));
+            }
+            if host.name.trim().is_empty() {
+                return Err(invalid("a host has an empty name".to_string()));
+            }
+            if !seen_names.insert(host.name.as_str()) {
+                return Err(invalid(format!(
+                    "duplicate host name {:?} (each host name must be unique)",
+                    host.name
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn find_host(&self, mac: &str) -> Option<&HostConfig> {

@@ -142,6 +142,7 @@ versionrc
 vscodevim
 waderyan
 wakatime
+windowsize
 yzhang
 hexhyp
 hexdigit

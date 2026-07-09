@@ -2,6 +2,7 @@ use bootycall_core::config::{Config, HostConfig, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
 use std::fs::{self, File};
 use std::io::Write;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -652,4 +653,182 @@ async fn test_tftp_wrq_rejected_with_error() {
     let (opcode, code, _msg) = parse_error_packet(&buf[..n]);
     assert_eq!(opcode, 5, "expected a TFTP ERROR packet (opcode 5)");
     assert_eq!(code, 4, "WRQ rejection uses illegal-operation code 4");
+}
+
+/// A windowed (RFC 7440) TFTP receiver used by the windowsize tests.
+///
+/// Receives DATA blocks, ACKing the last in-order block whenever the window
+/// fills (`windowsize` blocks) or the final short block arrives. If the next
+/// block does not arrive in time it ACKs the last in-order block anyway, which
+/// nudges the server on a gap. `drop_block`, when set, discards that block
+/// exactly once to simulate a mid-window loss and force a go-back-N recovery.
+/// Returns the reassembled bytes.
+async fn windowed_recv_all(
+    client: &UdpSocket,
+    server_tid: SocketAddr,
+    blksize: usize,
+    windowsize: u16,
+    drop_block: Option<u16>,
+) -> Vec<u8> {
+    let mut received = Vec::new();
+    let mut expected: u64 = 1;
+    let mut count: u16 = 0;
+    let mut last_in_order: u16 = 0;
+    let mut dropped = false;
+    let mut buf = vec![0u8; blksize + 64];
+    loop {
+        match tokio::time::timeout(Duration::from_millis(400), client.recv_from(&mut buf)).await {
+            Ok(Ok((n, from))) => {
+                let (block, data) = parse_data(&buf[..n]);
+                // Simulate a single lost block: drop it once, then accept the
+                // retransmission.
+                if drop_block == Some(block) && !dropped {
+                    dropped = true;
+                    continue;
+                }
+                // Discard out-of-order blocks (e.g. those after a dropped one).
+                if block as u64 != expected {
+                    continue;
+                }
+                received.extend_from_slice(&data);
+                last_in_order = block;
+                expected += 1;
+                count += 1;
+                let is_short = data.len() < blksize;
+                if count == windowsize || is_short {
+                    let _ = client.send_to(&make_ack_packet(last_in_order), from).await;
+                    count = 0;
+                }
+                if is_short {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                // No further block arrived: ACK the last in-order block to nudge
+                // the server (covers the gap case where the window never filled
+                // because a block was "lost").
+                if last_in_order != 0 {
+                    let _ = client
+                        .send_to(&make_ack_packet(last_in_order), server_tid)
+                        .await;
+                    count = 0;
+                }
+            }
+        }
+    }
+    received
+}
+
+#[tokio::test]
+async fn test_tftp_windowsize_multi_window_transfer() {
+    // A file spanning several windows transfers byte-exact when windowsize > 1.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    let blksize = 512usize;
+    // 9 full blocks + a short 10th block => three windows of 4, 4, 2.
+    let payload: Vec<u8> = (0..(9 * blksize + 137)).map(|i| (i % 256) as u8).collect();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &payload).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25150", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25150", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:25151").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("windowsize", "4"), ("tsize", "0")],
+    );
+    client.send_to(&rrq, "127.0.0.1:25150").await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let oack = parse_oack(&buf[..n]);
+    assert!(
+        oack.contains(&("windowsize".to_string(), "4".to_string())),
+        "OACK must echo the negotiated windowsize, got {oack:?}"
+    );
+    client
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    let got = windowed_recv_all(&client, server_tid, blksize, 4, None).await;
+    assert_eq!(got.len(), payload.len(), "byte count must match");
+    assert_eq!(got, payload, "windowed transfer must be byte-exact");
+}
+
+#[tokio::test]
+async fn test_tftp_windowsize_recovers_lost_block() {
+    // A block lost mid-window must be recovered via go-back-N so the file still
+    // arrives byte-exact.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    let blksize = 512usize;
+    // 5 full blocks + a short 6th block.
+    let payload: Vec<u8> = (0..(5 * blksize + 100)).map(|i| (i % 251) as u8).collect();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &payload).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25160", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25160", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:25161").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("windowsize", "4"), ("tsize", "0")],
+    );
+    client.send_to(&rrq, "127.0.0.1:25160").await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = parse_oack(&buf[..n]);
+    client
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    // Drop block 3 once, forcing the server to roll back and resend from block 3.
+    let got = windowed_recv_all(&client, server_tid, blksize, 4, Some(3)).await;
+    assert_eq!(
+        got.len(),
+        payload.len(),
+        "byte count must match after recovery"
+    );
+    assert_eq!(
+        got, payload,
+        "transfer must be byte-exact after a mid-window loss"
+    );
 }

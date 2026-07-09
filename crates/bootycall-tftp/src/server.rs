@@ -21,6 +21,7 @@ struct RrqRequest {
     blksize: Option<usize>,
     timeout: Option<u64>,
     tsize_requested: bool,
+    windowsize: Option<u16>,
 }
 
 fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
@@ -52,6 +53,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
     let mut blksize = None;
     let mut timeout = None;
     let mut tsize_requested = false;
+    let mut windowsize = None;
 
     let mut i = 2;
     while i + 1 < parts.len() {
@@ -71,6 +73,11 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
             "tsize" => {
                 tsize_requested = true;
             }
+            "windowsize" => {
+                if let Ok(val_parsed) = val.parse::<u16>() {
+                    windowsize = Some(val_parsed);
+                }
+            }
             _ => {}
         }
         i += 2;
@@ -82,6 +89,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         blksize,
         timeout,
         tsize_requested,
+        windowsize,
     })
 }
 
@@ -140,6 +148,7 @@ async fn handle_tftp_transfer(
     let mut options = Vec::new();
     let mut negotiated_blksize = 512;
     let mut negotiated_timeout = 3;
+    let mut negotiated_windowsize: u16 = 1;
 
     if let Some(blksize) = request.blksize {
         // Clamp to a safe MTU range
@@ -154,6 +163,13 @@ async fn handle_tftp_transfer(
 
     if request.tsize_requested {
         options.push(("tsize", file_size.to_string()));
+    }
+
+    if let Some(windowsize) = request.windowsize {
+        // RFC 7440: a window of N blocks per ACK. Clamp to [1, MAX_WINDOWSIZE]
+        // so a client cannot force us to buffer an unbounded window in memory.
+        negotiated_windowsize = windowsize.clamp(1, MAX_WINDOWSIZE);
+        options.push(("windowsize", negotiated_windowsize.to_string()));
     }
 
     // If options are negotiated, send OACK and wait for ACK 0
@@ -221,58 +237,28 @@ async fn handle_tftp_transfer(
         }
     }
 
-    // 4. Send DATA blocks
-    let mut block_num: u16 = 1;
-    let mut finished = false;
+    // 4. Send DATA blocks with a sliding window (RFC 7440), go-back-N on loss.
+    //    A negotiated window of 1 is ordinary stop-and-wait. The window's blocks
+    //    are buffered so a retransmission never re-reads the file, and reads are
+    //    strictly forward (a rollback replays from the buffer).
+    let window = negotiated_windowsize as u64;
     let mut read_buf = vec![0u8; negotiated_blksize];
-    let mut current_block_data;
+    // Buffered window blocks keyed by absolute (1-indexed) block number.
+    let mut buffered: std::collections::BTreeMap<u64, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut base: u64 = 1; // first unacknowledged block
+    let mut next_to_send: u64 = 1; // next block to transmit
+    let mut last_block: Option<u64> = None; // absolute number of the final (short) block
+    let mut retries: u32 = 0;
+    let mut ack_buf = [0u8; 1024];
 
-    // Read first block. Fill the buffer via a fill loop so a short read
-    // (which is legal for AsyncRead) is NOT mistaken for EOF — only a
-    // genuine `0` from `read()` marks the end.
-    let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
-    current_block_data = read_buf[..bytes_read].to_vec();
-    finished = finished || hit_eof || bytes_read < negotiated_blksize;
+    // TFTP block numbers are 16-bit and start at 1, wrapping 65535 -> 0.
+    let wire_of = |abs: u64| -> u16 { (abs % 65_536) as u16 };
 
-    loop {
-        let data_pkt = make_data_packet(block_num, &current_block_data);
-        match send_and_await_ack(
-            &socket,
-            &data_pkt,
-            block_num,
-            retry_policy,
-            client_addr,
-            "data transfer",
-        )
-        .await
-        {
-            Ok(AckOutcome::Acked) => {}
-            Ok(AckOutcome::ClientError) => {
-                mark_tftp_failed(
-                    &state_store,
-                    &mac_addr,
-                    &file_path,
-                    "client aborted during data transfer",
-                );
-                return Ok(());
-            }
-            Ok(AckOutcome::GaveUp) => {
-                error!(
-                    "TFTP transfer to {} timed out waiting for ACK block {}",
-                    client_addr, block_num
-                );
-                mark_tftp_failed(
-                    &state_store,
-                    &mac_addr,
-                    &file_path,
-                    "timed out waiting for data ACK",
-                );
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "TFTP block ack timed out",
-                ));
-            }
-            Err(e) => {
+    // Send a DATA packet, marking the host failed on an I/O error before
+    // propagating it.
+    macro_rules! send_data_or_fail {
+        ($abs:expr, $data:expr) => {
+            if let Err(e) = socket.send(&make_data_packet(wire_of($abs), $data)).await {
                 mark_tftp_failed(
                     &state_store,
                     &mac_addr,
@@ -281,38 +267,164 @@ async fn handle_tftp_transfer(
                 );
                 return Err(e);
             }
-        }
-
-        if finished {
-            info!(
-                "TFTP transfer to {} completed successfully ({} blocks sent)",
-                client_addr, block_num
-            );
-            if let Some(ref mac) = mac_addr {
-                state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
-                state_store.log_event(
-                    "INFO",
-                    Some(mac),
-                    &format!("TFTP transfer completed: {} blocks sent", block_num),
-                );
-            }
-            bootycall_log::event!(
-                "tftp_transfer_complete",
-                mac = mac_addr.as_deref().unwrap_or(""),
-                file = %file_path.display(),
-                bytes = file_size,
-                blocks = block_num,
-                duration_ms = transfer_start.elapsed().as_millis() as u64,
-            );
-            break;
-        }
-
-        // Read next block
-        block_num = block_num.wrapping_add(1);
-        let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
-        current_block_data = read_buf[..bytes_read].to_vec();
-        finished = hit_eof || bytes_read < negotiated_blksize;
+        };
     }
+
+    loop {
+        // Fill the window: transmit every block in [base, base + window) not yet
+        // sent, reading forward from the file. Retransmits reuse the buffer, so
+        // `read_fill` only ever runs on brand-new blocks — a short read (legal
+        // for AsyncRead) is NOT mistaken for EOF, only a genuine `0` marks it.
+        while next_to_send < base + window {
+            if let Some(lb) = last_block
+                && next_to_send > lb
+            {
+                break; // nothing past the terminating block
+            }
+            let data = match buffered.get(&next_to_send) {
+                Some(d) => d.clone(),
+                None => {
+                    let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
+                    let d = read_buf[..bytes_read].to_vec();
+                    if hit_eof || bytes_read < negotiated_blksize {
+                        last_block = Some(next_to_send);
+                    }
+                    buffered.insert(next_to_send, d.clone());
+                    d
+                }
+            };
+            send_data_or_fail!(next_to_send, &data);
+            next_to_send += 1;
+        }
+
+        // Bound the wait: retry budget and the overall transfer deadline. Any
+        // receive that isn't a window-advancing ACK (timeout, old/dup ACK, or
+        // garbage) counts against the retry budget so a broken/malicious client
+        // cannot wedge us in a busy loop.
+        if retries >= retry_policy.max_retries || std::time::Instant::now() >= retry_policy.deadline
+        {
+            error!(
+                "TFTP transfer to {} timed out waiting for ACK (base block {})",
+                client_addr, base
+            );
+            mark_tftp_failed(
+                &state_store,
+                &mac_addr,
+                &file_path,
+                "timed out waiting for data ACK",
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TFTP block ack timed out",
+            ));
+        }
+
+        match tokio::time::timeout(retry_policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
+            Ok(Ok(n)) => {
+                let rec = &ack_buf[..n];
+                if is_error_packet(rec) {
+                    warn!(
+                        "Received TFTP error from client {} during data transfer",
+                        client_addr
+                    );
+                    mark_tftp_failed(
+                        &state_store,
+                        &mac_addr,
+                        &file_path,
+                        "client aborted during data transfer",
+                    );
+                    return Ok(());
+                }
+                match parse_ack_packet(rec) {
+                    Some(acked_wire) => {
+                        // Map the wire ACK to an absolute block in the in-flight
+                        // range [base, next_to_send). Only an ACK for a block we
+                        // actually sent advances the window.
+                        let acked_abs =
+                            (base..next_to_send).find(|&abs| wire_of(abs) == acked_wire);
+                        match acked_abs {
+                            Some(abs) => {
+                                let was_partial = abs + 1 < next_to_send;
+                                // Cumulative ACK: retire blocks up to `abs`.
+                                base = abs + 1;
+                                buffered.retain(|&k, _| k >= base);
+                                retries = 0;
+                                if let Some(lb) = last_block
+                                    && base > lb
+                                {
+                                    break; // whole file acknowledged
+                                }
+                                // An ACK for an earlier block than the last one
+                                // sent means the blocks after it were lost or
+                                // dropped out-of-order: roll back to `base` and
+                                // resend the window from there (go-back-N).
+                                if was_partial {
+                                    next_to_send = base;
+                                }
+                            }
+                            None => {
+                                // Old/duplicate ACK or garbage — retry budget.
+                                debug!(
+                                    "Unexpected ACK block {} from {}, retrying...",
+                                    acked_wire, client_addr
+                                );
+                                retries += 1;
+                            }
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "Unexpected packet during data transfer from {}, retrying...",
+                            client_addr
+                        );
+                        retries += 1;
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                error!("Error receiving TFTP ACK from {}: {:?}", client_addr, e);
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during data transfer",
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                // Timeout — roll back to `base` and resend the whole window.
+                debug!(
+                    "Timeout waiting for ACK from {}, resending window...",
+                    client_addr
+                );
+                retries += 1;
+                next_to_send = base;
+            }
+        }
+    }
+
+    let total_blocks = last_block.unwrap_or(0);
+    info!(
+        "TFTP transfer to {} completed successfully ({} blocks sent, windowsize {})",
+        client_addr, total_blocks, negotiated_windowsize
+    );
+    if let Some(ref mac) = mac_addr {
+        state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
+        state_store.log_event(
+            "INFO",
+            Some(mac),
+            &format!("TFTP transfer completed: {} blocks sent", total_blocks),
+        );
+    }
+    bootycall_log::event!(
+        "tftp_transfer_complete",
+        mac = mac_addr.as_deref().unwrap_or(""),
+        file = %file_path.display(),
+        bytes = file_size,
+        blocks = total_blocks,
+        windowsize = negotiated_windowsize,
+        duration_ms = transfer_start.elapsed().as_millis() as u64,
+    );
 
     Ok(())
 }
@@ -455,6 +567,11 @@ async fn read_fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Resul
 /// sockets and file descriptors. RFC 1350 transfers are one-shot boot
 /// artefacts, so a modest limit is plenty for real workloads.
 const MAX_CONCURRENT_TRANSFERS: usize = 128;
+
+/// Upper bound on the negotiated RFC 7440 window size. The in-flight window is
+/// buffered in memory (`window * blksize` bytes per transfer), so this caps a
+/// client's ability to force us to buffer unboundedly.
+const MAX_WINDOWSIZE: u16 = 32;
 
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 ///

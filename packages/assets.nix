@@ -1,8 +1,23 @@
 { pkgs, self }:
 
+let
+  inherit (pkgs) lib;
+  # Narrow the source to only the trees the install phase actually consumes:
+  # the checked-in tftpboot placeholders and the static wallpapers. With
+  # `src = ../.` any unrelated change — a Rust file, a doc, CI config — altered
+  # the derivation's input hash and forced a full rebuild. Scoping src to these
+  # two directories means only changes under them bust the assets cache.
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../tftpboot
+      ../static
+    ];
+  };
+in
 pkgs.stdenv.mkDerivation {
   name = "bootycall-assets";
-  src = ../.;
+  inherit src;
   installPhase = ''
     mkdir -p $out/tftpboot/boot/x64
     mkdir -p $out/tftpboot/boot/arm64

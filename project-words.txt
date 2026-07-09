@@ -57,6 +57,7 @@ esac
 esbenp
 failback
 fatfs
+fileset
 fbioget
 vscreeninfo
 xres

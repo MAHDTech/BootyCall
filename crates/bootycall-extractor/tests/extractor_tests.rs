@@ -1,4 +1,4 @@
-use bootycall_core::config::HostConfig;
+use bootycall_core::config::{Config, HostConfig, ServerConfig};
 use std::fs::{self, File};
 use std::io::Write;
 use tempfile::tempdir;
@@ -309,6 +309,87 @@ fn test_cache_invalidated_on_kernel_path_change() {
     bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir).unwrap();
     let after = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     assert_eq!(before, after, "second override sync must not re-extract");
+}
+
+fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: std::path::PathBuf::from("./tftpboot"),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: cache_dir.to_path_buf(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
+        api_token: None,
+    }
+}
+
+#[test]
+fn test_sync_all_hosts_cache_partial_failure() {
+    // One host with a real GPT/FAT image + one host whose image is missing.
+    // sync_all_hosts_cache must report succeeded=1, failed=[missing], not the
+    // old Ok(())-always behaviour (issue 002).
+    let dir = tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+    let good_disk = dir.path().join("good.img");
+    build_dual_kernel_gpt_image(&good_disk);
+
+    let good = HostConfig {
+        mac: "00:11:22:33:44:77".to_string(),
+        name: "good-host".to_string(),
+        image_path: good_disk,
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    let missing = HostConfig {
+        mac: "00:11:22:33:44:88".to_string(),
+        name: "missing-host".to_string(),
+        image_path: dir.path().join("does_not_exist.iso"),
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    let config = Config {
+        server: server_config(&cache_dir),
+        hosts: vec![good, missing],
+    };
+
+    let summary = bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+    assert_eq!(summary.succeeded, 1, "the good host should extract");
+    assert_eq!(summary.failed.len(), 1, "the missing host should fail");
+    assert_eq!(summary.failed[0].0, "missing-host");
+    assert_eq!(summary.total(), 2);
+    assert!(summary.partial_failure());
+    assert!(!summary.all_failed());
+}
+
+#[test]
+fn test_sync_all_hosts_cache_all_failed() {
+    // Every host's image is missing -> all_failed() is true (distinct from a
+    // healthy sync), which main surfaces prominently (issue 020).
+    let dir = tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+    let host = HostConfig {
+        mac: "00:11:22:33:44:99".to_string(),
+        name: "missing-only".to_string(),
+        image_path: dir.path().join("nope.iso"),
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    let config = Config {
+        server: server_config(&cache_dir),
+        hosts: vec![host],
+    };
+    let summary = bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+    assert_eq!(summary.succeeded, 0);
+    assert!(summary.all_failed());
+    assert!(!summary.partial_failure());
 }
 
 #[test]

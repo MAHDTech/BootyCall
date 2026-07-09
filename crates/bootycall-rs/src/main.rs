@@ -138,8 +138,8 @@ async fn main() -> Result<(), anyhow::Error> {
     })
     .await;
     match sync_result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => error!("Initial cache sync failed: {:?}", e),
+        Ok(Ok(summary)) => log_sync_summary(&summary),
+        Ok(Err(e)) => error!("Initial cache sync failed to start (cache dir): {:?}", e),
         Err(join_err) => error!("Initial cache sync task join error: {:?}", join_err),
     }
 
@@ -152,8 +152,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let shared_config_clone = shared_config.clone();
     let _watcher = watch_config(config_path_clone, move |new_config| {
         info!("Configuration file modified! Syncing cache...");
-        if let Err(e) = bootycall_extractor::sync_all_hosts_cache(&new_config) {
-            error!("Cache sync failed on config reload: {:?}", e);
+        match bootycall_extractor::sync_all_hosts_cache(&new_config) {
+            Ok(summary) => log_sync_summary(&summary),
+            Err(e) => error!("Cache sync failed on config reload (cache dir): {:?}", e),
         }
         let mut guard = shared_config_clone.write();
         *guard = new_config;
@@ -298,6 +299,38 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("BootyCall shutdown complete.");
     outcome
+}
+
+/// Apply the cache-sync restart policy (issue 020) and log the outcome.
+///
+/// Config-level faults are already rejected up front by `Config::validate`, so
+/// a failure here is a data/image problem, not a systematically bad config.
+/// Policy: a partial failure is logged but we keep serving the hosts that did
+/// extract; an all-hosts-failed sync is surfaced prominently (it is the signal
+/// the `/api/health` probe reflects) but is deliberately NOT turned into a
+/// fatal process exit — doing so under `Restart=on-failure` would restart-spin
+/// on a condition a restart cannot fix (e.g. an image that is simply absent).
+fn log_sync_summary(summary: &bootycall_extractor::SyncSummary) {
+    if summary.all_failed() {
+        error!(
+            "Cache sync: ALL {} host(s) failed extraction — the box will serve no boot artifacts until this is resolved",
+            summary.total()
+        );
+        for (host, e) in &summary.failed {
+            error!("  host {host}: {e}");
+        }
+    } else if summary.partial_failure() {
+        error!(
+            "Cache sync: {}/{} host(s) failed extraction (continuing to serve the rest)",
+            summary.failed.len(),
+            summary.total()
+        );
+        for (host, e) in &summary.failed {
+            error!("  host {host}: {e}");
+        }
+    } else {
+        info!("Cache sync: all {} host(s) OK", summary.total());
+    }
 }
 
 /// Unwrap a spawned server's `JoinHandle` outcome into a single

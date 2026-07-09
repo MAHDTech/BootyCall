@@ -57,23 +57,77 @@ impl CacheMetadata {
     }
 }
 
-/// Synchronises the cache directories for all hosts defined in the configuration.
-pub fn sync_all_hosts_cache(config: &Config) -> Result<(), ExtractorError> {
+/// Outcome of a full-fleet cache sync. Carries per-host failures so the caller
+/// (`main`) can tell "one host's image is temporarily missing" (warn, keep
+/// serving) from "every host failed" (surface prominently, feed the health
+/// probe) instead of the old `Ok(())`-always behaviour that made a
+/// zero-artifact box look healthy — see issues 002 / 020.
+#[derive(Debug, Default)]
+pub struct SyncSummary {
+    /// Number of hosts whose cache is present/valid after the sync.
+    pub succeeded: usize,
+    /// `(host name, error)` for each host that failed extraction.
+    pub failed: Vec<(String, ExtractorError)>,
+}
+
+impl SyncSummary {
+    /// Total hosts processed (succeeded + failed).
+    pub fn total(&self) -> usize {
+        self.succeeded + self.failed.len()
+    }
+
+    /// True when at least one host was configured and every one failed — the
+    /// box will serve no boot artifacts.
+    pub fn all_failed(&self) -> bool {
+        self.succeeded == 0 && !self.failed.is_empty()
+    }
+
+    /// True when some (but not all) hosts failed.
+    pub fn partial_failure(&self) -> bool {
+        self.succeeded > 0 && !self.failed.is_empty()
+    }
+}
+
+/// Synchronises the cache directories for all hosts defined in the
+/// configuration. Returns `Err` only when the cache directory itself cannot be
+/// created (a genuine setup failure); per-host extraction failures are
+/// collected into the returned [`SyncSummary`] rather than aborting the sweep.
+pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorError> {
     let cache_dir = &config.server.cache_dir;
     if !cache_dir.exists() {
         fs::create_dir_all(cache_dir)?;
     }
 
+    let mut summary = SyncSummary::default();
     for host in &config.hosts {
-        if let Err(e) = sync_host_cache(host, cache_dir) {
-            error!(
-                "Failed to sync cache for host {} (MAC: {}): {:?}",
-                host.name, host.mac, e
-            );
+        match sync_host_cache(host, cache_dir) {
+            Ok(()) => summary.succeeded += 1,
+            Err(e) => {
+                error!(
+                    "Failed to sync cache for host {} (MAC: {}): {:?}",
+                    host.name, host.mac, e
+                );
+                summary.failed.push((host.name.clone(), e));
+            }
         }
     }
 
-    Ok(())
+    if summary.all_failed() {
+        bootycall_log::event!(
+            "extract_sync_all_failed",
+            hosts = summary.total() as u64,
+            failed = summary.failed.len() as u64,
+        );
+    } else if summary.partial_failure() {
+        bootycall_log::event!(
+            "extract_sync_partial",
+            hosts = summary.total() as u64,
+            succeeded = summary.succeeded as u64,
+            failed = summary.failed.len() as u64,
+        );
+    }
+
+    Ok(summary)
 }
 
 /// Synchronises the cache directory for a single host.

@@ -92,6 +92,7 @@ nixfmt
 nixos
 nixpkgs
 nobr
+notty
 oack
 objcopy
 objdump

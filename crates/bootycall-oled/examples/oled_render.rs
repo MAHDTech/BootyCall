@@ -20,14 +20,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Representative label/value pairs plus a glyph-coverage string, chosen to
     // exercise the digits, punctuation and mixed case the real pages render.
+    // Values mirror the real metrics-page formats (see crates/.../metrics.rs):
+    // uptime is "Xd Yh Zm", CPU usage "{:.1}%", RAM/DISK "{:.1}G / {:.1}G".
     let samples = [
         ("HOSTNAME", "bootycall"),
         ("IP ADDRESS", "192.168.1.100"),
-        ("UPTIME", "3d 14:22:07"),
+        ("UPTIME", "3d 14h 22m"),
         ("CPU TEMP", "48.5C"),
-        ("CPU USAGE", "12%"),
-        ("RAM USAGE", "512/2048 MB"),
-        ("DISK USAGE", "37%"),
+        ("CPU USAGE", "12.0%"),
+        ("RAM USAGE", "1.5G / 8.0G"),
+        ("DISK USAGE", "18.5G / 50.0G"),
         ("KERNEL", "6.6.0"),
         ("GLYPHS", "ABCabc0123:.%/-"),
     ];

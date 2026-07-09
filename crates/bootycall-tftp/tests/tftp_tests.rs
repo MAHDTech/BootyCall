@@ -536,3 +536,120 @@ async fn test_tftp_timeout_marks_host_failed() {
         state_store.get_host(mac).map(|h| h.status)
     );
 }
+
+fn base_server_config(bind: &str, tftp_root: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: bind.to_string(),
+        tftp_root: tftp_root.to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
+        api_token: None,
+        max_artifact_bytes: None,
+    }
+}
+
+#[tokio::test]
+async fn test_tftp_server_busy_at_injected_limit() {
+    // With the concurrency limit injected down to 1, a second concurrent RRQ
+    // must be rejected with ERROR code 0 "Server busy" while the first
+    // transfer still holds the only permit.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), b"busy-test-payload").unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25130", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server_with_limit(
+            "127.0.0.1:25130",
+            server_config_clone,
+            server_store,
+            1,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+
+    // First client: start a transfer and hold the single permit by receiving
+    // the OACK but never sending an ACK — the transfer task stays alive
+    // (retrying for ACK 0) and keeps the semaphore permit for its lifetime.
+    let client_a = UdpSocket::bind("127.0.0.1:25131").await.unwrap();
+    client_a.send_to(&rrq, "127.0.0.1:25130").await.unwrap();
+    let mut buf = [0u8; 1024];
+    let (_n, _tid) = tokio::time::timeout(Duration::from_secs(2), client_a.recv_from(&mut buf))
+        .await
+        .expect("first client should receive an OACK")
+        .unwrap();
+
+    // Second client: its RRQ must be rejected with "Server busy".
+    let client_b = UdpSocket::bind("127.0.0.1:25132").await.unwrap();
+    client_b.send_to(&rrq, "127.0.0.1:25130").await.unwrap();
+    let (n, _from) = tokio::time::timeout(Duration::from_secs(2), client_b.recv_from(&mut buf))
+        .await
+        .expect("second client should receive a Server busy ERROR")
+        .unwrap();
+    let (opcode, code, msg) = parse_error_packet(&buf[..n]);
+    assert_eq!(opcode, 5, "expected a TFTP ERROR packet (opcode 5)");
+    assert_eq!(code, 0, "Server busy uses error code 0");
+    assert_eq!(msg, "Server busy");
+}
+
+#[tokio::test]
+async fn test_tftp_wrq_rejected_with_error() {
+    // A WRQ (opcode 2) is not supported: the listener must reply with an
+    // ERROR packet (RFC 1350 code 4, illegal operation) rather than ignore it.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25140", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25140", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Hand-build a WRQ: opcode 2, filename\0, mode\0.
+    let mut wrq = vec![0x00, 0x02];
+    wrq.extend_from_slice(b"boot/x64/ipxe.efi");
+    wrq.push(0);
+    wrq.extend_from_slice(b"octet");
+    wrq.push(0);
+
+    let client = UdpSocket::bind("127.0.0.1:25141").await.unwrap();
+    client.send_to(&wrq, "127.0.0.1:25140").await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, _from) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("WRQ should draw an ERROR reply")
+        .unwrap();
+    let (opcode, code, _msg) = parse_error_packet(&buf[..n]);
+    assert_eq!(opcode, 5, "expected a TFTP ERROR packet (opcode 5)");
+    assert_eq!(code, 4, "WRQ rejection uses illegal-operation code 4");
+}

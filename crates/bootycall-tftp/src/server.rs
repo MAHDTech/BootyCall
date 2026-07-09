@@ -457,14 +457,30 @@ async fn read_fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Resul
 const MAX_CONCURRENT_TRANSFERS: usize = 128;
 
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
+///
+/// Concurrent transfers are bounded by [`MAX_CONCURRENT_TRANSFERS`]. Use
+/// [`run_tftp_server_with_limit`] to override the bound (tests inject a small
+/// limit to exercise the "Server busy" rejection).
 pub async fn run_tftp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
 ) -> Result<(), std::io::Error> {
+    run_tftp_server_with_limit(bind_addr, config, state_store, MAX_CONCURRENT_TRANSFERS).await
+}
+
+/// Like [`run_tftp_server`] but with an explicit concurrent-transfer bound so
+/// tests can drive the semaphore-rejection ("Server busy") path at a small
+/// limit instead of the production default of 128.
+pub async fn run_tftp_server_with_limit(
+    bind_addr: &str,
+    config: Arc<parking_lot::RwLock<Config>>,
+    state_store: StateStore,
+    max_concurrent_transfers: usize,
+) -> Result<(), std::io::Error> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
-    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
+    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent_transfers));
 
     let mut buf = [0u8; 1500];
     loop {
@@ -610,7 +626,7 @@ pub async fn run_tftp_server(
             Err(_) => {
                 warn!(
                     "Refusing TFTP transfer to {}: {} concurrent transfers already in flight",
-                    src_addr, MAX_CONCURRENT_TRANSFERS
+                    src_addr, max_concurrent_transfers
                 );
                 let err = make_error_packet(0, "Server busy");
                 let _ = transfer_socket.send(&err).await;

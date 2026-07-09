@@ -410,6 +410,57 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
     Ok(())
 }
 
+/// Small left/right edge inset (px) used by `oled_test`'s horizontal alignment.
+const TEXT_EDGE_MARGIN: usize = 5;
+
+/// Horizontal placement (px) for `oled_test`'s `--alignment`. `center` centres
+/// within `WIDTH`, `right` right-aligns with an edge margin, anything else
+/// (including `left`) uses the left margin. Text at least as wide as the panel
+/// falls back to `0` so it is not pushed off-screen.
+fn align_x(horiz: &str, text_w: usize) -> usize {
+    match horiz {
+        "center" => {
+            if text_w < WIDTH {
+                (WIDTH - text_w) / 2
+            } else {
+                0
+            }
+        }
+        "right" => {
+            if text_w < WIDTH {
+                WIDTH - text_w - TEXT_EDGE_MARGIN
+            } else {
+                0
+            }
+        }
+        _ => TEXT_EDGE_MARGIN, // left
+    }
+}
+
+/// Vertical placement (px) within the visible window for `oled_test`. `top`
+/// pins to the window top, `bottom` bottom-aligns, anything else (including
+/// `middle`) centres. Text at least as tall as the window falls back to the
+/// top.
+fn align_y(vert: &str, text_h: usize) -> usize {
+    match vert {
+        "top" => VISIBLE_Y_START,
+        "bottom" => {
+            if text_h < VISIBLE_HEIGHT {
+                VISIBLE_Y_START + VISIBLE_HEIGHT - text_h
+            } else {
+                VISIBLE_Y_START
+            }
+        }
+        _ => {
+            if text_h < VISIBLE_HEIGHT {
+                VISIBLE_Y_START + (VISIBLE_HEIGHT - text_h) / 2
+            } else {
+                VISIBLE_Y_START
+            }
+        } // middle
+    }
+}
+
 /// Dynamic OLED rendering test for testing font size and alignment using premium TrueType fonts.
 pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
     // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
@@ -431,41 +482,8 @@ pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow:
             crate::renderer::SMALL_SCALE as usize
         };
 
-        let x = match horiz {
-            "center" => {
-                if text_w < WIDTH {
-                    (WIDTH - text_w) / 2
-                } else {
-                    0
-                }
-            }
-            "right" => {
-                if text_w < WIDTH {
-                    WIDTH - text_w - 5
-                } else {
-                    0
-                }
-            }
-            _ => 5, // left
-        };
-
-        let y = match vert {
-            "top" => VISIBLE_Y_START,
-            "bottom" => {
-                if text_h < VISIBLE_HEIGHT {
-                    VISIBLE_Y_START + VISIBLE_HEIGHT - text_h
-                } else {
-                    VISIBLE_Y_START
-                }
-            }
-            _ => {
-                if text_h < VISIBLE_HEIGHT {
-                    VISIBLE_Y_START + (VISIBLE_HEIGHT - text_h) / 2
-                } else {
-                    VISIBLE_Y_START
-                }
-            } // middle
-        };
+        let x = align_x(horiz, text_w);
+        let y = align_y(vert, text_h);
 
         renderer.draw_text(x, y, text, use_large_font);
     }
@@ -526,6 +544,37 @@ mod tests {
         assert!(should_retry_detect(
             DETECT_RETRY_INTERVAL + Duration::from_secs(30)
         ));
+    }
+
+    #[test]
+    fn align_x_covers_every_branch() {
+        // A 40px string comfortably narrower than the 160px panel.
+        assert_eq!(align_x("left", 40), TEXT_EDGE_MARGIN);
+        assert_eq!(align_x("unknown", 40), TEXT_EDGE_MARGIN); // default → left
+        assert_eq!(align_x("center", 40), (WIDTH - 40) / 2);
+        assert_eq!(align_x("right", 40), WIDTH - 40 - TEXT_EDGE_MARGIN);
+        // Overflow-guard fallbacks: text at least as wide as the panel → 0.
+        assert_eq!(align_x("center", WIDTH), 0);
+        assert_eq!(align_x("center", WIDTH + 10), 0);
+        assert_eq!(align_x("right", WIDTH), 0);
+    }
+
+    #[test]
+    fn align_y_covers_every_branch() {
+        // A 15px line fits inside the 32px visible band.
+        assert_eq!(align_y("top", 15), VISIBLE_Y_START);
+        assert_eq!(align_y("bottom", 15), VISIBLE_Y_START + VISIBLE_HEIGHT - 15);
+        assert_eq!(
+            align_y("middle", 15),
+            VISIBLE_Y_START + (VISIBLE_HEIGHT - 15) / 2
+        );
+        assert_eq!(
+            align_y("unknown", 15),
+            VISIBLE_Y_START + (VISIBLE_HEIGHT - 15) / 2
+        ); // default → middle
+        // Overflow-guard fallbacks: text at least as tall as the band → top.
+        assert_eq!(align_y("bottom", VISIBLE_HEIGHT), VISIBLE_Y_START);
+        assert_eq!(align_y("middle", VISIBLE_HEIGHT + 4), VISIBLE_Y_START);
     }
 
     #[test]

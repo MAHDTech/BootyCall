@@ -344,4 +344,47 @@ mod tests {
         // Verify MAC normalization in log events
         assert_eq!(logs[1].mac, Some("aa:bb:cc:dd:ee:ff".to_string()));
     }
+
+    #[test]
+    fn test_max_tracked_hosts_ceiling() {
+        let store = StateStore::new();
+
+        // Fill the store to exactly the ceiling with distinct MACs.
+        // i in 0..4096 maps to 02:00:00:00:HH:LL (HH in 0x00..0x0f, LL in
+        // 0x00..0xff) — all distinct, all valid lower-hex.
+        for i in 0..MAX_TRACKED_HOSTS {
+            let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
+            store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+        }
+        assert_eq!(
+            store.list_hosts().len(),
+            MAX_TRACKED_HOSTS,
+            "store should hold exactly MAX_TRACKED_HOSTS entries"
+        );
+
+        // (a) A brand-new MAC at the ceiling is dropped, not inserted.
+        store.update_host_status(
+            "de:ad:be:ef:00:01",
+            HostStatus::Polling,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            store.get_host("de:ad:be:ef:00:01").is_none(),
+            "a new MAC beyond the ceiling must be dropped"
+        );
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+
+        // (b) An already-tracked MAC still updates at the ceiling.
+        let existing = "02:00:00:00:00:00";
+        store.update_host_status(existing, HostStatus::Completed, None, None, None, None);
+        assert_eq!(
+            store.get_host(existing).unwrap().status,
+            HostStatus::Completed,
+            "existing entries must keep updating at the ceiling"
+        );
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+    }
 }

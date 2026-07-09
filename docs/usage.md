@@ -30,6 +30,10 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  # Root for static HTTP assets (wallpapers, UI files). Optional; defaults to
+  # "./static". Prefer an absolute path in production so serving does not depend
+  # on the process working directory.
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 

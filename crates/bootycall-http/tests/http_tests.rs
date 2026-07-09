@@ -68,6 +68,7 @@ async fn test_http_server_endpoints() {
         tftp_root: tmp_dir.path().to_path_buf(),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir: cache_dir.clone(),
+        static_dir: "./static".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
@@ -233,6 +234,7 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
         tftp_root: tmp_dir.path().to_path_buf(),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir,
+        static_dir: "./static".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
@@ -661,6 +663,61 @@ async fn http_get(port: u16, path: &str) -> (String, Vec<u8>) {
     client.read_to_end(&mut response).await.unwrap();
     let (status, _, body) = parse_http_response(&response);
     (status, body)
+}
+
+#[tokio::test]
+async fn test_static_served_from_configured_dir() {
+    // Static serving must resolve against the configured `static_dir`,
+    // independent of the process CWD (issue 001).
+    let tmp = tempdir().unwrap();
+    let static_dir = tmp.path().join("assets");
+    fs::create_dir_all(&static_dir).unwrap();
+    fs::write(static_dir.join("hello.txt"), b"STATIC-OK").unwrap();
+
+    let port: u16 = 26107;
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: static_dir.clone(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
+        api_token: None,
+        max_artifact_bytes: None,
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let _leaked = Box::leak(Box::new(tmp));
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (status, body) = http_get(port, "/static/hello.txt").await;
+    assert!(
+        status.contains("200"),
+        "configured static file must serve, got: {status}"
+    );
+    // Body is streamed (chunked transfer-encoding), so match a substring.
+    assert!(
+        String::from_utf8_lossy(&body).contains("STATIC-OK"),
+        "served static body must contain the file content"
+    );
 }
 
 #[tokio::test]

@@ -27,6 +27,9 @@ let
         tftp_root = cfg.server.tftpRoot;
         proxy_dhcp_bind = cfg.server.proxyDhcpBind;
         cache_dir = cfg.server.cacheDir;
+        # Absolute static-asset root so serving is independent of the unit's
+        # working directory (matches where preStart seeds the default assets).
+        static_dir = "${cfg.dataDir}/static";
         default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
         default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
       };

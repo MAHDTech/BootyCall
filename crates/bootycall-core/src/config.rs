@@ -7,6 +7,10 @@ fn default_oled_enabled() -> bool {
     true
 }
 
+fn default_static_dir() -> PathBuf {
+    PathBuf::from("./static")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub http_bind: String,
@@ -14,6 +18,12 @@ pub struct ServerConfig {
     pub tftp_root: PathBuf,
     pub proxy_dhcp_bind: String,
     pub cache_dir: PathBuf,
+    /// Root directory for static HTTP assets (wallpapers, etc.). Resolved
+    /// independently of the process CWD; defaults to `./static` so existing
+    /// configs keep working. All static/wallpaper file access is routed through
+    /// `safe_join` against this root.
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
     pub default_bootloader_amd64: String,
     pub default_bootloader_arm64: String,
     #[serde(default = "default_oled_enabled")]
@@ -322,6 +332,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -379,6 +390,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -409,6 +421,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -442,6 +455,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -467,6 +481,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -554,6 +569,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -593,6 +609,7 @@ hosts:
             tftp_root: PathBuf::from("./tftpboot"),
             proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
             cache_dir: PathBuf::from("./cache"),
+            static_dir: "./static".into(),
             default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
             default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
             oled_enabled: true,

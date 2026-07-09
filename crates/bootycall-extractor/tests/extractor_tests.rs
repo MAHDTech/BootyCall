@@ -318,6 +318,7 @@ fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
         tftp_root: std::path::PathBuf::from("./tftpboot"),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir: cache_dir.to_path_buf(),
+        static_dir: "./static".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,

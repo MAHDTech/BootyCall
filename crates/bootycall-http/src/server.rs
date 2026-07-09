@@ -167,9 +167,16 @@ async fn root_redirect() -> impl IntoResponse {
         .into_response()
 }
 
-// Serving static wallpaper files from the disk static dir
-async fn serve_static_file(AxumPath(path): AxumPath<String>) -> Result<Response, StatusCode> {
-    serve_file_from_dir(Path::new("./static"), &path).await
+// Serving static wallpaper files from the configured static dir
+async fn serve_static_file(
+    State(state): State<ServerState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Response, StatusCode> {
+    let static_dir = {
+        let config_guard = state.config.read();
+        config_guard.server.static_dir.clone()
+    };
+    serve_file_from_dir(&static_dir, &path).await
 }
 
 // Serving cached kernels and initrds
@@ -425,9 +432,38 @@ async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> i
     ([(header::CONTENT_TYPE, "text/plain")], rendered)
 }
 
+/// Maximum wallpaper filenames collected from one directory scan. Bounds the
+/// per-request allocation so a huge wallpapers directory can't blow up memory
+/// (issue 001).
+const MAX_WALLPAPER_CANDIDATES: usize = 1024;
+
+/// Collect up to [`MAX_WALLPAPER_CANDIDATES`] image filenames (`.png`/`.jpg`/
+/// `.jpeg`) directly under `dir`. Returns an empty vec if `dir` is missing.
+async fn collect_wallpaper_candidates(dir: &Path) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while candidates.len() < MAX_WALLPAPER_CANDIDATES {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let lower = file_name.to_lowercase();
+                    if lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg")
+                    {
+                        candidates.push(file_name);
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+    candidates
+}
+
 // Dynamic wallpaper selection endpoint
 async fn wallpaper_handler(
-    State(_state): State<ServerState>,
+    State(state): State<ServerState>,
     headers: HeaderMap,
     Query(query): Query<WallpaperQuery>,
 ) -> impl IntoResponse {
@@ -442,47 +478,35 @@ async fn wallpaper_handler(
         target_height = Some(1080);
     }
 
+    // Wallpapers live under the configured static dir (resolved independently of
+    // the process CWD), not a hardcoded `./static`.
+    let wallpapers_root = {
+        let config_guard = state.config.read();
+        config_guard.server.static_dir.join("wallpapers")
+    };
+
     // Walk directories to select a wallpaper
     let mut selected_path = None;
 
-    // First, check if a specific resolution directory is requested and exists
+    // First, check if a specific resolution directory is requested and exists.
+    // Route the resolution segment through `safe_join` for defence in depth.
     if let (Some(w), Some(h)) = (target_width, target_height) {
         let res_dir_name = format!("{}x{}", w, h);
-        let res_path_local = Path::new("./static/wallpapers").join(&res_dir_name);
-
-        let mut candidates = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(&res_path_local).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                let lower = file_name.to_lowercase();
-                if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-                    candidates.push(file_name);
+        if let Some(res_path) = bootycall_core::safe_join(&wallpapers_root, &res_dir_name) {
+            let candidates = collect_wallpaper_candidates(&res_path).await;
+            if !candidates.is_empty() {
+                use rand::seq::IndexedRandom;
+                let mut rng = rand::rng();
+                if let Some(chosen) = candidates.choose(&mut rng) {
+                    selected_path = Some(format!("wallpapers/{}/{}", res_dir_name, chosen));
                 }
-            }
-        }
-
-        if !candidates.is_empty() {
-            use rand::seq::IndexedRandom;
-            let mut rng = rand::rng();
-            if let Some(chosen) = candidates.choose(&mut rng) {
-                selected_path = Some(format!("wallpapers/{}/{}", res_dir_name, chosen));
             }
         }
     }
 
     // Fallback: check main wallpapers directory
     if selected_path.is_none() {
-        let mut candidates = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir("./static/wallpapers").await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let file_name = entry.file_name().to_string_lossy().to_string();
-                let lower = file_name.to_lowercase();
-                if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-                    candidates.push(file_name);
-                }
-            }
-        }
-
+        let candidates = collect_wallpaper_candidates(&wallpapers_root).await;
         if !candidates.is_empty() {
             use rand::seq::IndexedRandom;
             let mut rng = rand::rng();
@@ -769,6 +793,7 @@ mod tests {
                 tftp_root: "/tmp".into(),
                 proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
                 cache_dir: "/tmp/cache".into(),
+                static_dir: "./static".into(),
                 default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
                 default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
                 oled_enabled: false,

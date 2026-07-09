@@ -638,3 +638,195 @@ fn test_fat_recursion_depth_cap() {
         "deep_kernel"
     );
 }
+
+// ---- Minimal ISO9660 writer (issue 038) --------------------------------
+//
+// Builds a tiny single-directory ISO9660 image that the `iso9660` reader crate
+// accepts, without any external ISO-authoring tool (none is available in the
+// dev shell). Only the fields the reader actually parses are populated: a
+// primary volume descriptor at sector 16, a terminator at sector 17, one root
+// directory extent at sector 18, and one data sector per file. Integers use the
+// both-endian encoding (little then big) the format requires.
+
+const ISO_SECTOR: usize = 2048;
+
+fn iso_both32(buf: &mut [u8], off: usize, val: u32) {
+    buf[off..off + 4].copy_from_slice(&val.to_le_bytes());
+    buf[off + 4..off + 8].copy_from_slice(&val.to_be_bytes());
+}
+
+fn iso_both16(buf: &mut [u8], off: usize, val: u16) {
+    buf[off..off + 2].copy_from_slice(&val.to_le_bytes());
+    buf[off + 2..off + 4].copy_from_slice(&val.to_be_bytes());
+}
+
+/// Write a directory record at `buf[off..]`; returns the record length
+/// (padded to an even number of bytes as the format requires).
+fn iso_dir_record(
+    buf: &mut [u8],
+    off: usize,
+    id: &[u8],
+    extent_lba: u32,
+    extent_len: u32,
+    is_dir: bool,
+) -> usize {
+    let mut len = 33 + id.len();
+    if !len.is_multiple_of(2) {
+        len += 1;
+    }
+    buf[off] = len as u8; // directory record length
+    buf[off + 1] = 0; // extended attribute record length
+    iso_both32(buf, off + 2, extent_lba);
+    iso_both32(buf, off + 10, extent_len);
+    // bytes off+18..off+25: 7-byte recording date/time — zeros are accepted.
+    buf[off + 25] = if is_dir { 0x02 } else { 0x00 }; // file flags (bit1 = dir)
+    buf[off + 26] = 0; // file unit size
+    buf[off + 27] = 0; // interleave gap size
+    iso_both16(buf, off + 28, 1); // volume sequence number
+    buf[off + 32] = id.len() as u8; // identifier length
+    buf[off + 33..off + 33 + id.len()].copy_from_slice(id);
+    len
+}
+
+/// Build a minimal ISO9660 image at `path` whose root directory contains the
+/// given `(name, data)` files. Each file's data occupies one sector, so each
+/// datum must be <= 2048 bytes (true for these tests).
+fn build_minimal_iso(path: &std::path::Path, files: &[(&str, &[u8])]) {
+    let root_lba = 18u32;
+    let first_file_lba = 19u32;
+    let total_sectors = first_file_lba as usize + files.len();
+    let mut img = vec![0u8; total_sectors * ISO_SECTOR];
+
+    // ---- Primary volume descriptor at sector 16 ----
+    let pvd = 16 * ISO_SECTOR;
+    img[pvd] = 1; // type: primary
+    img[pvd + 1..pvd + 6].copy_from_slice(b"CD001");
+    img[pvd + 6] = 1; // version
+    for b in &mut img[pvd + 8..pvd + 72] {
+        *b = b' '; // system + volume identifiers
+    }
+    iso_both32(&mut img, pvd + 80, total_sectors as u32); // volume space size
+    iso_both16(&mut img, pvd + 120, 1); // volume set size
+    iso_both16(&mut img, pvd + 124, 1); // volume sequence number
+    iso_both16(&mut img, pvd + 128, ISO_SECTOR as u16); // logical block size (must be 2048)
+    // Path-table fields left zero — the reader traverses via the root record.
+    iso_dir_record(
+        &mut img,
+        pvd + 156,
+        &[0u8],
+        root_lba,
+        ISO_SECTOR as u32,
+        true,
+    );
+    for b in &mut img[pvd + 190..pvd + 190 + 623] {
+        *b = b' '; // volume-set/publisher/... string fields
+    }
+    // Four 17-byte ASCII date/time fields must be numeric (the reader parses
+    // them with str::parse); all-zero digits parse fine.
+    let dates_off = pvd + 190 + 623;
+    for k in 0..4 {
+        let o = dates_off + k * 17;
+        img[o..o + 16].copy_from_slice(b"0000000000000000");
+        img[o + 16] = 0;
+    }
+    img[dates_off + 68] = 1; // file structure version
+
+    // ---- Volume descriptor set terminator at sector 17 ----
+    let term = 17 * ISO_SECTOR;
+    img[term] = 255;
+    img[term + 1..term + 6].copy_from_slice(b"CD001");
+    img[term + 6] = 1;
+
+    // ---- Root directory extent at sector 18 ----
+    let mut off = root_lba as usize * ISO_SECTOR;
+    off += iso_dir_record(&mut img, off, &[0u8], root_lba, ISO_SECTOR as u32, true); // "."
+    off += iso_dir_record(&mut img, off, &[1u8], root_lba, ISO_SECTOR as u32, true); // ".."
+    for (i, (name, data)) in files.iter().enumerate() {
+        let lba = first_file_lba + i as u32;
+        off += iso_dir_record(
+            &mut img,
+            off,
+            name.as_bytes(),
+            lba,
+            data.len() as u32,
+            false,
+        );
+        let d = lba as usize * ISO_SECTOR;
+        img[d..d + data.len()].copy_from_slice(data);
+    }
+    // The next byte after the last record is already zero (buffer is zeroed),
+    // which signals end-of-directory to the reader.
+
+    std::fs::write(path, &img).unwrap();
+}
+
+#[test]
+fn test_iso_auto_detect() {
+    let dir = tempdir().unwrap();
+    let iso = dir.path().join("auto.iso");
+    build_minimal_iso(
+        &iso,
+        &[
+            ("vmlinuz", b"iso_kernel_bytes"),
+            ("initrd", b"iso_initrd_bytes"),
+        ],
+    );
+    let out_k = dir.path().join("k");
+    let out_i = dir.path().join("i");
+    bootycall_extractor::iso::extract_from_iso(&iso, None, None, &out_k, &out_i, None).unwrap();
+    assert_eq!(fs::read(&out_k).unwrap(), b"iso_kernel_bytes");
+    assert_eq!(fs::read(&out_i).unwrap(), b"iso_initrd_bytes");
+}
+
+#[test]
+fn test_iso_explicit_overrides() {
+    let dir = tempdir().unwrap();
+    let iso = dir.path().join("override.iso");
+    // Names deliberately do NOT match the auto-detect heuristics, so success
+    // proves the explicit override paths were used.
+    build_minimal_iso(
+        &iso,
+        &[("alpha", b"override_kernel"), ("beta", b"override_initrd")],
+    );
+    let out_k = dir.path().join("k");
+    let out_i = dir.path().join("i");
+    // Auto-detect must fail on these names.
+    assert!(
+        bootycall_extractor::iso::extract_from_iso(&iso, None, None, &out_k, &out_i, None).is_err()
+    );
+    // Explicit overrides resolve them.
+    bootycall_extractor::iso::extract_from_iso(
+        &iso,
+        Some("alpha"),
+        Some("beta"),
+        &out_k,
+        &out_i,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read(&out_k).unwrap(), b"override_kernel");
+    assert_eq!(fs::read(&out_i).unwrap(), b"override_initrd");
+}
+
+#[test]
+fn test_iso_missing_kernel_and_initrd() {
+    let dir = tempdir().unwrap();
+    let out_k = dir.path().join("k");
+    let out_i = dir.path().join("i");
+
+    // Only an initrd -> KernelNotFound.
+    let no_kernel = dir.path().join("no_kernel.iso");
+    build_minimal_iso(&no_kernel, &[("initrd", b"only_initrd")]);
+    assert!(matches!(
+        bootycall_extractor::iso::extract_from_iso(&no_kernel, None, None, &out_k, &out_i, None),
+        Err(bootycall_extractor::error::ExtractorError::KernelNotFound)
+    ));
+
+    // Only a kernel -> InitrdNotFound.
+    let no_initrd = dir.path().join("no_initrd.iso");
+    build_minimal_iso(&no_initrd, &[("vmlinuz", b"only_kernel")]);
+    assert!(matches!(
+        bootycall_extractor::iso::extract_from_iso(&no_initrd, None, None, &out_k, &out_i, None),
+        Err(bootycall_extractor::error::ExtractorError::InitrdNotFound)
+    ));
+}

@@ -22,6 +22,17 @@ modes.
 
 Events are emitted at INFO level, so the default filter (`info`) includes them.
 
+To keep the event stream while silencing routine INFO chatter from the rest of
+the service, raise the global level and pin the event target back to INFO:
+
+```text
+RUST_LOG=warn,bootycall::events=info
+```
+
+The global `warn` quiets the per-request/subsystem INFO logs; the
+`bootycall::events=info` directive keeps every record on the event target. Both
+directives apply in text and JSON modes.
+
 ## Event catalogue
 
 Every event record has `target = "bootycall::events"` and an `event` field
@@ -31,11 +42,15 @@ naming it. In the `tracing` JSON format the event name and payload live under a
 - **`dhcp_pxe_offer`** — Proxy-DHCP answered a PXE client.
   Fields: `mac`, `arch`, `client_ip`, `bootloader`, `next_server`.
 - **`tftp_transfer_complete`** — a bootloader finished sending over TFTP.
-  Fields: `mac`, `file`, `bytes`, `blocks`, `duration_ms`.
+  Fields: `mac`, `file`, `bytes`, `blocks`, `windowsize`.
 - **`tftp_transfer_error`** — TFTP could not open the requested file.
-  Fields: `file`, `error`.
+  Fields: `file`, `error`, `kind`.
+- **`tftp_transfer_failed`** — a TFTP transfer aborted mid-flight.
+  Fields: `mac`, `file`, `reason`.
 - **`http_boot_served`** — HTTP served a host its boot/chainload script.
   Fields: `mac`, `target_mac`, `client_ip`.
+- **`http_boot_render_failed`** — the boot template failed to render (HTTP 500).
+  Fields: `mac`, `client_ip`.
 - **`http_override_assigned`** — an operator assigned a manual boot target.
   Fields: `mac`, `target`.
 - **`extract_cache_hit`** — a host's kernel/initrd cache was still valid.
@@ -46,6 +61,10 @@ naming it. In the `tracing` JSON format the event name and payload live under a
   Fields: `host`, `mac`, `image`, `duration_ms`.
 - **`extract_failed`** — extraction failed for a host.
   Fields: `host`, `mac`, `image`, `error`.
+- **`extract_sync_all_failed`** — a cache sync in which every host failed.
+  Fields: `hosts`, `failed`.
+- **`extract_sync_partial`** — a cache sync in which some hosts failed.
+  Fields: `hosts`, `succeeded`, `failed`.
 
 The high-frequency HTTP poll loop (unmapped hosts re-poll every few seconds) is
 intentionally **not** evented — first contact is already captured by
@@ -65,7 +84,7 @@ Example record (pretty-printed; on the wire it is one line):
     "file": "/var/lib/bootycall/tftpboot/boot/x64/ipxe.efi",
     "bytes": 1048576,
     "blocks": 2048,
-    "duration_ms": 87
+    "windowsize": 16
   }
 }
 ```
@@ -89,8 +108,10 @@ CREATE TABLE bootycall_events
     file         String,
     image        String,
     target       String,
+    target_mac   String,
     bytes        UInt64,
     blocks       UInt32,
+    windowsize   UInt32,
     duration_ms  UInt32,
     error        String,
     raw          String
@@ -98,6 +119,14 @@ CREATE TABLE bootycall_events
 ENGINE = MergeTree
 ORDER BY (event, timestamp);
 ```
+
+Not every event field gets its own column — that is the point of `raw`. The
+columns above are the curated, frequently-queried subset; the `flatten`
+transform below writes the **whole** `fields` object to `raw`, so any field
+without a column (`bootloader`, `next_server`, `kind`, `reason`, and the
+`extract_sync_*` counts `hosts`/`succeeded`/`failed`) is still queryable with
+`JSONExtractString(raw, 'next_server')` and friends. Add a column later only if
+a field becomes hot.
 
 ### 2. Shipping the JSON lines
 

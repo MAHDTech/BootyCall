@@ -44,6 +44,18 @@ fn request_detect_line() -> Option<gpiocdev::Request> {
         .ok()
 }
 
+/// Attempt to acquire GPIO line 46 (rackmount power-enable) as an output driven
+/// high, powering the accessory slot. Returns `None` when unavailable (optional
+/// hardware). Silent for the same log-once reason as [`request_detect_line`].
+fn request_power_enable_line() -> Option<gpiocdev::Request> {
+    gpiocdev::Request::builder()
+        .on_chip("/dev/gpiochip0")
+        .with_line(46)
+        .as_output(Value::Active)
+        .request()
+        .ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisplayMode {
     Screensaver,
@@ -242,20 +254,17 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
     }
     let mut last_detect_attempt = Instant::now();
 
-    // Drive GPIO 46 high to enable power to the rackmount accessory slot.
-    let _enable_request = gpiocdev::Request::builder()
-        .on_chip("/dev/gpiochip0")
-        .with_line(46)
-        .as_output(Value::Active)
-        .request()
-        .map_err(|e| {
-            info!(
-                "GPIO rackmount power enable not available (optional): {:?}",
-                e
-            );
-            e
-        })
-        .ok();
+    // Rackmount power-enable line (GPIO 46) is optional and coupled to the
+    // detect line: without it the accessory slot is never powered, so detect
+    // then always reads "standalone". Acquire once, retry on the same cadence
+    // as the detect line, and hold the guard for the process lifetime —
+    // dropping it reverts the output and cuts power. BUG-D: this used to be a
+    // one-shot request before the loop with no retry.
+    let mut enable_request = request_power_enable_line();
+    if enable_request.is_none() {
+        info!("GPIO rackmount power enable not available (optional); will retry periodically");
+    }
+    let mut last_enable_attempt = Instant::now();
 
     let mut fb = Framebuffer::new();
     let mut sys_metrics = SystemMetrics::new();
@@ -289,6 +298,19 @@ fn render_loop(state_store: StateStore, shutdown: Arc<AtomicBool>) -> Result<(),
             detect_request = request_detect_line();
             if detect_request.is_some() {
                 info!("GPIO rackmount detection now available");
+            }
+        }
+
+        // 0b. Retry the optional power-enable line while it is unavailable.
+        //     Only re-request while `None` so a held guard is never dropped
+        //     (which would cut power to the accessory slot). Log once on
+        //     recovery.
+        if enable_request.is_none() && should_retry_detect(now.duration_since(last_enable_attempt))
+        {
+            last_enable_attempt = now;
+            enable_request = request_power_enable_line();
+            if enable_request.is_some() {
+                info!("GPIO rackmount power enable now available");
             }
         }
 

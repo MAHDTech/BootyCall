@@ -434,3 +434,105 @@ async fn test_tftp_transfer_non_multiple_blksize_intact() {
     );
     assert_eq!(received, payload, "reassembled bytes must equal source");
 }
+
+#[tokio::test]
+async fn test_tftp_timeout_marks_host_failed() {
+    // A client that never sends the expected ACK must cause the server to give
+    // up and move the host from `Booting` to `Failed` (issue 009), instead of
+    // leaving it stuck in `Booting` forever. We burn the retry budget quickly
+    // by flooding wrong-block ACKs (each counts as a retry) so the test does
+    // not have to wait out the full per-try timeouts.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    fs::write(
+        tftp_root.join("boot/x64/ipxe.efi"),
+        b"payload-that-never-gets-acked",
+    )
+    .unwrap();
+
+    let server_config = ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "127.0.0.1:25120".to_string(),
+        tftp_root: tftp_root.clone(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        oled_enabled: false,
+        api_token: None,
+        max_artifact_bytes: None,
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Map 127.0.0.1 -> a known MAC so the transfer associates a host.
+    let mac = "00:11:22:33:44:55";
+    state_store.update_host_status(
+        mac,
+        HostStatus::Polling,
+        Some("failing-client".to_string()),
+        None,
+        Some("127.0.0.1".to_string()),
+        Some("x86_64".to_string()),
+    );
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25120", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_socket = UdpSocket::bind("127.0.0.1:25121").await.unwrap();
+    // Negotiate options with a short per-try timeout so the server enters the
+    // OACK-ack wait loop.
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25120")
+        .await
+        .unwrap();
+
+    // Receive the OACK to learn the server's transfer TID.
+    let mut buf = [0u8; 1024];
+    let (_n, server_tid) =
+        tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+    // Never send the expected ACK 0. Flood wrong-block ACKs so each counts
+    // against the retry budget and the server gives up quickly.
+    for _ in 0..8 {
+        let _ = client_socket
+            .send_to(&make_ack_packet(9999), server_tid)
+            .await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    // The server's give-up is asynchronous; poll until the host is Failed.
+    let mut failed = false;
+    for _ in 0..40 {
+        if let Some(hs) = state_store.get_host(mac)
+            && hs.status == HostStatus::Failed
+        {
+            failed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        failed,
+        "host should be marked Failed after the transfer gives up, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}

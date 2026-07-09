@@ -181,19 +181,42 @@ async fn handle_tftp_transfer(
             client_addr,
             "OACK negotiation",
         )
-        .await?
+        .await
         {
-            AckOutcome::Acked => {}
-            AckOutcome::ClientError => return Ok(()),
-            AckOutcome::GaveUp => {
+            Ok(AckOutcome::Acked) => {}
+            Ok(AckOutcome::ClientError) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "client aborted during OACK negotiation",
+                );
+                return Ok(());
+            }
+            Ok(AckOutcome::GaveUp) => {
                 error!(
                     "OACK negotiation with {} timed out after max retries",
                     client_addr
+                );
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "OACK negotiation timed out",
                 );
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "OACK negotiation timed out",
                 ));
+            }
+            Err(e) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during OACK negotiation",
+                );
+                return Err(e);
             }
         }
     }
@@ -221,19 +244,42 @@ async fn handle_tftp_transfer(
             client_addr,
             "data transfer",
         )
-        .await?
+        .await
         {
-            AckOutcome::Acked => {}
-            AckOutcome::ClientError => return Ok(()),
-            AckOutcome::GaveUp => {
+            Ok(AckOutcome::Acked) => {}
+            Ok(AckOutcome::ClientError) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "client aborted during data transfer",
+                );
+                return Ok(());
+            }
+            Ok(AckOutcome::GaveUp) => {
                 error!(
                     "TFTP transfer to {} timed out waiting for ACK block {}",
                     client_addr, block_num
+                );
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "timed out waiting for data ACK",
                 );
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "TFTP block ack timed out",
                 ));
+            }
+            Err(e) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during data transfer",
+                );
+                return Err(e);
             }
         }
 
@@ -357,6 +403,34 @@ async fn send_and_await_ack(
     }
 
     Ok(AckOutcome::GaveUp)
+}
+
+/// Mark a host's boot as failed and emit a `tftp_transfer_failed` event.
+///
+/// Called from every TFTP failure path (retry/deadline give-up, a client-sent
+/// ERROR packet, or a send/recv I/O error) so a stalled host moves out of
+/// `Booting` into `Failed` instead of being stuck there forever, and the
+/// status API / dashboard can surface the failed boot.
+fn mark_tftp_failed(
+    state_store: &StateStore,
+    mac_addr: &Option<String>,
+    file_path: &std::path::Path,
+    reason: &str,
+) {
+    if let Some(mac) = mac_addr {
+        state_store.update_host_status(mac, HostStatus::Failed, None, None, None, None);
+        state_store.log_event(
+            "ERROR",
+            Some(mac),
+            &format!("TFTP transfer failed: {}", reason),
+        );
+    }
+    bootycall_log::event!(
+        "tftp_transfer_failed",
+        mac = mac_addr.as_deref().unwrap_or(""),
+        file = %file_path.display(),
+        reason = reason,
+    );
 }
 
 /// Fill `buf` from `file`, looping over multiple `read` calls if needed.

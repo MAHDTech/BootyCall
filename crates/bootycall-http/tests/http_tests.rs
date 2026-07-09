@@ -599,3 +599,49 @@ async fn test_override_requires_api_token_when_configured() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_poll_missing_override_target_keeps_polling() {
+    // A host registered with an override target that no longer exists in config
+    // must keep polling (200 + retry script), not boot (issue 010/046).
+    let port: u16 = 26103;
+    let (_config, state_store) = spawn_test_server(port).await;
+    state_store.update_host_status(
+        "11:22:33:44:55:66",
+        HostStatus::Polling,
+        None,
+        Some("does-not-exist".to_string()),
+        None,
+        None,
+    );
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /poll/11-22-33-44-55-66 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, body) = parse_http_response(&response);
+    let body_str = String::from_utf8_lossy(&body);
+
+    assert!(
+        status.contains("200"),
+        "missing target must still 200, got: {status}"
+    );
+    assert!(
+        body_str.contains("/poll/"),
+        "expected the retry poll script, got: {body_str}"
+    );
+    assert!(
+        !body_str.contains("kernel http"),
+        "must not serve a boot script for a missing override target"
+    );
+}

@@ -706,4 +706,135 @@ mod tests {
         assert_eq!(content_type_for("script.ipxe"), "text/plain");
         assert_eq!(content_type_for("some-file"), "application/octet-stream");
     }
+
+    fn test_config(hosts: Vec<HostConfig>) -> Config {
+        use bootycall_core::config::ServerConfig;
+        Config {
+            server: ServerConfig {
+                http_bind: "0.0.0.0:8080".to_string(),
+                tftp_bind: "0.0.0.0:69".to_string(),
+                tftp_root: "/tmp".into(),
+                proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+                cache_dir: "/tmp/cache".into(),
+                default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+                default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+                oled_enabled: false,
+                api_token: None,
+                max_artifact_bytes: None,
+            },
+            hosts,
+        }
+    }
+
+    fn test_host(mac: &str, name: &str) -> HostConfig {
+        HostConfig {
+            mac: mac.to_string(),
+            name: name.to_string(),
+            image_path: "/tmp/img.iso".into(),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        }
+    }
+
+    #[test]
+    fn poll_outcome_boot_for_configured_host() {
+        let mut env = minijinja::Environment::new();
+        env.add_template("boot", BOOT_TEMPLATE).unwrap();
+        let template = env.get_template("boot").unwrap();
+        let config = test_config(vec![test_host("aa:bb:cc:dd:ee:ff", "node1")]);
+        let store = StateStore::new();
+
+        let outcome = decide_poll_outcome(
+            &template,
+            &config,
+            &store,
+            "aa:bb:cc:dd:ee:ff",
+            "localhost:8080",
+        );
+        match outcome {
+            PollOutcome::Boot { script, cache_mac } => {
+                assert!(script.starts_with("#!ipxe"));
+                assert!(script.contains("Booting node1"));
+                assert_eq!(cache_mac, "aa:bb:cc:dd:ee:ff");
+            }
+            _ => panic!("expected Boot for a directly-configured host"),
+        }
+    }
+
+    #[test]
+    fn poll_outcome_render_failure_surfaces() {
+        // A boot template that references a variable never provided by the
+        // render context errors under strict-undefined behaviour — exactly the
+        // render-failure branch poll_handler must handle (issue 010).
+        let mut env = minijinja::Environment::new();
+        env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
+        env.add_template("boot", "#!ipxe\n{{ never_provided_variable }}\n")
+            .unwrap();
+        let template = env.get_template("boot").unwrap();
+        let config = test_config(vec![test_host("aa:bb:cc:dd:ee:ff", "node1")]);
+        let store = StateStore::new();
+
+        let outcome = decide_poll_outcome(
+            &template,
+            &config,
+            &store,
+            "aa:bb:cc:dd:ee:ff",
+            "localhost:8080",
+        );
+        assert!(
+            matches!(outcome, PollOutcome::RenderFailed),
+            "a template that errors at render time must map to RenderFailed"
+        );
+    }
+
+    #[test]
+    fn poll_outcome_poll_when_override_target_missing() {
+        // Host is not configured directly but is registered with an override
+        // target that no longer exists in config — keep polling, do not boot.
+        let mut env = minijinja::Environment::new();
+        env.add_template("boot", BOOT_TEMPLATE).unwrap();
+        let template = env.get_template("boot").unwrap();
+        let config = test_config(vec![]);
+        let store = StateStore::new();
+        store.update_host_status(
+            "11:22:33:44:55:66",
+            HostStatus::Polling,
+            None,
+            Some("ghost-target".to_string()),
+            None,
+            None,
+        );
+
+        let outcome = decide_poll_outcome(
+            &template,
+            &config,
+            &store,
+            "11:22:33:44:55:66",
+            "localhost:8080",
+        );
+        assert!(
+            matches!(outcome, PollOutcome::Poll),
+            "an override pointing at a missing target must keep polling"
+        );
+    }
+
+    #[test]
+    fn poll_outcome_poll_for_unknown_host() {
+        let mut env = minijinja::Environment::new();
+        env.add_template("boot", BOOT_TEMPLATE).unwrap();
+        let template = env.get_template("boot").unwrap();
+        let config = test_config(vec![]);
+        let store = StateStore::new();
+
+        let outcome = decide_poll_outcome(
+            &template,
+            &config,
+            &store,
+            "99:99:99:99:99:99",
+            "localhost:8080",
+        );
+        assert!(matches!(outcome, PollOutcome::Poll));
+    }
 }

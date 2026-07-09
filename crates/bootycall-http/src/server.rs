@@ -96,6 +96,29 @@ goto menu
 reboot
 "#;
 
+/// Map a path's extension to a MIME type. Shared by the on-disk file server
+/// (`serve_file_from_dir`) and the embedded-asset server (`serve_asset`) so both
+/// agree on content types — embedded `.png`/`.json` assets used to fall through
+/// to `application/octet-stream`.
+fn content_type_for(path: &str) -> &'static str {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ext.to_lowercase().as_str() {
+        "ipxe" | "txt" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "json" => "application/json",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "html" => "text/html",
+        // EFI bootloader binaries ("efi") and anything unrecognised.
+        _ => "application/octet-stream",
+    }
+}
+
 async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response, StatusCode> {
     let full_path = match bootycall_core::safe_join(dir, relative_path) {
         Some(p) => p,
@@ -111,20 +134,7 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    let ext = Path::new(relative_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let content_type = match ext.to_lowercase().as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "html" => "text/html",
-        "css" => "text/css",
-        "js" => "application/javascript",
-        "json" => "application/json",
-        _ => "application/octet-stream",
-    };
+    let content_type = content_type_for(relative_path);
 
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
@@ -134,19 +144,11 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
 
 async fn serve_asset(path: &str) -> Response {
     match Asset::get(path) {
-        Some(content) => {
-            let mime_type = match path.split('.').next_back() {
-                Some("html") => "text/html",
-                Some("css") => "text/css",
-                Some("js") => "application/javascript",
-                _ => "application/octet-stream",
-            };
-            (
-                [(header::CONTENT_TYPE, mime_type)],
-                content.data.into_owned(),
-            )
-                .into_response()
-        }
+        Some(content) => (
+            [(header::CONTENT_TYPE, content_type_for(path))],
+            content.data.into_owned(),
+        )
+            .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -182,12 +184,19 @@ async fn serve_cache_file(
     serve_file_from_dir(&cache_dir, &path).await
 }
 
-// /start endpoint - chains client to MAC specific poll endpoint
-async fn start_handler(headers: HeaderMap) -> impl IntoResponse {
-    let host_hdr = headers
+/// Extract the client-facing `Host:` header (used to build the URLs the
+/// generated iPXE scripts hand back), falling back to the dev default. Kept in
+/// one place so the `localhost:8080` default lives at a single site.
+fn host_header(headers: &HeaderMap) -> &str {
+    headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:8080");
+        .unwrap_or("localhost:8080")
+}
+
+// /start endpoint - chains client to MAC specific poll endpoint
+async fn start_handler(headers: HeaderMap) -> impl IntoResponse {
+    let host_hdr = host_header(&headers);
 
     let script = format!(
         "#!ipxe\necho BootyCall starting...\nchain --autofree --replace http://{}/poll/${{mac:hexhyp}}\n",
@@ -204,10 +213,7 @@ async fn poll_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     AxumPath(mac): AxumPath<String>,
 ) -> impl IntoResponse {
-    let host_hdr = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:8080");
+    let host_hdr = host_header(&headers);
 
     let mac_str = bootycall_core::normalize_mac(&mac);
     // SEC-5: reject `%0a`-injected or otherwise malformed MACs before they
@@ -317,10 +323,7 @@ async fn poll_handler(
 
 // /ipxemenu endpoint fallback for manual choice
 async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
-    let host_hdr = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:8080");
+    let host_hdr = host_header(&headers);
 
     let hosts_list = {
         let config_guard = state.config.read();
@@ -351,10 +354,7 @@ async fn wallpaper_handler(
     headers: HeaderMap,
     Query(query): Query<WallpaperQuery>,
 ) -> impl IntoResponse {
-    let host_hdr = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:8080");
+    let host_hdr = host_header(&headers);
 
     // Determine target width & height
     let mut target_width = query.width;

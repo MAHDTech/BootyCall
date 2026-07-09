@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod framebuffer;
 pub mod metrics;
+pub mod png;
 pub mod renderer;
 
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
@@ -13,10 +14,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const PAGE_DURATION: Duration = Duration::from_secs(3);
+/// Idle time before the screensaver kicks in. Shortened under the `sim` feature
+/// so a brief off-device run still exercises the screensaver transition.
+#[cfg(not(feature = "sim"))]
 const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(feature = "sim")]
+const SCREENSAVER_TIMEOUT: Duration = Duration::from_secs(3);
 /// Screensaver brightness as a percentage of the configured brightness — the
 /// panel dims while idle to cut burn-in and power draw.
 const SCREENSAVER_BRIGHTNESS_PERCENT: u16 = 40;
+/// Inter-frame delay when running under the `sim` feature — faster than the
+/// live 1 Hz tick so a capture completes quickly.
+#[cfg(feature = "sim")]
+const SIM_TICK: Duration = Duration::from_millis(100);
 /// Cadence at which the render loop redraws. The shutdown flag is checked
 /// once per tick, so this doubles as the shutdown latency ceiling.
 const TICK: Duration = Duration::from_millis(1000);
@@ -111,6 +121,152 @@ impl OptionalGpioLine {
 
     fn get(&self) -> Option<&gpiocdev::Request> {
         self.request.as_ref()
+    }
+}
+
+/// Where the render loop sends finished frames. Production drives the panel
+/// (`/dev/fb0`); the `sim` feature dumps PNGs so the loop can run off-device.
+/// Keeping this behind a trait lets the *real* `render_loop` — page rotation,
+/// screensaver bounce, mode transitions, timing — run unchanged under sim.
+trait FrameSink {
+    /// Whether the loop should run given current hardware. Startup-only.
+    fn should_run(&self) -> bool;
+    /// One-time startup logging (panel geometry; nothing for sim).
+    fn on_start(&self) {}
+    /// Present the current backbuffer. Returns `false` to stop the loop (e.g.
+    /// the sim frame budget is exhausted); the panel sink never stops itself.
+    fn present(&mut self, fb: &mut Framebuffer) -> bool;
+    /// Inter-frame delay.
+    fn tick(&self) -> Duration;
+}
+
+/// Production sink: writes to the real framebuffer with the log-once
+/// availability latch (BUG-C).
+struct PanelSink {
+    fb_available: bool,
+}
+
+impl PanelSink {
+    fn new() -> Self {
+        Self { fb_available: true }
+    }
+}
+
+impl FrameSink for PanelSink {
+    fn should_run(&self) -> bool {
+        if oled_hardware_present(framebuffer::FB_PATH, GPIOCHIP_PATH) {
+            true
+        } else {
+            info!(
+                "OLED/LED hardware not detected (no {} or {}) — running headless",
+                framebuffer::FB_PATH,
+                GPIOCHIP_PATH
+            );
+            false
+        }
+    }
+
+    fn on_start(&self) {
+        // Validate the real panel geometry against the compiled assumption
+        // once so a mismatch (which tears or is silently rejected on write) is
+        // diagnosable from logs. Read-failure (absent/not a framebuffer) is
+        // fine — we keep the compiled defaults.
+        match framebuffer::read_fb_geometry(framebuffer::FB_SYSFS_DIR) {
+            Some(geo) => {
+                info!(
+                    "Framebuffer geometry: {}x{}x{}bpp",
+                    geo.xres, geo.yres, geo.bits_per_pixel
+                );
+                if geo.xres != WIDTH as u32
+                    || geo.yres != HEIGHT as u32
+                    || geo.bits_per_pixel != framebuffer::BITS_PER_PIXEL
+                {
+                    warn!(
+                        "Framebuffer geometry {}x{}x{} differs from the compiled {}x{}x{} (RGB565); output may tear or be rejected",
+                        geo.xres,
+                        geo.yres,
+                        geo.bits_per_pixel,
+                        WIDTH,
+                        HEIGHT,
+                        framebuffer::BITS_PER_PIXEL
+                    );
+                }
+            }
+            None => {
+                info!(
+                    "Framebuffer geometry unavailable (device absent or not a framebuffer); using compiled {}x{}x{} defaults",
+                    WIDTH,
+                    HEIGHT,
+                    framebuffer::BITS_PER_PIXEL
+                );
+            }
+        }
+    }
+
+    fn present(&mut self, fb: &mut Framebuffer) -> bool {
+        // Log-once on the framebuffer appearing/disappearing; a genuine write
+        // error on an open fd is always logged (not the "absent" case).
+        fb.ensure_open();
+        match fb.write_packed() {
+            Ok(true) => {
+                if !self.fb_available {
+                    info!("Framebuffer {} is now available", framebuffer::FB_PATH);
+                    self.fb_available = true;
+                }
+            }
+            Ok(false) => {
+                if self.fb_available {
+                    warn!(
+                        "Framebuffer {} not available (optional hardware); suppressing further messages until it returns",
+                        framebuffer::FB_PATH
+                    );
+                    self.fb_available = false;
+                }
+            }
+            Err(e) => {
+                error!("Failed to write to framebuffer: {:?}", e);
+                self.fb_available = false;
+            }
+        }
+        true
+    }
+
+    fn tick(&self) -> Duration {
+        TICK
+    }
+}
+
+/// Sim sink: dumps each frame as a grayscale PNG (`frame_NNNN.png`) into a
+/// directory and stops after `max_frames`. Reuses the dependency-free encoder
+/// in [`png`], so no windowing/compression crate is added to the build.
+#[cfg(feature = "sim")]
+struct SimSink {
+    dir: std::path::PathBuf,
+    frame: usize,
+    max_frames: usize,
+}
+
+#[cfg(feature = "sim")]
+impl FrameSink for SimSink {
+    fn should_run(&self) -> bool {
+        true
+    }
+
+    fn present(&mut self, fb: &mut Framebuffer) -> bool {
+        if self.frame >= self.max_frames {
+            return false;
+        }
+        let encoded = png::encode_gray_png(&fb.buffer, WIDTH, HEIGHT);
+        let path = self.dir.join(format!("frame_{:04}.png", self.frame));
+        if let Err(e) = std::fs::write(&path, encoded) {
+            error!("sim: failed to write {}: {:?}", path.display(), e);
+        }
+        self.frame += 1;
+        true
+    }
+
+    fn tick(&self) -> Duration {
+        SIM_TICK
     }
 }
 
@@ -296,7 +452,14 @@ pub async fn run_oled_manager(
 
     let render_thread = std::thread::Builder::new()
         .name("bootycall-oled".to_string())
-        .spawn(move || render_loop(state_for_thread, brightness, flag_for_thread))?;
+        .spawn(move || {
+            render_loop(
+                state_for_thread,
+                brightness,
+                flag_for_thread,
+                PanelSink::new(),
+            )
+        })?;
 
     // Bridge the async shutdown channel to the sync loop.
     let _ = shutdown_rx.recv().await;
@@ -311,58 +474,20 @@ pub async fn run_oled_manager(
     }
 }
 
-fn render_loop(
+fn render_loop<S: FrameSink>(
     state_store: StateStore,
     brightness: u8,
     shutdown: Arc<AtomicBool>,
+    mut sink: S,
 ) -> Result<(), anyhow::Error> {
-    // Hardware-absent (headless) short-circuit: on a host with neither the
-    // framebuffer nor the GPIO chip — a dev laptop, or a CloudKey mid-boot with
-    // nothing wired — spinning the 1 Hz loop just to no-op is pointless. Log
-    // once and return so the manager simply idles until shutdown.
-    if !oled_hardware_present(framebuffer::FB_PATH, GPIOCHIP_PATH) {
-        info!(
-            "OLED/LED hardware not detected (no {} or {}) — running headless",
-            framebuffer::FB_PATH,
-            GPIOCHIP_PATH
-        );
+    // Hardware-absent (headless) short-circuit: the panel sink returns false
+    // when neither the framebuffer nor the GPIO chip is present (a dev laptop,
+    // or a CloudKey mid-boot), so we log once and idle instead of spinning the
+    // loop to no-op. The sim sink always runs.
+    if !sink.should_run() {
         return Ok(());
     }
-
-    // Validate the real panel geometry against the compiled assumption once at
-    // startup so a mismatch (which tears or is silently rejected on write) is
-    // diagnosable from logs rather than invisible. The ioctl failing (device
-    // absent / not a framebuffer) is fine — we keep the compiled defaults.
-    match framebuffer::read_fb_geometry(framebuffer::FB_SYSFS_DIR) {
-        Some(geo) => {
-            info!(
-                "Framebuffer geometry: {}x{}x{}bpp",
-                geo.xres, geo.yres, geo.bits_per_pixel
-            );
-            if geo.xres != WIDTH as u32
-                || geo.yres != HEIGHT as u32
-                || geo.bits_per_pixel != framebuffer::BITS_PER_PIXEL
-            {
-                warn!(
-                    "Framebuffer geometry {}x{}x{} differs from the compiled {}x{}x{} (RGB565); output may tear or be rejected",
-                    geo.xres,
-                    geo.yres,
-                    geo.bits_per_pixel,
-                    WIDTH,
-                    HEIGHT,
-                    framebuffer::BITS_PER_PIXEL
-                );
-            }
-        }
-        None => {
-            info!(
-                "Framebuffer geometry unavailable (device absent or not a framebuffer); using compiled {}x{}x{} defaults",
-                WIDTH,
-                HEIGHT,
-                framebuffer::BITS_PER_PIXEL
-            );
-        }
-    }
+    sink.on_start();
 
     // Rackmount detect (GPIO 44) and power-enable (GPIO 46) lines are optional
     // and coupled: without power the accessory slot is unpowered, so detect
@@ -391,12 +516,6 @@ fn render_loop(
 
     let mut last_ssh_check = Instant::now() - Duration::from_secs(10);
     let mut active_ssh = false;
-
-    // The framebuffer is optional hardware (absent on dev laptops, or during a
-    // boot race). Track availability so its absence/recovery logs exactly once
-    // rather than every tick (BUG-C). Optimistic to start; the first write
-    // corrects it.
-    let mut fb_available = true;
 
     loop {
         let now = Instant::now();
@@ -494,31 +613,10 @@ fn render_loop(
 
         fb.rotation = if is_docked { 0 } else { 180 };
 
-        // Log-once on the framebuffer appearing/disappearing; a genuine write
-        // error on an open fd is always logged (it is not the "absent" case).
-        fb.ensure_open();
-        match fb.write_packed() {
-            Ok(true) => {
-                if !fb_available {
-                    info!("Framebuffer {} is now available", framebuffer::FB_PATH);
-                    fb_available = true;
-                }
-            }
-            Ok(false) => {
-                if fb_available {
-                    warn!(
-                        "Framebuffer {} not available (optional hardware); suppressing further messages until it returns",
-                        framebuffer::FB_PATH
-                    );
-                    fb_available = false;
-                }
-            }
-            Err(e) => {
-                error!("Failed to write to framebuffer: {:?}", e);
-                // The fd was dropped inside write_packed; a later success will
-                // log recovery once.
-                fb_available = false;
-            }
+        // Hand the frame to the sink (panel write, or PNG dump under sim). A
+        // `false` return stops the loop (sim frame budget exhausted).
+        if !sink.present(&mut fb) {
+            break;
         }
 
         if shutdown.load(Ordering::Relaxed) {
@@ -527,9 +625,26 @@ fn render_loop(
             let _ = fb.flush();
             break;
         }
-        std::thread::sleep(TICK);
+        std::thread::sleep(sink.tick());
     }
     Ok(())
+}
+
+/// Run the real render loop off-device under the `sim` feature, writing each
+/// frame to a grayscale PNG (`frame_NNNN.png`) in `out_dir` and stopping after
+/// `max_frames`. Lets page rotation, the screensaver bounce, and mode
+/// transitions be inspected on a dev host without touching `/dev/fb0` or GPIO.
+#[cfg(feature = "sim")]
+pub fn run_sim(out_dir: &str, brightness: u8, max_frames: usize) -> Result<(), anyhow::Error> {
+    std::fs::create_dir_all(out_dir)?;
+    let state_store = StateStore::new();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sink = SimSink {
+        dir: std::path::PathBuf::from(out_dir),
+        frame: 0,
+        max_frames,
+    };
+    render_loop(state_store, brightness, shutdown, sink)
 }
 
 /// Draw a Metrics page: left status icon, top label, mid separator, and the

@@ -14,5 +14,11 @@ libc = { workspace = true }
 ab_glyph = { workspace = true }
 gpiocdev = "0.8.0"
 
+[features]
+# Run the render loop off-device, dumping frames to PNG via the dependency-free
+# `png` module. Adds no new dependencies (no windowing/SDL crate), so the
+# default build and the shipped binary are unaffected.
+sim = []
+
 [lints]
 workspace = true

@@ -111,6 +111,7 @@ server:
   cache_dir: "./cache"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
+  default_bootloader_bios: "boot/x64/undionly.kpxe" # Legacy BIOS PXE (arch 0)
 
 hosts:
   - mac: "52:54:00:10:10:10"

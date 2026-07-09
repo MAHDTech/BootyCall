@@ -36,6 +36,10 @@ server:
   static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
+  # Bootloader for legacy BIOS PXE clients (Option 93 architecture 0). A BIOS
+  # option ROM cannot execute an EFI image, so it needs a real-mode NBP such as
+  # iPXE's undionly.kpxe. Optional; defaults to "boot/x64/undionly.kpxe".
+  default_bootloader_bios: "boot/x64/undionly.kpxe"
 
 hosts:
   - mac: "52:54:00:10:10:10"

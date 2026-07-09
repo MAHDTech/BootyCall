@@ -11,6 +11,13 @@ fn default_static_dir() -> PathBuf {
     PathBuf::from("./static")
 }
 
+fn default_bootloader_bios() -> String {
+    // iPXE's undionly NBP is a real-mode network bootstrap that legacy BIOS
+    // option ROMs (PXE architecture 0) can execute; an EFI image cannot run
+    // there. Keeps existing configs working when the key is omitted.
+    "boot/x64/undionly.kpxe".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub http_bind: String,
@@ -26,6 +33,11 @@ pub struct ServerConfig {
     pub static_dir: PathBuf,
     pub default_bootloader_amd64: String,
     pub default_bootloader_arm64: String,
+    /// Bootloader served to legacy BIOS PXE clients (Option 93 architecture 0),
+    /// which cannot execute the EFI `default_bootloader_amd64` image. Defaults
+    /// to `boot/x64/undionly.kpxe`; override to match your tftp layout.
+    #[serde(default = "default_bootloader_bios")]
+    pub default_bootloader_bios: String,
     #[serde(default = "default_oled_enabled")]
     pub oled_enabled: bool,
     /// Shared secret required on mutating dashboard endpoints
@@ -83,7 +95,7 @@ impl Config {
     ///
     /// Checks, with per-field error messages naming the offending value/host:
     /// - the three bind fields parse as `std::net::SocketAddr`;
-    /// - `default_bootloader_amd64` / `_arm64` are non-empty;
+    /// - `default_bootloader_amd64` / `_arm64` / `_bios` are non-empty;
     /// - each host MAC is a valid normalised MAC;
     /// - host MACs and host names are unique;
     /// - `api_token`, when set, is non-empty (an empty token would
@@ -117,6 +129,10 @@ impl Config {
             (
                 "default_bootloader_arm64",
                 &self.server.default_bootloader_arm64,
+            ),
+            (
+                "default_bootloader_bios",
+                &self.server.default_bootloader_bios,
             ),
         ] {
             if value.trim().is_empty() {
@@ -612,6 +628,7 @@ hosts:
             static_dir: "./static".into(),
             default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
             default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+            default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
             oled_enabled: true,
             api_token: None,
             max_artifact_bytes: None,

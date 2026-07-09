@@ -21,6 +21,8 @@ autofree
 autonumber
 backbuffer
 binutils
+bios
+bootpc
 blksize
 bootycall
 brettm
@@ -137,6 +139,7 @@ timonwong
 toplevel
 tuxtina
 undionly
+unconfigured
 unpositioned
 unrotated
 versionrc

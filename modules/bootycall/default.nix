@@ -32,6 +32,7 @@ let
         static_dir = "${cfg.dataDir}/static";
         default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
         default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
+        default_bootloader_bios = cfg.server.defaultBootloaderBios;
       };
       hosts = map (
         h:
@@ -196,6 +197,12 @@ in
         type = lib.types.str;
         default = "boot/arm64/ipxe.efi";
         description = "Default bootloader path for ARM64 UEFI clients.";
+      };
+
+      defaultBootloaderBios = lib.mkOption {
+        type = lib.types.str;
+        default = "boot/x64/undionly.kpxe";
+        description = "Default bootloader path for legacy BIOS PXE clients (Option 93 architecture 0), which cannot execute an EFI image.";
       };
     };
 

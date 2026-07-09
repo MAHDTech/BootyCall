@@ -47,6 +47,10 @@ Always `git add` your changes before running `nix develop`/`devenv` (or committi
 
 This runs check-yaml, cspell, action-validator, cargo-check, clippy, rustfmt, statix, deadnix, shellcheck, markdownlint, lychee, and friends, to verify code correctness and clean style.
 
+Run `nix develop --impure --command devenv test` before committing: it runs the
+full git-hook battery **and** the workspace test suite (`cargo test --workspace
+--all-features`), failing if any test fails.
+
 ### Documentation & Link Standards
 
 - **Relative Paths Only**: Always use repository-relative URLs (e.g., `[default.nix](../packages/ipxe/default.nix)`) for all documentation links referencing repository files.

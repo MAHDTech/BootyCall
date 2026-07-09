@@ -9,6 +9,11 @@ use tokio::time::Duration;
 use bootycall_core::config::Config;
 use bootycall_core::state::{HostStatus, StateStore};
 
+use crate::wire::{
+    OP_RRQ, OP_WRQ, is_error_packet, make_data_packet, make_error_packet, make_oack_packet,
+    parse_ack_packet,
+};
+
 #[derive(Debug)]
 struct RrqRequest {
     filename: String,
@@ -23,7 +28,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         return None;
     }
     let opcode = u16::from_be_bytes([packet[0], packet[1]]);
-    if opcode != 1 {
+    if opcode != OP_RRQ {
         return None;
     }
 
@@ -78,54 +83,6 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         timeout,
         tsize_requested,
     })
-}
-
-fn make_error_packet(code: u16, msg: &str) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(5 + msg.len());
-    pkt.extend_from_slice(&5u16.to_be_bytes()); // Opcode 5
-    pkt.extend_from_slice(&code.to_be_bytes()); // Error code
-    pkt.extend_from_slice(msg.as_bytes());
-    pkt.push(0);
-    pkt
-}
-
-fn make_oack_packet(options: &[(&str, String)]) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&6u16.to_be_bytes()); // Opcode 6
-    for (name, val) in options {
-        pkt.extend_from_slice(name.as_bytes());
-        pkt.push(0);
-        pkt.extend_from_slice(val.as_bytes());
-        pkt.push(0);
-    }
-    pkt
-}
-
-fn make_data_packet(block_num: u16, data: &[u8]) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(4 + data.len());
-    pkt.extend_from_slice(&3u16.to_be_bytes()); // Opcode 3
-    pkt.extend_from_slice(&block_num.to_be_bytes());
-    pkt.extend_from_slice(data);
-    pkt
-}
-
-fn parse_ack_packet(pkt: &[u8]) -> Option<u16> {
-    if pkt.len() < 4 {
-        return None;
-    }
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    if opcode != 4 {
-        return None;
-    }
-    Some(u16::from_be_bytes([pkt[2], pkt[3]]))
-}
-
-fn is_error_packet(pkt: &[u8]) -> bool {
-    if pkt.len() < 4 {
-        return false;
-    }
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    opcode == 5
 }
 
 async fn handle_tftp_transfer(
@@ -441,8 +398,8 @@ pub async fn run_tftp_server(
         if packet.len() >= 2 {
             let opcode = u16::from_be_bytes([packet[0], packet[1]]);
             match opcode {
-                1 => {} // RRQ — normal path below
-                2 => {
+                OP_RRQ => {} // RRQ — normal path below
+                OP_WRQ => {
                     // WRQ — writes are not supported; RFC 1350 error code 4.
                     let err = make_error_packet(4, "Illegal TFTP operation (WRQ not supported)");
                     let _ = socket.send_to(&err, src_addr).await;

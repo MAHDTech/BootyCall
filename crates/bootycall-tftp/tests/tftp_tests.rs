@@ -7,60 +7,22 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::net::UdpSocket;
 
+// Thin adapters over the shared `bootycall_tftp::wire` helpers, so the tests
+// no longer keep a parallel copy of the packet layout (issue 027).
 fn parse_oack(pkt: &[u8]) -> Vec<(String, String)> {
-    assert!(pkt.len() >= 2);
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    assert_eq!(opcode, 6, "Expected OACK opcode");
-
-    let mut parts = Vec::new();
-    let mut current = Vec::new();
-    for &b in &pkt[2..] {
-        if b == 0 {
-            parts.push(String::from_utf8(current).unwrap());
-            current = Vec::new();
-        } else {
-            current.push(b);
-        }
-    }
-
-    let mut options = Vec::new();
-    let mut i = 0;
-    while i + 1 < parts.len() {
-        options.push((parts[i].clone(), parts[i + 1].clone()));
-        i += 2;
-    }
-    options
+    bootycall_tftp::wire::parse_oack_packet(pkt).expect("expected an OACK packet")
 }
 
 fn parse_data(pkt: &[u8]) -> (u16, Vec<u8>) {
-    assert!(pkt.len() >= 4);
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    assert_eq!(opcode, 3, "Expected DATA opcode");
-    let block = u16::from_be_bytes([pkt[2], pkt[3]]);
-    (block, pkt[4..].to_vec())
+    bootycall_tftp::wire::parse_data_packet(pkt).expect("expected a DATA packet")
 }
 
 fn make_rrq_packet(filename: &str, options: &[(&str, &str)]) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&1u16.to_be_bytes()); // RRQ opcode
-    pkt.extend_from_slice(filename.as_bytes());
-    pkt.push(0);
-    pkt.extend_from_slice(b"octet");
-    pkt.push(0);
-    for (k, v) in options {
-        pkt.extend_from_slice(k.as_bytes());
-        pkt.push(0);
-        pkt.extend_from_slice(v.as_bytes());
-        pkt.push(0);
-    }
-    pkt
+    bootycall_tftp::wire::make_rrq_packet(filename, "octet", options)
 }
 
 fn make_ack_packet(block: u16) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&4u16.to_be_bytes()); // ACK opcode
-    pkt.extend_from_slice(&block.to_be_bytes());
-    pkt
+    bootycall_tftp::wire::make_ack_packet(block)
 }
 
 #[tokio::test]

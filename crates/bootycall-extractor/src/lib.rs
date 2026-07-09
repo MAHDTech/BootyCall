@@ -168,6 +168,23 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
 
 /// Synchronises the cache directory for a single host. `max_artifact_bytes`
 /// caps the size of each extracted kernel/initrd (`None` = unbounded).
+/// Read-only readiness check for a host's cache: are non-empty `kernel` and
+/// `initrd` artifacts present under `cache_dir/<mac>/`?
+///
+/// Used by the HTTP `/api/health` probe (issue 032) to answer "can the box
+/// serve this host's boot artifacts right now". It does NOT stat the source
+/// image or trigger extraction, so it is cheap to poll and does not report
+/// degraded merely because a source ISO is momentarily unreachable.
+pub fn host_cache_ready(mac: &str, cache_dir: &Path) -> bool {
+    let host_cache_dir = cache_dir.join(mac);
+    let nonempty = |name: &str| {
+        fs::metadata(host_cache_dir.join(name))
+            .map(|m| m.is_file() && m.len() > 0)
+            .unwrap_or(false)
+    };
+    nonempty("kernel") && nonempty("initrd")
+}
+
 pub fn sync_host_cache(
     host: &HostConfig,
     cache_dir: &Path,

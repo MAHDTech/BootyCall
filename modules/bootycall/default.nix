@@ -268,6 +268,11 @@ in
       serviceConfig = {
         ExecStart = "${bootycallPkg}/bin/bootycall-rs --config ${configFile}";
         Restart = "always";
+        # Readiness probe: `GET http://<http_bind>/api/health` returns 200 when
+        # every configured host has cached boot artifacts ready to serve and 503
+        # (JSON `{status: "degraded", hosts_not_ready: [...]}`) otherwise. An
+        # external monitor — or a future sd_notify-based `WatchdogSec` — can poll
+        # it to catch silent degradation.
         DynamicUser = true;
         StateDirectory = "bootycall";
         WorkingDirectory = cfg.dataDir;

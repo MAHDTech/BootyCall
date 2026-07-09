@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
+bootycall-extractor = { path = "../bootycall-extractor" }
 axum = { workspace = true }
 tokio = { workspace = true }
 bootycall-log = { workspace = true }

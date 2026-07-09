@@ -118,6 +118,18 @@ gate before atomically renaming a new config into place:
 nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml check-config
 ```
 
+### Health / readiness probe
+
+`GET /api/health` is an unauthenticated readiness endpoint. It returns `200`
+with `{"status":"healthy", ...}` when every configured host has non-empty cached
+`kernel` + `initrd` artifacts ready to serve, and `503` with
+`{"status":"degraded","hosts_not_ready":[...]}` otherwise. Poll it from a load
+balancer or systemd watchdog to catch silent degradation:
+
+```bash
+curl -fsS http://localhost:8080/api/health
+```
+
 ### Run Tests
 
 ```bash

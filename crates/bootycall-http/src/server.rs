@@ -542,6 +542,39 @@ async fn api_logs_handler(
     Ok(Json(logs))
 }
 
+// API endpoint: GET /api/health — unauthenticated readiness probe. Healthy when
+// every configured host has non-empty cached kernel+initrd artifacts ready to
+// serve; degraded (HTTP 503) otherwise. Suitable for a systemd watchdog / LB.
+async fn api_health_handler(State(state): State<ServerState>) -> impl IntoResponse {
+    let (cache_dir, hosts) = {
+        let config_guard = state.config.read();
+        (
+            config_guard.server.cache_dir.clone(),
+            config_guard.hosts.clone(),
+        )
+    };
+
+    let not_ready: Vec<String> = hosts
+        .iter()
+        .filter(|h| !bootycall_extractor::host_cache_ready(&h.mac, &cache_dir))
+        .map(|h| h.name.clone())
+        .collect();
+
+    let healthy = not_ready.is_empty();
+    let status_code = if healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = serde_json::json!({
+        "status": if healthy { "healthy" } else { "degraded" },
+        "hosts_total": hosts.len(),
+        "hosts_not_ready": not_ready,
+    });
+
+    (status_code, Json(body))
+}
+
 /// Enforce the optional `api_token`: when one is configured, require a matching
 /// `X-API-Token` header (constant-time), else `Err(UNAUTHORIZED)`. When no token
 /// is configured the endpoint stays open (backwards-compatible). Shared by the
@@ -674,6 +707,7 @@ pub async fn run_http_server(
         .route("/dynamic/wallpaper.ipxe", get(wallpaper_handler))
         .route("/api/status", get(api_status_handler))
         .route("/api/logs", get(api_logs_handler))
+        .route("/api/health", get(api_health_handler))
         .route("/api/override", post(api_override_handler))
         .with_state(server_state);
 

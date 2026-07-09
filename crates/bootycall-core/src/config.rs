@@ -568,4 +568,125 @@ hosts:
         let gamma = config.find_host("11:22:33:44:55:03").unwrap();
         assert_eq!(gamma.name, "host-gamma");
     }
+
+    // --- Config::validate coverage (issue 043) ---------------------------
+
+    fn base_server() -> ServerConfig {
+        ServerConfig {
+            http_bind: "0.0.0.0:8080".to_string(),
+            tftp_bind: "0.0.0.0:69".to_string(),
+            tftp_root: PathBuf::from("./tftpboot"),
+            proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+            cache_dir: PathBuf::from("./cache"),
+            default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+            default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+            oled_enabled: true,
+            api_token: None,
+        }
+    }
+
+    fn host(mac: &str, name: &str) -> HostConfig {
+        HostConfig {
+            mac: mac.to_string(),
+            name: name.to_string(),
+            image_path: PathBuf::from("/tmp/x.iso"),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        }
+    }
+
+    fn valid_config() -> Config {
+        Config {
+            server: base_server(),
+            hosts: vec![
+                host("aa:bb:cc:dd:ee:01", "host-a"),
+                host("aa:bb:cc:dd:ee:02", "host-b"),
+            ],
+        }
+    }
+
+    fn assert_invalid(cfg: &Config, needle: &str) {
+        match cfg.validate() {
+            Err(CoreError::InvalidConfig(msg)) => assert!(
+                msg.contains(needle),
+                "error {msg:?} did not mention {needle:?}"
+            ),
+            other => panic!("expected InvalidConfig mentioning {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_good_config() {
+        assert!(valid_config().validate().is_ok());
+        // A None api_token and zero hosts are both fine.
+        let mut cfg = valid_config();
+        cfg.hosts.clear();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bad_bind_address() {
+        let mut cfg = valid_config();
+        cfg.server.http_bind = "localhost".to_string();
+        assert_invalid(&cfg, "http_bind");
+
+        let mut cfg = valid_config();
+        cfg.server.tftp_bind = "0.0.0.0:69 ".to_string(); // trailing space
+        assert_invalid(&cfg, "tftp_bind");
+
+        let mut cfg = valid_config();
+        cfg.server.proxy_dhcp_bind = "not-an-addr".to_string();
+        assert_invalid(&cfg, "proxy_dhcp_bind");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_mac() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].mac = "zz:bb:cc:dd:ee:ff".to_string();
+        assert_invalid(&cfg, "invalid MAC");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_mac() {
+        let mut cfg = valid_config();
+        cfg.hosts[1].mac = cfg.hosts[0].mac.clone();
+        assert_invalid(&cfg, "duplicate host MAC");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_name() {
+        let mut cfg = valid_config();
+        cfg.hosts[1].name = cfg.hosts[0].name.clone();
+        assert_invalid(&cfg, "duplicate host name");
+    }
+
+    #[test]
+    fn validate_rejects_empty_bootloader() {
+        let mut cfg = valid_config();
+        cfg.server.default_bootloader_amd64 = String::new();
+        assert_invalid(&cfg, "default_bootloader_amd64");
+
+        let mut cfg = valid_config();
+        cfg.server.default_bootloader_arm64 = "   ".to_string();
+        assert_invalid(&cfg, "default_bootloader_arm64");
+    }
+
+    #[test]
+    fn validate_rejects_empty_api_token() {
+        let mut cfg = valid_config();
+        cfg.server.api_token = Some(String::new());
+        assert_invalid(&cfg, "api_token");
+        // A real secret is accepted.
+        cfg.server.api_token = Some("s3cr3t".to_string());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_host_name() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = String::new();
+        assert_invalid(&cfg, "empty name");
+    }
 }

@@ -19,6 +19,7 @@ async fn test_dhcp_server_redirection() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     };
 
     let host = HostConfig {
@@ -131,6 +132,7 @@ async fn test_dhcp_server_ignores_non_pxe_client() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     };
     let config = Config {
         server: server_config,
@@ -190,6 +192,7 @@ async fn test_dhcp_server_handles_arm64_arch() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     };
     let config = Config {
         server: server_config,

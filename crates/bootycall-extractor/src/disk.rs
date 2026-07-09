@@ -107,6 +107,7 @@ pub fn extract_from_disk(
     initrd_override: Option<&str>,
     out_kernel_path: &Path,
     out_initrd_path: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<(), ExtractorError> {
     let disk = GptConfig::new()
         .writable(false)
@@ -147,8 +148,7 @@ pub fn extract_from_disk(
             let kernel_extracted = match kernel_override {
                 Some(kp) => {
                     if let Ok(mut fat_file) = root_dir.open_file(kp) {
-                        let mut out_file = File::create(out_kernel_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
+                        crate::copy_capped(&mut fat_file, out_kernel_path, max_bytes)?;
                         true
                     } else {
                         false
@@ -160,8 +160,7 @@ pub fn extract_from_disk(
                     // to the next partition.
                     match find_file_recursive_fat(&root_dir, &|name| crate::is_kernel_name(name))? {
                         Some(mut fat_file) => {
-                            let mut out_file = File::create(out_kernel_path)?;
-                            io::copy(&mut fat_file, &mut out_file)?;
+                            crate::copy_capped(&mut fat_file, out_kernel_path, max_bytes)?;
                             true
                         }
                         None => false,
@@ -180,8 +179,7 @@ pub fn extract_from_disk(
             let initrd_extracted = match initrd_override {
                 Some(ip) => {
                     if let Ok(mut fat_file) = root_dir.open_file(ip) {
-                        let mut out_file = File::create(out_initrd_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
+                        crate::copy_capped(&mut fat_file, out_initrd_path, max_bytes)?;
                         true
                     } else {
                         false
@@ -192,8 +190,7 @@ pub fn extract_from_disk(
                     // no initrd on this (already kernel-bearing) partition.
                     match find_file_recursive_fat(&root_dir, &|name| crate::is_initrd_name(name))? {
                         Some(mut fat_file) => {
-                            let mut out_file = File::create(out_initrd_path)?;
-                            io::copy(&mut fat_file, &mut out_file)?;
+                            crate::copy_capped(&mut fat_file, out_initrd_path, max_bytes)?;
                             true
                         }
                         None => false,

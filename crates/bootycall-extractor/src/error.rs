@@ -20,4 +20,7 @@ pub enum ExtractorError {
 
     #[error("Initrd file not found inside the image")]
     InitrdNotFound,
+
+    #[error("Extracted artifact exceeds the configured max_artifact_bytes limit of {limit} bytes")]
+    ArtifactTooLarge { limit: u64 },
 }

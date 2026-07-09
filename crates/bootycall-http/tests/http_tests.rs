@@ -72,6 +72,7 @@ async fn test_http_server_endpoints() {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     };
 
     let host = HostConfig {
@@ -236,6 +237,7 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     };
 
     let host = HostConfig {

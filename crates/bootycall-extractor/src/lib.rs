@@ -7,7 +7,42 @@ use bootycall_core::config::{Config, HostConfig};
 use bootycall_log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Copy `reader` into a freshly created file at `out_path`, refusing to write
+/// more than `max_bytes` when a cap is configured. Returns
+/// [`ExtractorError::ArtifactTooLarge`] once the source exceeds the cap — this
+/// is what keeps a hostile or genuinely huge initrd from filling the
+/// appliance's small eMMC (issue 006). `None` means unbounded.
+pub(crate) fn copy_capped<R: Read>(
+    reader: &mut R,
+    out_path: &Path,
+    max_bytes: Option<u64>,
+) -> Result<(), ExtractorError> {
+    let mut out = fs::File::create(out_path)?;
+    match max_bytes {
+        None => {
+            std::io::copy(reader, &mut out)?;
+        }
+        Some(limit) => {
+            let mut written: u64 = 0;
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                written += n as u64;
+                if written > limit {
+                    return Err(ExtractorError::ArtifactTooLarge { limit });
+                }
+                out.write_all(&buf[..n])?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Persisted alongside the extracted kernel/initrd so we can decide whether
 /// re-extraction is needed. The set of fields is the full cache key: any
@@ -98,9 +133,10 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
         fs::create_dir_all(cache_dir)?;
     }
 
+    let max_artifact_bytes = config.server.max_artifact_bytes;
     let mut summary = SyncSummary::default();
     for host in &config.hosts {
-        match sync_host_cache(host, cache_dir) {
+        match sync_host_cache(host, cache_dir, max_artifact_bytes) {
             Ok(()) => summary.succeeded += 1,
             Err(e) => {
                 error!(
@@ -130,8 +166,13 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
     Ok(summary)
 }
 
-/// Synchronises the cache directory for a single host.
-pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), ExtractorError> {
+/// Synchronises the cache directory for a single host. `max_artifact_bytes`
+/// caps the size of each extracted kernel/initrd (`None` = unbounded).
+pub fn sync_host_cache(
+    host: &HostConfig,
+    cache_dir: &Path,
+    max_artifact_bytes: Option<u64>,
+) -> Result<(), ExtractorError> {
     let host_cache_dir = cache_dir.join(&host.mac);
     let metadata_path = host_cache_dir.join("metadata.json");
     let kernel_path = host_cache_dir.join("kernel");
@@ -216,6 +257,7 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
         host.initrd_path.as_deref(),
         &kernel_path,
         &initrd_path,
+        max_artifact_bytes,
     );
 
     // If ISO failed, try as GPT/FAT image
@@ -233,6 +275,7 @@ pub fn sync_host_cache(host: &HostConfig, cache_dir: &Path) -> Result<(), Extrac
                 host.initrd_path.as_deref(),
                 &kernel_path,
                 &initrd_path,
+                max_artifact_bytes,
             )
         }
     };

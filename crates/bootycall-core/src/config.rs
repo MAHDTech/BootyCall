@@ -25,6 +25,12 @@ pub struct ServerConfig {
     /// the box beyond localhost.
     #[serde(default)]
     pub api_token: Option<String>,
+    /// Upper bound, in bytes, on a single extracted kernel/initrd artifact.
+    /// `None` (the default) means unbounded. A crafted or genuinely huge
+    /// initramfs can otherwise fill the appliance's small eMMC and take down
+    /// every service (single binary) — see issue 006.
+    #[serde(default)]
+    pub max_artifact_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,6 +120,15 @@ impl Config {
         {
             return Err(invalid(
                 "server.api_token is set but empty; unset it to disable auth or provide a real secret"
+                    .to_string(),
+            ));
+        }
+
+        // A zero artifact ceiling would reject every extraction — almost
+        // certainly a mistake; unset it for "unbounded".
+        if self.server.max_artifact_bytes == Some(0) {
+            return Err(invalid(
+                "server.max_artifact_bytes is 0 (rejects all artifacts); unset it for unbounded"
                     .to_string(),
             ));
         }
@@ -582,6 +597,7 @@ hosts:
             default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
             oled_enabled: true,
             api_token: None,
+            max_artifact_bytes: None,
         }
     }
 

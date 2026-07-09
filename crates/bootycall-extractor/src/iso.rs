@@ -1,7 +1,6 @@
 use crate::error::ExtractorError;
 use iso9660::{DirectoryEntry, ISO9660, ISO9660Reader, ISODirectory, ISOFile};
 use std::fs::File;
-use std::io;
 use std::path::Path;
 
 pub fn extract_from_iso(
@@ -10,6 +9,7 @@ pub fn extract_from_iso(
     initrd_override: Option<&str>,
     out_kernel_path: &Path,
     out_initrd_path: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<(), ExtractorError> {
     let file = File::open(iso_path)?;
     let iso = ISO9660::new(file).map_err(|e| ExtractorError::Iso(format!("{:?}", e)))?;
@@ -46,19 +46,11 @@ pub fn extract_from_iso(
             .ok_or(ExtractorError::InitrdNotFound)?
     };
 
-    // 3. Extract Kernel
-    {
-        let mut reader = kernel_file.read();
-        let mut out_file = File::create(out_kernel_path)?;
-        io::copy(&mut reader, &mut out_file)?;
-    }
+    // 3. Extract Kernel (size-capped)
+    crate::copy_capped(&mut kernel_file.read(), out_kernel_path, max_bytes)?;
 
-    // 4. Extract Initrd
-    {
-        let mut reader = initrd_file.read();
-        let mut out_file = File::create(out_initrd_path)?;
-        io::copy(&mut reader, &mut out_file)?;
-    }
+    // 4. Extract Initrd (size-capped)
+    crate::copy_capped(&mut initrd_file.read(), out_initrd_path, max_bytes)?;
 
     Ok(())
 }

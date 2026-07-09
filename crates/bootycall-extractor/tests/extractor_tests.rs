@@ -107,7 +107,7 @@ fn test_gpt_fat_extraction_and_caching() {
     };
 
     // First sync: extracts because cache is missing
-    bootycall_extractor::sync_host_cache(&host, &cache_dir).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
 
     let host_cache_dir = cache_dir.join(&host.mac);
     let cached_kernel = host_cache_dir.join("kernel");
@@ -129,7 +129,7 @@ fn test_gpt_fat_extraction_and_caching() {
 
     // Second sync: should skip extraction (cached)
     // We can check if it returns Ok
-    bootycall_extractor::sync_host_cache(&host, &cache_dir).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
 
     // Check that files are still there
     assert_eq!(
@@ -154,7 +154,7 @@ fn test_sync_host_cache_missing_image() {
         cmdline: None,
     };
 
-    let result = bootycall_extractor::sync_host_cache(&host, &cache_dir);
+    let result = bootycall_extractor::sync_host_cache(&host, &cache_dir, None);
     assert!(result.is_err(), "Expected an error for a missing image");
 
     let err = result.unwrap_err();
@@ -268,7 +268,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
     };
 
     // First sync: default (auto-detect) — should pick up "vmlinuz"/"initrd.img".
-    bootycall_extractor::sync_host_cache(&host, &cache_dir).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
 
     let host_cache_dir = cache_dir.join(&host.mac);
     let cached_kernel = host_cache_dir.join("kernel");
@@ -287,7 +287,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
         ..host.clone()
     };
 
-    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir).unwrap();
+    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None).unwrap();
 
     assert_eq!(
         fs::read_to_string(&cached_kernel).unwrap(),
@@ -306,7 +306,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
     // override and matches on the next run.
     let before = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir).unwrap();
+    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None).unwrap();
     let after = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     assert_eq!(before, after, "second override sync must not re-extract");
 }
@@ -322,6 +322,7 @@ fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
         oled_enabled: false,
         api_token: None,
+        max_artifact_bytes: None,
     }
 }
 
@@ -390,6 +391,52 @@ fn test_sync_all_hosts_cache_all_failed() {
     assert_eq!(summary.succeeded, 0);
     assert!(summary.all_failed());
     assert!(!summary.partial_failure());
+}
+
+#[test]
+fn test_sync_host_cache_size_ceiling() {
+    // The synthetic image's kernel is 14 bytes; a 5-byte ceiling must reject
+    // it with ArtifactTooLarge and leave no partial cache behind (issue 006).
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("big.img");
+    let cache_dir = dir.path().join("cache");
+    build_dual_kernel_gpt_image(&disk_path);
+
+    let host = HostConfig {
+        mac: "00:11:22:33:44:aa".to_string(),
+        name: "oversized".to_string(),
+        image_path: disk_path,
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+
+    let err = bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(5)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("max_artifact_bytes"),
+        "expected an artifact-too-large error, got: {msg}"
+    );
+
+    // No partial cache artifacts must be left behind.
+    let host_cache_dir = cache_dir.join(&host.mac);
+    assert!(
+        !host_cache_dir.join("kernel").exists(),
+        "partial kernel left behind"
+    );
+    assert!(
+        !host_cache_dir.join("initrd").exists(),
+        "partial initrd left behind"
+    );
+    assert!(
+        !host_cache_dir.join("metadata.json").exists(),
+        "metadata left behind"
+    );
+
+    // A generous ceiling extracts the same host fine.
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(1024)).unwrap();
+    assert!(host_cache_dir.join("kernel").exists());
 }
 
 #[test]

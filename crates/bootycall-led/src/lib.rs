@@ -6,6 +6,12 @@ use tokio::time::{Duration, sleep};
 const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
 const LED_WHITE_PATH: &str = "/sys/class/leds/white/brightness";
 
+/// Number of on/off cycles the `led-test --blinking` run performs.
+const LED_TEST_BLINK_CYCLES: usize = 10;
+/// Per-phase blink duration for `led-test --blinking` (on for this long, then
+/// off for this long).
+const LED_TEST_BLINK_MS: u64 = 500;
+
 fn set_led(path: &str, value: u8) -> std::io::Result<()> {
     let mut file = OpenOptions::new().write(true).open(path).map_err(|e| {
         bootycall_log::error!("Failed to open LED path {}: {:?}", path, e);
@@ -140,53 +146,46 @@ pub async fn run_led_manager(
 
 /// Dynamic LED testing for testing color and blinking states.
 pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
-    match color {
-        "blue" => {
-            if blinking {
-                info!("Testing Blinking Blue LED for 10 seconds...");
-                for _ in 0..10 {
-                    let _ = set_led(LED_BLUE_PATH, 255);
-                    let _ = set_led(LED_WHITE_PATH, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = set_led(LED_BLUE_PATH, 0);
-                    let _ = set_led(LED_WHITE_PATH, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            } else {
-                info!("Testing Solid Blue LED");
-                let _ = set_led(LED_BLUE_PATH, 255);
-                let _ = set_led(LED_WHITE_PATH, 0);
-            }
-        }
-        "white" => {
-            if blinking {
-                info!("Testing Blinking White LED for 10 seconds...");
-                for _ in 0..10 {
-                    let _ = set_led(LED_WHITE_PATH, 255);
-                    let _ = set_led(LED_BLUE_PATH, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = set_led(LED_WHITE_PATH, 0);
-                    let _ = set_led(LED_BLUE_PATH, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            } else {
-                info!("Testing Solid White LED");
-                let _ = set_led(LED_WHITE_PATH, 255);
-                let _ = set_led(LED_BLUE_PATH, 0);
-            }
-        }
-        "off" => {
-            info!("Testing LEDs Off");
-            let _ = set_led(LED_BLUE_PATH, 0);
-            let _ = set_led(LED_WHITE_PATH, 0);
-        }
+    // Resolve which sysfs path is driven "on" (255) for the requested colour;
+    // the paired path is always driven to 0. `off` drives both to 0 (no "on"
+    // path). This collapses the previously duplicated blue/white arms — which
+    // differed only in which path got 255 — into one solid/blink code path.
+    let (on_path, off_path): (Option<&str>, &str) = match color {
+        "blue" => (Some(LED_BLUE_PATH), LED_WHITE_PATH),
+        "white" => (Some(LED_WHITE_PATH), LED_BLUE_PATH),
+        "off" => (None, LED_WHITE_PATH),
         _ => {
             return Err(anyhow::anyhow!(
                 "Unknown LED color: {}. Valid colors are blue, white, off.",
                 color
             ));
         }
+    };
+
+    match on_path {
+        None => {
+            info!("Testing LEDs Off");
+            let _ = set_led(LED_BLUE_PATH, 0);
+            let _ = set_led(LED_WHITE_PATH, 0);
+        }
+        Some(on) if blinking => {
+            info!("Testing Blinking {} LED for 10 seconds...", color);
+            for _ in 0..LED_TEST_BLINK_CYCLES {
+                let _ = set_led(on, 255);
+                let _ = set_led(off_path, 0);
+                std::thread::sleep(std::time::Duration::from_millis(LED_TEST_BLINK_MS));
+                let _ = set_led(on, 0);
+                let _ = set_led(off_path, 0);
+                std::thread::sleep(std::time::Duration::from_millis(LED_TEST_BLINK_MS));
+            }
+        }
+        Some(on) => {
+            info!("Testing Solid {} LED", color);
+            let _ = set_led(on, 255);
+            let _ = set_led(off_path, 0);
+        }
     }
+
     info!("LED test complete");
     Ok(())
 }

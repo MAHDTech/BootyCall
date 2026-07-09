@@ -124,6 +124,7 @@ starwars
 statix
 stdenv
 syncthing
+sysfs
 sysinfo
 syslinux
 tamasfe

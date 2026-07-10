@@ -34,22 +34,35 @@ runs:
     - id: report_status
       name: Report Status
       shell: bash
+      # Inputs go through env vars (not inline ${{ }} in the script) to avoid
+      # shell injection.
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        RESULT_INPUT: ${{ inputs.result }}
+        SUCCESS_MESSAGE: ${{ inputs.success-message }}
+        FAILURE_MESSAGE: ${{ inputs.failure-message }}
+        WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        REPOSITORY: ${{ inputs.repository }}
+        SHA: ${{ inputs.sha }}
+        RUN_URL: ${{ inputs.run-url }}
       run: |
-        if [[ "${{ inputs.result }}" == "success" ]]; then
-          RESULT="success"
-          DESCRIPTION="${{ inputs.success-message }}"
+        if [[ "${RESULT_INPUT}" == "success" ]]; then
+          STATE="success"
+          DESCRIPTION="${SUCCESS_MESSAGE}"
         else
-          RESULT="failure"
-          DESCRIPTION="${{ inputs.failure-message }}"
+          STATE="failure"
+          DESCRIPTION="${FAILURE_MESSAGE}"
         fi
-        gh api \
-          repos/${{ inputs.repository }}/statuses/${{ inputs.sha }} \
-          -f state=${RESULT} \
-          -f context="${{ inputs.workflow-name }}" \
+        # A PR from a fork gets a read-only GITHUB_TOKEN regardless of the
+        # workflow's `statuses: write`, so this write 403s and used to fail the
+        # job for every external contributor. The commit-status API is largely
+        # redundant with the checks UI, so treat a write failure as a warning,
+        # not a job failure.
+        if ! gh api \
+          "repos/${REPOSITORY}/statuses/${SHA}" \
+          -f state="${STATE}" \
+          -f context="${WORKFLOW_NAME}" \
           -f description="${DESCRIPTION}" \
-          -f target_url="${{ inputs.run-url }}" || {
-            echo "Failed to report CI status!"
-            exit 1
-          }
+          -f target_url="${RUN_URL}"; then
+          echo "::warning::Could not report CI commit status (expected on fork PRs with a read-only token)"
+        fi

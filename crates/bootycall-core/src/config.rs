@@ -3,6 +3,25 @@ use bootycall_log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+fn default_oled_enabled() -> bool {
+    true
+}
+
+fn default_oled_brightness() -> u8 {
+    255
+}
+
+fn default_static_dir() -> PathBuf {
+    PathBuf::from("./static")
+}
+
+fn default_bootloader_bios() -> String {
+    // iPXE's undionly NBP is a real-mode network bootstrap that legacy BIOS
+    // option ROMs (PXE architecture 0) can execute; an EFI image cannot run
+    // there. Keeps existing configs working when the key is omitted.
+    "boot/x64/undionly.kpxe".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub http_bind: String,
@@ -10,10 +29,38 @@ pub struct ServerConfig {
     pub tftp_root: PathBuf,
     pub proxy_dhcp_bind: String,
     pub cache_dir: PathBuf,
+    /// Root directory for static HTTP assets (wallpapers, etc.). Resolved
+    /// independently of the process CWD; defaults to `./static` so existing
+    /// configs keep working. All static/wallpaper file access is routed through
+    /// `safe_join` against this root.
+    #[serde(default = "default_static_dir")]
+    pub static_dir: PathBuf,
     pub default_bootloader_amd64: String,
     pub default_bootloader_arm64: String,
-    #[serde(default)]
+    /// Bootloader served to legacy BIOS PXE clients (Option 93 architecture 0),
+    /// which cannot execute the EFI `default_bootloader_amd64` image. Defaults
+    /// to `boot/x64/undionly.kpxe`; override to match your tftp layout.
+    #[serde(default = "default_bootloader_bios")]
+    pub default_bootloader_bios: String,
+    #[serde(default = "default_oled_enabled")]
     pub oled_enabled: bool,
+    /// OLED panel brightness (0–255, default full). Scales the grayscale→RGB565
+    /// LUT; lower values dim the display (and reduce burn-in/power).
+    #[serde(default = "default_oled_brightness")]
+    pub oled_brightness: u8,
+    /// Shared secret required on mutating dashboard endpoints
+    /// (POST /api/override). When absent, mutating endpoints run
+    /// unauthenticated — same behaviour as before P1-7. Populate this
+    /// (or bind the dashboard behind a reverse proxy) before exposing
+    /// the box beyond localhost.
+    #[serde(default)]
+    pub api_token: Option<String>,
+    /// Upper bound, in bytes, on a single extracted kernel/initrd artifact.
+    /// `None` (the default) means unbounded. A crafted or genuinely huge
+    /// initramfs can otherwise fill the appliance's small eMMC and take down
+    /// every service (single binary) — see issue 006.
+    #[serde(default)]
+    pub max_artifact_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,14 +87,118 @@ impl Config {
 
         // Normalize MAC addresses to lowercase
         for host in &mut config.hosts {
-            host.mac = host.mac.to_ascii_lowercase().replace('-', ":");
+            host.mac = crate::mac::normalize_mac(&host.mac);
         }
+
+        // IMP-A: reject bad configs at load rather than letting a typo surface
+        // late as an obscure bind failure or a host that silently never
+        // matches. The watcher reload path also goes through `load`, so a bad
+        // hot-reload is rejected and the previous good config keeps serving.
+        config.validate()?;
 
         Ok(config)
     }
 
+    /// Validate a freshly parsed (and MAC-normalised) config.
+    ///
+    /// Checks, with per-field error messages naming the offending value/host:
+    /// - the three bind fields parse as `std::net::SocketAddr`;
+    /// - `default_bootloader_amd64` / `_arm64` / `_bios` are non-empty;
+    /// - each host MAC is a valid normalised MAC;
+    /// - host MACs and host names are unique;
+    /// - `api_token`, when set, is non-empty (an empty token would
+    ///   authenticate a caller sending an empty `X-API-Token` header).
+    pub fn validate(&self) -> Result<(), CoreError> {
+        use std::collections::HashSet;
+        use std::net::SocketAddr;
+
+        let invalid = |msg: String| CoreError::InvalidConfig(msg);
+
+        // Bind addresses must parse as a concrete host:port socket address.
+        for (field, value) in [
+            ("http_bind", &self.server.http_bind),
+            ("tftp_bind", &self.server.tftp_bind),
+            ("proxy_dhcp_bind", &self.server.proxy_dhcp_bind),
+        ] {
+            if value.parse::<SocketAddr>().is_err() {
+                return Err(invalid(format!(
+                    "server.{field} = {value:?} is not a valid socket address (expected e.g. \"0.0.0.0:69\")"
+                )));
+            }
+        }
+
+        // Default bootloaders must be non-empty (a blank BootfileName would be
+        // handed to PXE clients).
+        for (field, value) in [
+            (
+                "default_bootloader_amd64",
+                &self.server.default_bootloader_amd64,
+            ),
+            (
+                "default_bootloader_arm64",
+                &self.server.default_bootloader_arm64,
+            ),
+            (
+                "default_bootloader_bios",
+                &self.server.default_bootloader_bios,
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(invalid(format!("server.{field} must not be empty")));
+            }
+        }
+
+        // An empty api_token would authenticate an empty header — reject it.
+        if let Some(token) = &self.server.api_token
+            && token.is_empty()
+        {
+            return Err(invalid(
+                "server.api_token is set but empty; unset it to disable auth or provide a real secret"
+                    .to_string(),
+            ));
+        }
+
+        // A zero artifact ceiling would reject every extraction — almost
+        // certainly a mistake; unset it for "unbounded".
+        if self.server.max_artifact_bytes == Some(0) {
+            return Err(invalid(
+                "server.max_artifact_bytes is 0 (rejects all artifacts); unset it for unbounded"
+                    .to_string(),
+            ));
+        }
+
+        // Per-host: valid MAC syntax, and no duplicate MAC or name.
+        let mut seen_macs: HashSet<&str> = HashSet::new();
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for host in &self.hosts {
+            if !crate::mac::is_valid_mac(&host.mac) {
+                return Err(invalid(format!(
+                    "host {:?} has an invalid MAC address {:?} (expected aa:bb:cc:dd:ee:ff)",
+                    host.name, host.mac
+                )));
+            }
+            if !seen_macs.insert(host.mac.as_str()) {
+                return Err(invalid(format!(
+                    "duplicate host MAC {:?} (each host MAC must be unique)",
+                    host.mac
+                )));
+            }
+            if host.name.trim().is_empty() {
+                return Err(invalid("a host has an empty name".to_string()));
+            }
+            if !seen_names.insert(host.name.as_str()) {
+                return Err(invalid(format!(
+                    "duplicate host name {:?} (each host name must be unique)",
+                    host.name
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn find_host(&self, mac: &str) -> Option<&HostConfig> {
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let normalized = crate::mac::normalize_mac(mac);
         self.hosts.iter().find(|h| h.mac == normalized)
     }
 }
@@ -59,8 +210,8 @@ pub fn watch_config<F>(
 where
     F: FnMut(Config) + Send + 'static,
 {
-    use notify::{Config as WatcherConfig, EventKind, RecommendedWatcher, Watcher};
-    use std::sync::mpsc::channel;
+    use notify::{Config as WatcherConfig, RecommendedWatcher, Watcher};
+    use std::sync::mpsc::{RecvTimeoutError, channel};
 
     let (tx, rx) = channel();
 
@@ -73,29 +224,116 @@ where
         WatcherConfig::default(),
     )?;
 
-    watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
+    // Watch the *parent directory*, not the file itself. Editors that save
+    // atomically (`vim`, `sed -i`, Ansible) rename a new file over the
+    // original; a watch bound to the old inode goes silent after the first
+    // save. Filtering by the target file name gives us the same signal
+    // without depending on the inode.
+    let watch_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let watch_name = path.file_name().map(std::ffi::OsString::from);
 
-    // Spawn block for reading channel events
+    watcher.watch(&watch_dir, notify::RecursiveMode::NonRecursive)?;
+
     std::thread::spawn(move || {
-        for res in rx {
-            match res {
-                Ok(event) => {
-                    if let EventKind::Modify(_) = event.kind {
-                        info!("Configuration file modified, reloading...");
-                        // Sleep briefly to allow filesystem writes to complete cleanly
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        match Config::load(&path) {
-                            Ok(config) => on_reload(config),
-                            Err(e) => warn!("Failed to reload configuration: {:?}", e),
+        let debounce = std::time::Duration::from_millis(200);
+
+        loop {
+            // Block until at least one event arrives; if the channel closes,
+            // the watcher is gone and we can exit the reload thread.
+            let first = match rx.recv() {
+                Ok(res) => res,
+                Err(_) => return,
+            };
+
+            let mut dirty = event_targets_config(&first, watch_name.as_deref());
+
+            // Drain follow-up events (typical for an atomic
+            // save: remove + create + modify all fire within a few ms).
+            loop {
+                match rx.recv_timeout(debounce) {
+                    Ok(res) => {
+                        if event_targets_config(&res, watch_name.as_deref()) {
+                            dirty = true;
                         }
                     }
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
                 }
-                Err(e) => warn!("Config watcher channel error: {:?}", e),
+            }
+
+            if !dirty {
+                continue;
+            }
+
+            info!("Configuration file changed, reloading...");
+            let load_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match Config::load(&path) {
+                    Ok(config) => Some(config),
+                    Err(e) => {
+                        warn!("Failed to reload configuration: {:?}", e);
+                        None
+                    }
+                }
+            }));
+            let config = match load_result {
+                Ok(Some(cfg)) => cfg,
+                Ok(None) => continue,
+                Err(_) => {
+                    warn!("Panic while reading config; keeping previous config live");
+                    continue;
+                }
+            };
+
+            // A panic inside on_reload used to kill the watcher thread and
+            // freeze reloads for the rest of the process lifetime.
+            let cb_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_reload(config);
+            }));
+            if cb_result.is_err() {
+                warn!("Config reload callback panicked; watcher stays alive");
             }
         }
     });
 
     Ok(watcher)
+}
+
+fn event_targets_config(
+    res: &Result<notify::Event, notify::Error>,
+    watch_name: Option<&std::ffi::OsStr>,
+) -> bool {
+    use notify::EventKind;
+
+    let event = match res {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Config watcher channel error: {:?}", e);
+            return false;
+        }
+    };
+
+    // Ignore remove-only events (transient during atomic replace); reload
+    // on Modify or Create — the new inode surfaces as Create when the
+    // temporary is renamed on top of the config file.
+    match event.kind {
+        EventKind::Modify(_) | EventKind::Create(_) => {}
+        _ => return false,
+    }
+
+    let Some(name) = watch_name else {
+        return true;
+    };
+
+    // Only fire when the event paths actually mention our target file —
+    // parent-directory watches otherwise flap on every sibling write.
+    event
+        .paths
+        .iter()
+        .any(|p| p.file_name().map(|f| f == name).unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -118,6 +356,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -175,6 +414,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -205,6 +445,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -238,6 +479,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -254,6 +496,90 @@ hosts: []
         assert!(config.find_host("aa:bb:cc:dd:ee:ff").is_none());
     }
 
+    fn minimal_yaml(mac: &str) -> String {
+        format!(
+            r#"
+server:
+  http_bind: "0.0.0.0:8080"
+  tftp_bind: "0.0.0.0:69"
+  tftp_root: "./tftpboot"
+  proxy_dhcp_bind: "0.0.0.0:4011"
+  cache_dir: "./cache"
+  static_dir: "./static"
+  default_bootloader_amd64: "boot/x64/ipxe.efi"
+  default_bootloader_arm64: "boot/arm64/ipxe.efi"
+
+hosts:
+  - mac: "{mac}"
+    name: "watch-host"
+    image_path: "/tmp/x.iso"
+"#
+        )
+    }
+
+    fn wait_for_mac(rx: &std::sync::mpsc::Receiver<Config>, expected: &str) -> Option<Config> {
+        // The debounce inside watch_config is ~200ms; poll for up to 3s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(cfg) if cfg.hosts.first().map(|h| h.mac.as_str()) == Some(expected) => {
+                    return Some(cfg);
+                }
+                Ok(_) => continue, // stale reload, keep waiting
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_watch_reload_on_atomic_replace() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootycall.yaml");
+        std::fs::write(&path, minimal_yaml("aa:aa:aa:aa:aa:aa")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = watch_config(path.clone(), move |cfg| {
+            let _ = tx.send(cfg);
+        })
+        .expect("watch_config");
+
+        // Give the watcher a moment to arm.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Atomic replace: write to a sibling temp, then rename onto the config.
+        let tmp = dir.path().join("bootycall.yaml.tmp");
+        std::fs::write(&tmp, minimal_yaml("bb:bb:bb:bb:bb:bb")).unwrap();
+        std::fs::rename(&tmp, &path).expect("rename");
+
+        let cfg = wait_for_mac(&rx, "bb:bb:bb:bb:bb:bb")
+            .expect("reload after atomic replace within deadline");
+        assert_eq!(cfg.hosts[0].mac, "bb:bb:bb:bb:bb:bb");
+    }
+
+    #[test]
+    fn test_watch_reload_on_in_place_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootycall.yaml");
+        std::fs::write(&path, minimal_yaml("aa:aa:aa:aa:aa:aa")).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = watch_config(path.clone(), move |cfg| {
+            let _ = tx.send(cfg);
+        })
+        .expect("watch_config");
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Plain overwrite of the same file (no rename).
+        std::fs::write(&path, minimal_yaml("cc:cc:cc:cc:cc:cc")).unwrap();
+
+        let cfg = wait_for_mac(&rx, "cc:cc:cc:cc:cc:cc")
+            .expect("reload after in-place write within deadline");
+        assert_eq!(cfg.hosts[0].mac, "cc:cc:cc:cc:cc:cc");
+    }
+
     #[test]
     fn test_config_multiple_hosts() {
         let dir = tempdir().unwrap();
@@ -267,6 +593,7 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
 
@@ -295,5 +622,130 @@ hosts:
 
         let gamma = config.find_host("11:22:33:44:55:03").unwrap();
         assert_eq!(gamma.name, "host-gamma");
+    }
+
+    // --- Config::validate coverage (issue 043) ---------------------------
+
+    fn base_server() -> ServerConfig {
+        ServerConfig {
+            http_bind: "0.0.0.0:8080".to_string(),
+            tftp_bind: "0.0.0.0:69".to_string(),
+            tftp_root: PathBuf::from("./tftpboot"),
+            proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+            cache_dir: PathBuf::from("./cache"),
+            static_dir: "./static".into(),
+            default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+            default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+            default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+            oled_enabled: true,
+            oled_brightness: 255,
+            api_token: None,
+            max_artifact_bytes: None,
+        }
+    }
+
+    fn host(mac: &str, name: &str) -> HostConfig {
+        HostConfig {
+            mac: mac.to_string(),
+            name: name.to_string(),
+            image_path: PathBuf::from("/tmp/x.iso"),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        }
+    }
+
+    fn valid_config() -> Config {
+        Config {
+            server: base_server(),
+            hosts: vec![
+                host("aa:bb:cc:dd:ee:01", "host-a"),
+                host("aa:bb:cc:dd:ee:02", "host-b"),
+            ],
+        }
+    }
+
+    fn assert_invalid(cfg: &Config, needle: &str) {
+        match cfg.validate() {
+            Err(CoreError::InvalidConfig(msg)) => assert!(
+                msg.contains(needle),
+                "error {msg:?} did not mention {needle:?}"
+            ),
+            other => panic!("expected InvalidConfig mentioning {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_good_config() {
+        assert!(valid_config().validate().is_ok());
+        // A None api_token and zero hosts are both fine.
+        let mut cfg = valid_config();
+        cfg.hosts.clear();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bad_bind_address() {
+        let mut cfg = valid_config();
+        cfg.server.http_bind = "localhost".to_string();
+        assert_invalid(&cfg, "http_bind");
+
+        let mut cfg = valid_config();
+        cfg.server.tftp_bind = "0.0.0.0:69 ".to_string(); // trailing space
+        assert_invalid(&cfg, "tftp_bind");
+
+        let mut cfg = valid_config();
+        cfg.server.proxy_dhcp_bind = "not-an-addr".to_string();
+        assert_invalid(&cfg, "proxy_dhcp_bind");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_mac() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].mac = "zz:bb:cc:dd:ee:ff".to_string();
+        assert_invalid(&cfg, "invalid MAC");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_mac() {
+        let mut cfg = valid_config();
+        cfg.hosts[1].mac = cfg.hosts[0].mac.clone();
+        assert_invalid(&cfg, "duplicate host MAC");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_name() {
+        let mut cfg = valid_config();
+        cfg.hosts[1].name = cfg.hosts[0].name.clone();
+        assert_invalid(&cfg, "duplicate host name");
+    }
+
+    #[test]
+    fn validate_rejects_empty_bootloader() {
+        let mut cfg = valid_config();
+        cfg.server.default_bootloader_amd64 = String::new();
+        assert_invalid(&cfg, "default_bootloader_amd64");
+
+        let mut cfg = valid_config();
+        cfg.server.default_bootloader_arm64 = "   ".to_string();
+        assert_invalid(&cfg, "default_bootloader_arm64");
+    }
+
+    #[test]
+    fn validate_rejects_empty_api_token() {
+        let mut cfg = valid_config();
+        cfg.server.api_token = Some(String::new());
+        assert_invalid(&cfg, "api_token");
+        // A real secret is accepted.
+        cfg.server.api_token = Some("s3cr3t".to_string());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_host_name() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = String::new();
+        assert_invalid(&cfg, "empty name");
     }
 }

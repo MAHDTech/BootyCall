@@ -21,7 +21,7 @@ graph TB
             Extractor["bootycall-extractor (ISO/IMG Parser)"]
 
             subgraph UDP [UDP Socket Bindings]
-                DHCP["bootycall-dhcp (Proxy DHCP Server)<br/>Ports: UDP 67 / 4011"]
+                DHCP["bootycall-dhcp (Proxy DHCP Server)<br/>Port: UDP 4011"]
                 TFTP["bootycall-tftp (TFTP Server)<br/>Port: UDP 69"]
             end
 

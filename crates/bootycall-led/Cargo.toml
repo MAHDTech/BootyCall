@@ -2,8 +2,13 @@
 name = "bootycall-led"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
 anyhow = { workspace = true }
+bootycall-core = { path = "../bootycall-core" }
+
+[lints]
+workspace = true

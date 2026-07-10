@@ -57,8 +57,8 @@ runs:
       name: Cache Nix Store
       uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: ${{ runner.os }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
-        restore-prefixes-first-match: ${{ runner.os }}-nix-
+        primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+        restore-prefixes-first-match: ${{ runner.os }}-${{ runner.arch }}-nix-
         gc-max-store-size-linux: 5G
         purge: true
         purge-created: P7D
@@ -67,8 +67,21 @@ runs:
     - id: install_devenv
       name: Install Devenv
       shell: bash
+      # Pin the devenv CLI to the exact revision flake.lock records for the
+      # `devenv` input — the same revision the dev shell uses via
+      # `devenv.lib.mkShell` (flake.nix). Deriving the rev from the lockfile,
+      # rather than hardcoding a DEVENV_REV constant, keeps the CI binary in
+      # lockstep with the project's devenv with no second hand-maintained pin:
+      # Dependabot's `nix` ecosystem bumps flake.lock, which bumps this too, so
+      # the CI pin cannot silently drift from the dev shell (see issue 065).
       run: |
-        nix profile install --accept-flake-config github:cachix/devenv
+        devenv_rev="$(jq -r '.nodes.devenv.locked.rev' flake.lock)"
+        if [[ -z "${devenv_rev}" || "${devenv_rev}" == "null" ]]; then
+          echo "::error::Could not read the devenv rev from flake.lock"
+          exit 1
+        fi
+        echo "Installing devenv pinned to flake.lock rev ${devenv_rev}"
+        nix profile install --accept-flake-config "github:cachix/devenv/${devenv_rev}"
 
     - id: version_check
       name: Version Check
@@ -93,4 +106,3 @@ runs:
           echo "No devenv configuration found, why did you even set it up?"
           exit 1
         fi
-

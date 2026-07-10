@@ -13,8 +13,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
+license = "Apache-2.0"
+
+# Strict lints applied to every member crate via `lints.workspace = true`
+# so local pre-commit, CI, and the Nix build all trip on the same rules.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "warn"
 
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
@@ -36,7 +47,26 @@ anyhow = "1.0.103"
 tempfile = "3.27.0"
 bootycall-log = { path = "crates/bootycall-log" }
 serde_json = "1.0.150"
-rand = "0.10.1"
+rand = "0.10.2"
 sysinfo = "0.39.5"
 libc = "0.2"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+ab_glyph = "0.2"
+parking_lot = "0.12.5"
+sha2 = "0.10.9"
+
+# Release profile tuned for the aarch64 CloudKey Gen2+: minimise the
+# on-disk footprint of the appliance binary without giving up too much
+# throughput. We deliberately keep the default `panic = "unwind"`: the
+# config hot-reload watcher relies on `std::panic::catch_unwind`
+# (bootycall-core/src/config.rs) to survive a panic in a reload callback
+# and keep serving — `panic = "abort"` would silently defeat that in the
+# shipped binary. The LED panic hook in main.rs still fires on unwind, so
+# the "solid white on panic" behaviour is preserved either way. If
+# `opt-level = "s"` ever measurably hurts CLI/HTTP throughput on the box,
+# revisit with `"z"` vs `2` and note the pick in the bump commit.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+opt-level = "s"

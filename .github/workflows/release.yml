@@ -1,7 +1,13 @@
 name: Release
 
+# Gate the release on the CI workflow succeeding (INFRA-5). Firing on
+# `workflow_run` instead of the raw push avoids ever tagging + shipping
+# a build that never passed tests / clippy / flake check.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
     branches:
       - main
       - master
@@ -18,6 +24,9 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # workflow_run fires on both success and failure; refuse to release
+    # unless CI was actually green.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -25,6 +34,10 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          # INFRA-6: pull real LFS blobs so the assets derivation ships
+          # actual wallpapers instead of pointer files. iPXE builds don't
+          # depend on LFS but this checkout is shared.
+          lfs: true
 
       - id: check_default_branch
         name: Check if on Default Branch
@@ -114,6 +127,22 @@ jobs:
           nix build .#ipxe-amd64 --out-link result-amd64
           nix build .#ipxe-arm64 --out-link result-arm64
 
+      - id: build_bootycall_binaries
+        name: Build bootycall Binaries
+        if: >-
+          steps.check_default_branch.outputs.is_default == 'true' &&
+          steps.check_tag_existence.outputs.create_release == 'true'
+        # INFRA-4: ship the appliance binary alongside the iPXE blobs.
+        # Cross-compile the arm64 build using nix's per-system output —
+        # `--system aarch64-linux` uses binfmt on the amd64 runner if
+        # available; otherwise it falls back to the cache from
+        # ci-nix-build-bootycall(arm64) that produced it earlier.
+        run: |
+          nix build .#bootycall --out-link result-bootycall-amd64
+          nix build .#packages.aarch64-linux.bootycall \
+            --system aarch64-linux \
+            --out-link result-bootycall-arm64
+
       - id: create_github_release
         name: Push Tag and Create GitHub Release
         if: >-
@@ -121,18 +150,21 @@ jobs:
           steps.check_tag_existence.outputs.create_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.read_cargo_version.outputs.tag }}
         run: |
-          TAG="${{ steps.read_cargo_version.outputs.tag }}"
-
           # Create and push the tag
           git tag "$TAG"
           git push origin "$TAG"
 
-          # Create the GitHub Release and attach the compiled binaries
+          # Create the GitHub Release and attach the compiled binaries.
+          # bootycall binaries are shipped as `bootycall-<arch>-linux` so
+          # downstream can `curl` a per-arch stable name.
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file RELEASE_NOTES.md \
             result-amd64/ipxe.efi#ipxe-amd64.efi \
             result-amd64/snponly.efi#snponly-amd64.efi \
             result-arm64/ipxe.efi#ipxe-arm64.efi \
-            result-arm64/snponly.efi#snponly-arm64.efi
+            result-arm64/snponly.efi#snponly-arm64.efi \
+            result-bootycall-amd64/bin/bootycall-rs#bootycall-x86_64-linux \
+            result-bootycall-arm64/bin/bootycall-rs#bootycall-aarch64-linux

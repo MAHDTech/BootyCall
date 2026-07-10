@@ -21,6 +21,6 @@ pub enum ExtractorError {
     #[error("Initrd file not found inside the image")]
     InitrdNotFound,
 
-    #[error("GP error: {0}")]
-    Gpt(String),
+    #[error("Extracted artifact exceeds the configured max_artifact_bytes limit of {limit} bytes")]
+    ArtifactTooLarge { limit: u64 },
 }

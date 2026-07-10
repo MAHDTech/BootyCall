@@ -63,3 +63,8 @@ target/
 # Nix builds
 result
 result-*
+
+# AI Agents
+.claude/
+.gemini/
+.tars/

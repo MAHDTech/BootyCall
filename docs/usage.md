@@ -30,14 +30,43 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  # Root for static HTTP assets (wallpapers, UI files). Optional; defaults to
+  # "./static". Prefer an absolute path in production so serving does not depend
+  # on the process working directory.
+  static_dir: "./static"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
+  # Bootloader for legacy BIOS PXE clients (Option 93 architecture 0). A BIOS
+  # option ROM cannot execute an EFI image, so it needs a real-mode NBP such as
+  # iPXE's undionly.kpxe. Optional; defaults to "boot/x64/undionly.kpxe".
+  default_bootloader_bios: "boot/x64/undionly.kpxe"
+  # OLED panel brightness (0–255). Scales the grayscale→RGB565 LUT; lower values
+  # dim the display (and reduce burn-in/power). Optional; defaults to 255 (full).
+  # The panel dims further automatically while the screensaver is active.
+  oled_brightness: 255
 
 hosts:
   - mac: "52:54:00:10:10:10"
     name: "nixos-amd64-installer"
     image_path: "/var/lib/bootycall/images/nixos-minimal-23.11-x86_64-linux.iso"
 ```
+
+### Optional API token
+
+Set `server.api_token` to require an `X-API-Token` header on the API endpoints:
+
+```yaml
+server:
+  api_token: "a-long-random-secret"
+```
+
+When set, it gates the mutating `POST /api/override` **and** the read endpoints
+`GET /api/status` and `GET /api/logs` (which expose host MACs, client IPs, and
+log history) — requests without a matching token get `401`. When unset, all API
+endpoints are open (backwards-compatible). The bundled dashboard sends the token
+automatically when present in the browser's `localStorage` under the key
+`bootycall_api_token` (set it once via the browser console:
+`localStorage.setItem("bootycall_api_token", "a-long-random-secret")`).
 
 ---
 
@@ -88,6 +117,29 @@ nix develop --impure --command cargo build
 
 ```bash
 nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml
+```
+
+### Validate Configuration
+
+Load and validate the configuration file, then exit **without** starting any
+servers or touching hardware. Exits `0` when the configuration is valid and
+non-zero (printing the validation error) when it is not — ideal as a pre-deploy
+gate before atomically renaming a new config into place:
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml check-config
+```
+
+### Health / readiness probe
+
+`GET /api/health` is an unauthenticated readiness endpoint. It returns `200`
+with `{"status":"healthy", ...}` when every configured host has non-empty cached
+`kernel` + `initrd` artifacts ready to serve, and `503` with
+`{"status":"degraded","hosts_not_ready":[...]}` otherwise. Poll it from a load
+balancer or systemd watchdog to catch silent degradation:
+
+```bash
+curl -fsS http://localhost:8080/api/health
 ```
 
 ### Run Tests

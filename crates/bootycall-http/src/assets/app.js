@@ -1,5 +1,13 @@
 let currentOverrideMac = ""
 
+// Build request headers, adding X-API-Token when the operator has stored one
+// (localStorage key "bootycall_api_token"). Servers with no api_token ignore
+// the header, so this is safe whether or not auth is configured.
+function apiHeaders(extra = {}) {
+    const token = localStorage.getItem("bootycall_api_token")
+    return token ? {...extra, "X-API-Token": token} : {...extra}
+}
+
 // Helper to format timestamps
 function formatTime(timestampString) {
     if (!timestampString) return ""
@@ -18,7 +26,7 @@ function formatTime(timestampString) {
 // Fetch and update status
 async function updateStatus() {
     try {
-        const response = await fetch("/api/status")
+        const response = await fetch("/api/status", {headers: apiHeaders()})
         if (!response.ok) throw new Error("Network error")
 
         const data = await response.json()
@@ -98,7 +106,7 @@ async function updateStatus() {
 // Fetch and update logs
 async function updateLogs() {
     try {
-        const response = await fetch("/api/logs")
+        const response = await fetch("/api/logs", {headers: apiHeaders()})
         if (!response.ok) throw new Error("Network error")
 
         const logs = await response.json()
@@ -166,9 +174,7 @@ document
         try {
             const response = await fetch("/api/override", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
+                headers: apiHeaders({"Content-Type": "application/json"}),
                 body: JSON.stringify({
                     mac: currentOverrideMac,
                     target: target,

@@ -2,6 +2,7 @@
 name = "bootycall-oled"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -10,3 +11,14 @@ bootycall-core = { path = "../bootycall-core" }
 bootycall-log = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
+ab_glyph = { workspace = true }
+gpiocdev = "0.8.0"
+
+[features]
+# Run the render loop off-device, dumping frames to PNG via the dependency-free
+# `png` module. Adds no new dependencies (no windowing/SDL crate), so the
+# default build and the shipped binary are unaffected.
+sim = []
+
+[lints]
+workspace = true

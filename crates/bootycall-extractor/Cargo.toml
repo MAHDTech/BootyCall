@@ -2,12 +2,13 @@
 name = "bootycall-extractor"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 bootycall-log = { workspace = true }
 iso9660 = { workspace = true }
 fatfs = { workspace = true }
@@ -15,3 +16,6 @@ gpt = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

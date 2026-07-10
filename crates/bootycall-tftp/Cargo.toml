@@ -2,11 +2,16 @@
 name = "bootycall-tftp"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

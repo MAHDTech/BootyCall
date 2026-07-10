@@ -68,9 +68,14 @@ async fn test_http_server_endpoints() {
         tftp_root: tmp_dir.path().to_path_buf(),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir: cache_dir.clone(),
+        static_dir: "./static".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
     };
 
     let host = HostConfig {
@@ -88,7 +93,7 @@ async fn test_http_server_endpoints() {
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     // 3. Spawn HTTP Server
@@ -220,7 +225,7 @@ async fn test_http_server_endpoints() {
 
 /// Helper to create a minimal Config and StateStore, spawn the HTTP server on the
 /// given port, and return the shared state objects for assertion.
-async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateStore) {
+async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, StateStore) {
     let tmp_dir = tempdir().unwrap();
     let cache_dir = tmp_dir.path().join("cache");
     fs::create_dir_all(&cache_dir).unwrap();
@@ -231,9 +236,14 @@ async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateS
         tftp_root: tmp_dir.path().to_path_buf(),
         proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
         cache_dir,
+        static_dir: "./static".into(),
         default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
         default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
         oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
     };
 
     let host = HostConfig {
@@ -251,7 +261,7 @@ async fn spawn_test_server(port: u16) -> (Arc<std::sync::RwLock<Config>>, StateS
         hosts: vec![host],
     };
 
-    let shared_config = Arc::new(std::sync::RwLock::new(config));
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
     let state_store = StateStore::new();
 
     let server_store = state_store.clone();
@@ -398,6 +408,59 @@ async fn test_api_logs_endpoint() {
     assert_eq!(arr[1]["message"], "Another test log");
 }
 
+async fn assert_http_traversal_blocked(port: u16, request_path: &str) {
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    let (status, _headers, body) = parse_http_response(&response);
+    // A rejected traversal must not disclose file contents. Accept 403 or 404
+    // (the resolver returns None for absolute paths → 403; missing files → 404).
+    assert!(
+        status.contains("403") || status.contains("404"),
+        "Expected 403/404 for {request_path:?}, got: {status}"
+    );
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        !body_str.contains("root:"),
+        "Response body must not contain /etc/passwd content for {request_path:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_http_cache_absolute_path_blocked() {
+    assert_http_traversal_blocked(26090, "/cache//etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_cache_parent_dir_blocked() {
+    assert_http_traversal_blocked(26091, "/cache/../../etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_static_absolute_path_blocked() {
+    assert_http_traversal_blocked(26092, "/static//etc/passwd").await;
+}
+
+#[tokio::test]
+async fn test_http_static_parent_dir_blocked() {
+    assert_http_traversal_blocked(26093, "/static/../../etc/passwd").await;
+}
+
 #[tokio::test]
 async fn test_root_redirect() {
     let port: u16 = 26083;
@@ -439,4 +502,316 @@ async fn test_root_redirect() {
         "Expected redirect to /ui/index.html, got: {}",
         location
     );
+}
+
+#[tokio::test]
+async fn test_poll_rejects_invalid_mac() {
+    let port: u16 = 26100;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /poll/zz-bb-cc-dd-ee-ff HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, _) = parse_http_response(&response);
+    assert!(
+        status.contains("400"),
+        "Invalid MAC must return 400, got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_override_rejects_invalid_mac() {
+    let port: u16 = 26101;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    let body = r#"{"mac":"zz:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+    let req = format!(
+        "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    client.write_all(req.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, _) = parse_http_response(&response);
+    assert!(
+        status.contains("400"),
+        "Invalid MAC on override must return 400, got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_override_requires_api_token_when_configured() {
+    let port: u16 = 26102;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.api_token = Some("super-secret".to_string());
+    }
+
+    // No token → 401
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let body = r#"{"mac":"aa:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+        let req = format!(
+            "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("401"),
+            "Missing X-API-Token must return 401, got: {status}"
+        );
+    }
+
+    // Correct token → 200
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let body = r#"{"mac":"aa:bb:cc:dd:ee:ff","target":"nixos-test"}"#;
+        let req = format!(
+            "POST /api/override HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nX-API-Token: super-secret\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("200"),
+            "Correct token must succeed, got: {status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_poll_missing_override_target_keeps_polling() {
+    // A host registered with an override target that no longer exists in config
+    // must keep polling (200 + retry script), not boot (issue 010/046).
+    let port: u16 = 26103;
+    let (_config, state_store) = spawn_test_server(port).await;
+    state_store.update_host_status(
+        "11:22:33:44:55:66",
+        HostStatus::Polling,
+        None,
+        Some("does-not-exist".to_string()),
+        None,
+        None,
+    );
+
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET /poll/11-22-33-44-55-66 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, body) = parse_http_response(&response);
+    let body_str = String::from_utf8_lossy(&body);
+
+    assert!(
+        status.contains("200"),
+        "missing target must still 200, got: {status}"
+    );
+    assert!(
+        body_str.contains("/poll/"),
+        "expected the retry poll script, got: {body_str}"
+    );
+    assert!(
+        !body_str.contains("kernel http"),
+        "must not serve a boot script for a missing override target"
+    );
+}
+
+async fn http_get(port: u16, path: &str) -> (String, Vec<u8>) {
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, body) = parse_http_response(&response);
+    (status, body)
+}
+
+#[tokio::test]
+async fn test_static_served_from_configured_dir() {
+    // Static serving must resolve against the configured `static_dir`,
+    // independent of the process CWD (issue 001).
+    let tmp = tempdir().unwrap();
+    let static_dir = tmp.path().join("assets");
+    fs::create_dir_all(&static_dir).unwrap();
+    fs::write(static_dir.join("hello.txt"), b"STATIC-OK").unwrap();
+
+    let port: u16 = 26107;
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: static_dir.clone(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let _leaked = Box::leak(Box::new(tmp));
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (status, body) = http_get(port, "/static/hello.txt").await;
+    assert!(
+        status.contains("200"),
+        "configured static file must serve, got: {status}"
+    );
+    // Body is streamed (chunked transfer-encoding), so match a substring.
+    assert!(
+        String::from_utf8_lossy(&body).contains("STATIC-OK"),
+        "served static body must contain the file content"
+    );
+}
+
+#[tokio::test]
+async fn test_health_endpoint_reflects_cache_readiness() {
+    // Degraded until every configured host has non-empty cached artifacts,
+    // then healthy (issue 032).
+    let port: u16 = 26105;
+    let (config, _state_store) = spawn_test_server(port).await;
+    let (cache_dir, host_mac) = {
+        let g = config.read();
+        (g.server.cache_dir.clone(), g.hosts[0].mac.clone())
+    };
+
+    // Initially degraded — no cached kernel/initrd for the configured host.
+    let (status, body) = http_get(port, "/api/health").await;
+    assert!(
+        status.contains("503"),
+        "missing artifacts must be degraded, got: {status}"
+    );
+    assert!(String::from_utf8_lossy(&body).contains("degraded"));
+
+    // Provision non-empty kernel + initrd, then it must be healthy.
+    let host_cache = cache_dir.join(&host_mac);
+    fs::create_dir_all(&host_cache).unwrap();
+    fs::write(host_cache.join("kernel"), b"KERNELBYTES").unwrap();
+    fs::write(host_cache.join("initrd"), b"INITRDBYTES").unwrap();
+
+    let (status, body) = http_get(port, "/api/health").await;
+    assert!(
+        status.contains("200"),
+        "present artifacts must be healthy, got: {status}"
+    );
+    assert!(String::from_utf8_lossy(&body).contains("healthy"));
+}
+
+#[tokio::test]
+async fn test_read_apis_require_token_when_configured() {
+    // With api_token set, /api/status and /api/logs must 401 without the header
+    // and 200 with it (issue 037). The unauthenticated-open case is covered by
+    // test_api_status_endpoint / test_api_logs_endpoint (which set no token).
+    let port: u16 = 26104;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.api_token = Some("read-secret".to_string());
+    }
+
+    for path in ["/api/status", "/api/logs"] {
+        // No token → 401
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("401"),
+            "{path} without token must be 401, got: {status}"
+        );
+
+        // Correct token → 200
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-API-Token: read-secret\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (status, _, _) = parse_http_response(&response);
+        assert!(
+            status.contains("200"),
+            "{path} with correct token must be 200, got: {status}"
+        );
+    }
 }

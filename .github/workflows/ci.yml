@@ -6,6 +6,14 @@ on:
       - main
       - master
       - trunk
+  # Also run on pushes to the release branches so the Release workflow
+  # (which fires on the same event) can gate on this workflow completing.
+  push:
+    branches:
+      - main
+      - master
+      - trunk
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
@@ -32,15 +40,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   ##################################################
-  # Check Cache - Lookup Nix and Cargo caches
+  # Setup Environment - Warm caches if missed
   ##################################################
-  check-cache:
-    name: Check Cache
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      nix-cache-hit: ${{ steps.nix_cache_lookup.outputs.cache-hit }}
-      cargo-cache-hit: ${{ steps.cargo_cache_lookup.outputs.cache-hit }}
+  setup-environment:
+    name: Setup Environment (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -53,7 +66,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /nix
-          key: ${{ runner.os }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
           lookup-only: true
 
       - id: cargo_cache_lookup
@@ -64,33 +77,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           lookup-only: true
-
-  ##################################################
-  # Setup Environment - Warm caches if missed
-  ##################################################
-  setup-environment:
-    name: Setup Environment
-    needs: check-cache
-    if: needs.check-cache.outputs.nix-cache-hit != 'true' || needs.check-cache.outputs.cargo-cache-hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - id: checkout_repository
-        name: Checkout Repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
 
       - id: get_repository_owner
         name: Get lowercased repository owner
+        if: steps.nix_cache_lookup.outputs.cache-hit != 'true' || steps.cargo_cache_lookup.outputs.cache-hit != 'true'
         run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
         env:
           OWNER: ${{ github.repository_owner }}
 
       - id: setup_devenv
         name: Setup Devenv
+        if: steps.nix_cache_lookup.outputs.cache-hit != 'true' || steps.cargo_cache_lookup.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-devenv
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -100,11 +99,12 @@ jobs:
 
       - id: cache_cargo
         name: Cache Cargo
+        if: steps.nix_cache_lookup.outputs.cache-hit != 'true' || steps.cargo_cache_lookup.outputs.cache-hit != 'true'
         uses: ./.github/actions/cache-cargo
 
       - id: warm_cargo
         name: Warm Cargo Cache
-        if: needs.check-cache.outputs.cargo-cache-hit != 'true'
+        if: steps.cargo_cache_lookup.outputs.cache-hit != 'true'
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: cargo test --no-run --workspace
 
@@ -115,9 +115,8 @@ jobs:
     name: Check Version
     runs-on: ubuntu-latest
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -151,9 +150,8 @@ jobs:
     name: Check Commit Messages
     runs-on: ubuntu-latest
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -190,9 +188,8 @@ jobs:
     name: Devenv Test
     runs-on: ubuntu-latest
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -220,13 +217,32 @@ jobs:
         shell: bash -c "nix develop --impure -c bash -- {0}"
         run: devenv test
 
+      # `devenv test` installs the git hooks but does not run them against the
+      # tree, and pre-commit-style hooks only lint staged files — so on a fresh
+      # CI checkout with nothing staged the lint hooks (actionlint, cspell,
+      # markdownlint, lychee, nixfmt, deadnix, prettier, shellcheck, yamllint,
+      # etc.) would check zero files. Run the full battery against ALL files,
+      # independent of git staging, so a lint regression fails CI. `prek` is the
+      # hook runner provisioned by the dev shell.
+      - id: run_hooks_all_files
+        name: Run Pre-commit Hooks (all files)
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: prek run --all-files --show-diff-on-failure
+
   ci-cargo-test:
-    name: Cargo Test
-    runs-on: ubuntu-latest
+    name: Cargo Test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -256,15 +272,24 @@ jobs:
       - id: run_cargo_tests
         name: Cargo Test
         shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: cargo test --workspace
+        # --all-features so feature-gated tests (e.g. the OLED `sim` feature)
+        # actually run; clippy already lints with --all-features.
+        run: cargo test --workspace --all-features
 
   ci-cargo-clippy:
-    name: Cargo Clippy
-    runs-on: ubuntu-latest
+    name: Cargo Clippy (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -294,16 +319,129 @@ jobs:
       - id: run_cargo_clippy
         name: Cargo Clippy
         shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: cargo clippy --workspace
+        # Match the local pre-commit hook: fail on any warning across the
+        # whole workspace and every target (bins, tests, examples).
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  ci-cargo-fmt:
+    name: Cargo Format Check
+    runs-on: ubuntu-latest
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: run_cargo_fmt
+        name: Cargo Format Check
+        # amd64 only — formatting is arch-independent. Guards against a web edit
+        # or a bypassed hook regressing formatting on the default branch.
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo fmt --all -- --check
+
+  ci-cargo-machete:
+    name: Cargo Machete
+    runs-on: ubuntu-latest
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: run_cargo_machete
+        name: Cargo Machete
+        # Fail if a declared dependency is unused (no compilation needed).
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo machete
+
+  ci-cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: run_cargo_deny
+        name: Cargo Deny
+        # Advisories (RustSec) + licenses + bans + sources per deny.toml. The
+        # advisories check fetches the RustSec DB, so this job needs network.
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: cargo deny check
 
   ci-flake-check:
-    name: Nix Flake Check
-    runs-on: ubuntu-latest
+    name: Nix Flake Check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -332,20 +470,73 @@ jobs:
         run: >-
           nix flake check
           --accept-flake-config
+          --no-build
           --no-eval-cache
-          --all-systems
           --impure
           --keep-going
-          --refresh
-          --verbose
 
   ci-build-assets:
-    name: Build Assets & iPXE
-    runs-on: ubuntu-latest
+    name: Build Assets & iPXE (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          # INFRA-6: assets.nix consumes wallpapers tracked in git-lfs.
+          # Without lfs: true the checkout leaves 130-byte pointer files,
+          # so the assets derivation ends up "shipping" pointer text.
+          lfs: true
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: build_assets
+        name: Build Assets & iPXE
+        run: nix build .#assets --no-link
+
+  ci-nix-build-bootycall:
+    # Exercise the Nix package derivation on both target arches so
+    # packages/crate.nix can't silently rot between releases (INFRA-4).
+    # Runs alongside the Cargo build; the release workflow reuses the
+    # same derivation to produce shipped binaries.
+    name: Nix Build bootycall (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -368,17 +559,16 @@ jobs:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skip-push: "true"
 
-      - id: build_assets
-        name: Build Assets & iPXE
-        run: nix build .#assets --no-link
+      - id: nix_build_bootycall
+        name: Nix Build bootycall
+        run: nix build .#bootycall --no-link --print-out-paths
 
   ci-statix:
     name: Check Statix
     runs-on: ubuntu-latest
     needs:
-      - check-cache
       - setup-environment
-    if: always() && needs.check-cache.result == 'success' && (needs.setup-environment.result == 'success' || needs.setup-environment.result == 'skipped')
+    if: always() && needs.setup-environment.result == 'success'
     steps:
       - id: checkout_repository
         name: Checkout Repository
@@ -403,7 +593,11 @@ jobs:
 
       - id: check_statix
         name: Check Statix
-        run: nix run nixpkgs#statix -- check
+        # Use the flake-locked statix from the dev shell rather than
+        # `nix run nixpkgs#statix`, which resolves from the ambient registry
+        # (non-reproducible; breaks when the channel moves).
+        shell: bash -c "nix develop --impure -c bash -- {0}"
+        run: statix check
 
   ##################################################
   # CI Status Aggregator
@@ -411,16 +605,19 @@ jobs:
   status:
     name: CI Status
     needs:
-      - check-cache
       - validate-pr
       - ci-version
       - ci-commit-msg
       - ci-devenv-test
       - ci-cargo-test
       - ci-cargo-clippy
+      - ci-cargo-fmt
+      - ci-cargo-machete
+      - ci-cargo-deny
       - ci-flake-check
       - ci-statix
       - ci-build-assets
+      - ci-nix-build-bootycall
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -455,14 +652,7 @@ jobs:
               echo "> _${PR_HEAD} → ${PR_BASE}_"
               echo ""
             fi
-            if [ "${{ needs.check-cache.outputs.nix-cache-hit }}" == "true" ] && [ "${{ needs.check-cache.outputs.cargo-cache-hit }}" == "true" ]; then
-              echo "💚 **Nix & Cargo Caches: HIT** — setup-environment was skipped"
-            else
-              echo "🔴 **Cache Status:**"
-              echo "- Nix Cache: ${{ needs.check-cache.outputs.nix-cache-hit == 'true' && 'HIT 💚' || 'MISS 🔴' }}"
-              echo "- Cargo Cache: ${{ needs.check-cache.outputs.cargo-cache-hit == 'true' && 'HIT 💚' || 'MISS 🔴' }}"
-              echo "setup-environment warmed any missing caches."
-            fi
+            echo "💚 Nix & Cargo checks were executed with architecture-specific caching enabled (amd64 / arm64)."
             echo ""
             echo "| Job | Status |"
             echo "|-----|--------|"
@@ -474,15 +664,19 @@ jobs:
             echo "| Devenv Test | $(status_emoji '${{ needs.ci-devenv-test.result }}') ${{ needs.ci-devenv-test.result }} |"
             echo "| Cargo Test | $(status_emoji '${{ needs.ci-cargo-test.result }}') ${{ needs.ci-cargo-test.result }} |"
             echo "| Cargo Clippy | $(status_emoji '${{ needs.ci-cargo-clippy.result }}') ${{ needs.ci-cargo-clippy.result }} |"
+            echo "| Cargo Format | $(status_emoji '${{ needs.ci-cargo-fmt.result }}') ${{ needs.ci-cargo-fmt.result }} |"
+            echo "| Cargo Machete | $(status_emoji '${{ needs.ci-cargo-machete.result }}') ${{ needs.ci-cargo-machete.result }} |"
+            echo "| Cargo Deny | $(status_emoji '${{ needs.ci-cargo-deny.result }}') ${{ needs.ci-cargo-deny.result }} |"
             echo "| Nix Flake Check | $(status_emoji '${{ needs.ci-flake-check.result }}') ${{ needs.ci-flake-check.result }} |"
             echo "| Statix Check | $(status_emoji '${{ needs.ci-statix.result }}') ${{ needs.ci-statix.result }} |"
             echo "| Build Assets & iPXE | $(status_emoji '${{ needs.ci-build-assets.result }}') ${{ needs.ci-build-assets.result }} |"
+            echo "| Nix Build bootycall | $(status_emoji '${{ needs.ci-nix-build-bootycall.result }}') ${{ needs.ci-nix-build-bootycall.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - id: check_failures
         name: Check for Failures
         run: |
-          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }}"
+          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-cargo-fmt.result }},${{ needs.ci-cargo-machete.result }},${{ needs.ci-cargo-deny.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }},${{ needs.ci-nix-build-bootycall.result }}"
           if echo "${ALL_JOBS}" | grep -qE "(failure|cancelled)"; then
             echo "::error::One or more CI jobs failed"
             exit 1

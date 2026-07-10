@@ -21,16 +21,18 @@ The builder:
 
 ## 2. Default Compile-Time Options
 
-The following options are enabled by default in our automated builds (defined in [flake.nix](../flake.nix)):
+The following options are enabled by default in our automated builds (defined in [`packages/ipxe/amd64.nix`](../packages/ipxe/amd64.nix) and [`packages/ipxe/arm64.nix`](../packages/ipxe/arm64.nix)):
 
 - `CONSOLE_CMD` - Interactive console commands, colors, and console pairing.
 - `CONSOLE_FRAMEBUFFER` - Framebuffer console display.
 - `IMAGE_PNG` - PNG wallpaper background support.
 - `REBOOT_CMD` / `POWEROFF_CMD` - Allow machine reboot and power-off from shell/scripts.
-- `PING_CMD` - Enable network reachability check inside the shell.
 - `NTP_CMD` - Network time synchronization.
 - `NSLOOKUP_CMD` - DNS lookup diagnostics.
-- `DOWNLOAD_PROTO_TFTP` / `DOWNLOAD_PROTO_HTTP` / `DOWNLOAD_PROTO_HTTPS` - Core TFTP, HTTP, and secure HTTPS boot.
+- `DOWNLOAD_PROTO_TFTP` - Core TFTP download support. HTTP is enabled in
+  iPXE by default, so it isn't listed in `additionalConfig`; HTTPS is
+  intentionally not turned on. `PING_CMD` was documented previously but
+  is not currently enabled.
 
 ---
 

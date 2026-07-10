@@ -1,7 +1,20 @@
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+/// Upper bound on host entries kept in the state store. SEC-4: an unbounded
+/// map lets a MAC-injection flood balloon memory (the state store is fed by
+/// every DHCP/HTTP/TFTP touch). New MACs beyond this ceiling are silently
+/// dropped by `update_host_status`; the periodic cleaner sweeps stale
+/// entries so headroom returns on its own.
+pub const MAX_TRACKED_HOSTS: usize = 4096;
+
+/// Upper bound on retained log events. The dashboard shows a rolling window, so
+/// once the ring is full the oldest events are evicted in O(1) from the front
+/// of the `VecDeque`, bounding memory under a chatty event stream.
+pub const MAX_LOGS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HostStatus {
@@ -33,7 +46,7 @@ pub struct LogEvent {
 #[derive(Debug, Clone)]
 pub struct StateStore {
     hosts: Arc<RwLock<HashMap<String, HostState>>>,
-    logs: Arc<RwLock<Vec<LogEvent>>>,
+    logs: Arc<RwLock<VecDeque<LogEvent>>>,
 }
 
 impl Default for StateStore {
@@ -46,7 +59,7 @@ impl StateStore {
     pub fn new() -> Self {
         Self {
             hosts: Arc::new(RwLock::new(HashMap::new())),
-            logs: Arc::new(RwLock::new(Vec::new())),
+            logs: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 
@@ -59,8 +72,14 @@ impl StateStore {
         ip: Option<String>,
         arch: Option<String>,
     ) {
-        let mut hosts = self.hosts.write().unwrap();
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let mut hosts = self.hosts.write();
+        let normalized = crate::mac::normalize_mac(mac);
+        // SEC-4: if we're at the ceiling and this MAC is new, drop the
+        // update instead of unboundedly growing the map. Existing entries
+        // (real hosts) keep updating.
+        if !hosts.contains_key(&normalized) && hosts.len() >= MAX_TRACKED_HOSTS {
+            return;
+        }
         let entry = hosts
             .entry(normalized.clone())
             .or_insert_with(|| HostState {
@@ -90,19 +109,19 @@ impl StateStore {
     }
 
     pub fn get_host(&self, mac: &str) -> Option<HostState> {
-        let hosts = self.hosts.read().unwrap();
-        let normalized = mac.to_ascii_lowercase().replace('-', ":");
+        let hosts = self.hosts.read();
+        let normalized = crate::mac::normalize_mac(mac);
         hosts.get(&normalized).cloned()
     }
 
     pub fn list_hosts(&self) -> Vec<HostState> {
-        let hosts = self.hosts.read().unwrap();
+        let hosts = self.hosts.read();
         hosts.values().cloned().collect()
     }
 
     pub fn has_recent_activity(&self, max_age: std::time::Duration) -> bool {
         let now = SystemTime::now();
-        let hosts = self.hosts.read().unwrap();
+        let hosts = self.hosts.read();
         hosts.values().any(|h| {
             now.duration_since(h.last_seen)
                 .map(|age| age <= max_age)
@@ -111,22 +130,26 @@ impl StateStore {
     }
 
     pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
-        let mut logs = self.logs.write().unwrap();
-        logs.push(LogEvent {
+        let mut logs = self.logs.write();
+        logs.push_back(LogEvent {
             timestamp: SystemTime::now(),
             level: level.to_string(),
-            mac: mac.map(|m| m.to_ascii_lowercase().replace('-', ":")),
+            mac: mac.map(crate::mac::normalize_mac),
             message: message.to_string(),
         });
+        // Evict oldest first (O(1) per pop) until back within the ring cap.
+        while logs.len() > MAX_LOGS {
+            logs.pop_front();
+        }
     }
 
     pub fn list_logs(&self) -> Vec<LogEvent> {
-        let logs = self.logs.read().unwrap();
-        logs.clone()
+        let logs = self.logs.read();
+        logs.iter().cloned().collect()
     }
 
     pub fn clean_stale_hosts(&self, max_idle_secs: u64) {
-        let mut hosts = self.hosts.write().unwrap();
+        let mut hosts = self.hosts.write();
         let now = SystemTime::now();
         hosts.retain(|_, state| {
             if let Ok(duration) = now.duration_since(state.last_seen) {
@@ -325,5 +348,48 @@ mod tests {
 
         // Verify MAC normalization in log events
         assert_eq!(logs[1].mac, Some("aa:bb:cc:dd:ee:ff".to_string()));
+    }
+
+    #[test]
+    fn test_max_tracked_hosts_ceiling() {
+        let store = StateStore::new();
+
+        // Fill the store to exactly the ceiling with distinct MACs.
+        // i in 0..4096 maps to 02:00:00:00:HH:LL (HH in 0x00..0x0f, LL in
+        // 0x00..0xff) — all distinct, all valid lower-hex.
+        for i in 0..MAX_TRACKED_HOSTS {
+            let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
+            store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+        }
+        assert_eq!(
+            store.list_hosts().len(),
+            MAX_TRACKED_HOSTS,
+            "store should hold exactly MAX_TRACKED_HOSTS entries"
+        );
+
+        // (a) A brand-new MAC at the ceiling is dropped, not inserted.
+        store.update_host_status(
+            "de:ad:be:ef:00:01",
+            HostStatus::Polling,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            store.get_host("de:ad:be:ef:00:01").is_none(),
+            "a new MAC beyond the ceiling must be dropped"
+        );
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+
+        // (b) An already-tracked MAC still updates at the ceiling.
+        let existing = "02:00:00:00:00:00";
+        store.update_host_status(existing, HostStatus::Completed, None, None, None, None);
+        assert_eq!(
+            store.get_host(existing).unwrap().status,
+            HostStatus::Completed,
+            "existing entries must keep updating at the ceiling"
+        );
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
     }
 }

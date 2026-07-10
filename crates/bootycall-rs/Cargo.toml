@@ -2,6 +2,7 @@
 name = "bootycall-rs"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bootycall-core = { path = "../bootycall-core" }
@@ -15,3 +16,7 @@ tokio = { workspace = true }
 bootycall-log = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

@@ -39,40 +39,45 @@ sequenceDiagram
 
 ## 2. Cargo Workspace Crate Structure
 
-The project is organized as a Cargo Workspace inside `bootycall-rs/` to guarantee modularity, clean unit testing, and separation of concerns.
+The project is a Cargo Workspace rooted at the repo root (`Cargo.toml` at `./`). Each crate under `./crates/` owns one concern:
 
 ```text
-bootycall-rs/
+.
 ├── Cargo.toml                      # Workspace definition
 └── crates/
-    ├── bootycall-core/                 # Shared types, logging, and config loading
+    ├── bootycall-core/                 # Shared types + config loading
     │   ├── Cargo.toml
     │   └── src/
     │       ├── lib.rs
-    │       ├── config.rs               # YAML schema parser & watcher (notify crate)
-    │       └── state.rs                # Shared in-memory active host/events state
+    │       ├── config.rs               # YAML schema parser & atomic-save-safe watcher (notify crate)
+    │       ├── state.rs                # Shared in-memory active host/events state (parking_lot RwLock)
+    │       ├── mac.rs                  # normalize_mac + is_valid_mac helpers
+    │       └── path.rs                 # safe_join path resolver (used by TFTP + HTTP)
+    ├── bootycall-log/                  # tracing / tracing-subscriber wrapper
     ├── bootycall-dhcp/                 # Proxy DHCP Server logic
     │   ├── Cargo.toml
     │   └── src/
     │       ├── lib.rs
-    │       └── server.rs               # UDP listener (ports 67/4011), parses Option 93
+    │       └── server.rs               # UDP listener, filters by Option 60 (PXEClient) + parses Option 93
     ├── bootycall-tftp/                 # Async TFTP Server
     │   ├── Cargo.toml
     │   └── src/
     │       ├── lib.rs
-    │       └── server.rs               # UDP listener (port 69), serves efi files
+    │       └── server.rs               # UDP listener (port 69), serves efi files; concurrent transfers bounded
     ├── bootycall-extractor/            # ISO/IMG parser and file extractor
     │   ├── Cargo.toml
     │   └── src/
-    │       ├── lib.rs
-    │       └── parser.rs               # Pure Rust parser (ISO9660 & FAT32) to extract kernels/initrd
+    │       ├── lib.rs                  # sync_all_hosts_cache + JSON metadata
+    │       ├── iso.rs                  # ISO9660 walker (depth-capped)
+    │       └── disk.rs                 # GPT + FAT walker (checked seek arithmetic)
     ├── bootycall-http/                 # Axum web framework endpoints & UI
     │   ├── Cargo.toml
     │   └── src/
     │       ├── lib.rs
-    │       ├── router.rs               # Endpoints for iPXE scripting and Web API
-    │       └── ui.rs                   # Embedded Web UI assets using rust-embed
-    └── bootycall-rs/                   # Main CLI binary wrapper
+    │       └── server.rs               # iPXE scripting, /api/{status,logs,override}, wallpaper picker, UI
+    ├── bootycall-oled/                 # 256×64 OLED render loop + rusttype text
+    ├── bootycall-led/                  # Rackmount status LED driver
+    └── bootycall-rs/                   # Main binary
         ├── Cargo.toml
         └── src/
             └── main.rs                 # Initialises configuration, orchestrates tokio tasks
@@ -106,6 +111,7 @@ server:
   cache_dir: "./cache"
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
+  default_bootloader_bios: "boot/x64/undionly.kpxe" # Legacy BIOS PXE (arch 0)
 
 hosts:
   - mac: "52:54:00:10:10:10"

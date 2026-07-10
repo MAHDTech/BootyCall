@@ -1,6 +1,6 @@
 use bootycall_log::{debug, error, info, warn};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
@@ -9,14 +9,19 @@ use tokio::time::Duration;
 use bootycall_core::config::Config;
 use bootycall_core::state::{HostStatus, StateStore};
 
+use crate::wire::{
+    OP_RRQ, OP_WRQ, is_error_packet, make_data_packet, make_error_packet, make_oack_packet,
+    parse_ack_packet,
+};
+
 #[derive(Debug)]
 struct RrqRequest {
     filename: String,
-    #[allow(dead_code)]
     mode: String,
     blksize: Option<usize>,
     timeout: Option<u64>,
     tsize_requested: bool,
+    windowsize: Option<u16>,
 }
 
 fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
@@ -24,7 +29,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         return None;
     }
     let opcode = u16::from_be_bytes([packet[0], packet[1]]);
-    if opcode != 1 {
+    if opcode != OP_RRQ {
         return None;
     }
 
@@ -48,6 +53,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
     let mut blksize = None;
     let mut timeout = None;
     let mut tsize_requested = false;
+    let mut windowsize = None;
 
     let mut i = 2;
     while i + 1 < parts.len() {
@@ -67,6 +73,11 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
             "tsize" => {
                 tsize_requested = true;
             }
+            "windowsize" => {
+                if let Ok(val_parsed) = val.parse::<u16>() {
+                    windowsize = Some(val_parsed);
+                }
+            }
             _ => {}
         }
         i += 2;
@@ -78,66 +89,8 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         blksize,
         timeout,
         tsize_requested,
+        windowsize,
     })
-}
-
-fn make_error_packet(code: u16, msg: &str) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(5 + msg.len());
-    pkt.extend_from_slice(&5u16.to_be_bytes()); // Opcode 5
-    pkt.extend_from_slice(&code.to_be_bytes()); // Error code
-    pkt.extend_from_slice(msg.as_bytes());
-    pkt.push(0);
-    pkt
-}
-
-fn make_oack_packet(options: &[(&str, String)]) -> Vec<u8> {
-    let mut pkt = Vec::new();
-    pkt.extend_from_slice(&6u16.to_be_bytes()); // Opcode 6
-    for (name, val) in options {
-        pkt.extend_from_slice(name.as_bytes());
-        pkt.push(0);
-        pkt.extend_from_slice(val.as_bytes());
-        pkt.push(0);
-    }
-    pkt
-}
-
-fn make_data_packet(block_num: u16, data: &[u8]) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(4 + data.len());
-    pkt.extend_from_slice(&3u16.to_be_bytes()); // Opcode 3
-    pkt.extend_from_slice(&block_num.to_be_bytes());
-    pkt.extend_from_slice(data);
-    pkt
-}
-
-fn parse_ack_packet(pkt: &[u8]) -> Option<u16> {
-    if pkt.len() < 4 {
-        return None;
-    }
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    if opcode != 4 {
-        return None;
-    }
-    Some(u16::from_be_bytes([pkt[2], pkt[3]]))
-}
-
-fn is_error_packet(pkt: &[u8]) -> bool {
-    if pkt.len() < 4 {
-        return false;
-    }
-    let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    opcode == 5
-}
-
-fn resolve_safe_path(tftp_root: &Path, requested_path: &str) -> Option<PathBuf> {
-    let normalized = requested_path.replace('\\', "/");
-    let path = Path::new(&normalized);
-    for component in path.components() {
-        if let std::path::Component::ParentDir = component {
-            return None;
-        }
-    }
-    Some(tftp_root.join(path))
 }
 
 async fn handle_tftp_transfer(
@@ -148,11 +101,40 @@ async fn handle_tftp_transfer(
     state_store: StateStore,
     mac_addr: Option<String>,
 ) -> Result<(), std::io::Error> {
-    // 1. Open file
+    let transfer_start = std::time::Instant::now();
+
+    // RFC 1350: we only implement `octet` (binary) mode. A `netascii` client
+    // would need CR/LF translation, and `mail` is illegal — reject anything
+    // that isn't octet with an explicit ERROR instead of silently serving raw
+    // octet bytes a strict client would mis-handle.
+    if !request.mode.eq_ignore_ascii_case("octet") {
+        warn!(
+            "Rejecting TFTP transfer to {}: unsupported transfer mode {:?} (octet only)",
+            client_addr, request.mode
+        );
+        let err_pkt = make_error_packet(4, "Illegal TFTP operation (only octet mode supported)");
+        let _ = socket.send(&err_pkt).await;
+        return Ok(());
+    }
+
+    // 1. Open file. Distinguish a genuine 404 from a permissions/FD-exhaustion
+    // problem: reporting everything as "File not found" hides the real cause
+    // both on the wire and in observability.
     let mut file = match tokio::fs::File::open(&file_path).await {
         Ok(f) => f,
         Err(e) => {
-            let err_pkt = make_error_packet(1, "File not found");
+            let (code, msg): (u16, &str) = match e.kind() {
+                std::io::ErrorKind::NotFound => (1, "File not found"),
+                std::io::ErrorKind::PermissionDenied => (2, "Access violation"),
+                _ => (0, "File open failed"),
+            };
+            bootycall_log::event!(
+                "tftp_transfer_error",
+                file = %file_path.display(),
+                error = "file_open_failed",
+                kind = %format!("{:?}", e.kind()),
+            );
+            let err_pkt = make_error_packet(code, msg);
             let _ = socket.send(&err_pkt).await;
             return Err(e);
         }
@@ -164,17 +146,18 @@ async fn handle_tftp_transfer(
 
     // 3. Negotiate options
     let mut options = Vec::new();
-    let mut negotiated_blksize = 512;
-    let mut negotiated_timeout = 3;
+    let mut negotiated_blksize = DEFAULT_BLKSIZE;
+    let mut negotiated_timeout = DEFAULT_TIMEOUT_SECS;
+    let mut negotiated_windowsize: u16 = 1;
 
     if let Some(blksize) = request.blksize {
         // Clamp to a safe MTU range
-        negotiated_blksize = blksize.clamp(512, 1432);
+        negotiated_blksize = blksize.clamp(DEFAULT_BLKSIZE, MAX_BLKSIZE);
         options.push(("blksize", negotiated_blksize.to_string()));
     }
 
     if let Some(timeout) = request.timeout {
-        negotiated_timeout = timeout.clamp(1, 10);
+        negotiated_timeout = timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
         options.push(("timeout", negotiated_timeout.to_string()));
     }
 
@@ -182,138 +165,153 @@ async fn handle_tftp_transfer(
         options.push(("tsize", file_size.to_string()));
     }
 
+    if let Some(windowsize) = request.windowsize {
+        // RFC 7440: a window of N blocks per ACK. Clamp to [1, MAX_WINDOWSIZE]
+        // so a client cannot force us to buffer an unbounded window in memory.
+        negotiated_windowsize = windowsize.clamp(1, MAX_WINDOWSIZE);
+        options.push(("windowsize", negotiated_windowsize.to_string()));
+    }
+
     // If options are negotiated, send OACK and wait for ACK 0
+    // Any receive that isn't the expected ACK (timeout OR wrong-block ACK OR
+    // random garbage) counts against the retry budget. Without this a
+    // malicious/broken client can wedge us in a busy loop by flooding
+    // wrong-block ACKs.
+    const MAX_RETRIES: u32 = 5;
+    // Overall per-transfer deadline so a slow drip of wrong-block ACKs can't
+    // keep the transfer alive indefinitely.
+    const TRANSFER_DEADLINE: Duration = Duration::from_secs(120);
+    let retry_policy = RetryPolicy {
+        per_try_timeout: Duration::from_secs(negotiated_timeout),
+        max_retries: MAX_RETRIES,
+        deadline: std::time::Instant::now() + TRANSFER_DEADLINE,
+    };
+
     if !options.is_empty() {
         let oack_pkt = make_oack_packet(&options);
-        let mut retries = 0;
-        let mut acked = false;
-
-        while retries < 5 {
-            if let Err(e) = socket.send(&oack_pkt).await {
-                error!("Failed to send OACK to {}: {:?}", client_addr, e);
-                return Err(e);
+        match send_and_await_ack(
+            &socket,
+            &oack_pkt,
+            0,
+            retry_policy,
+            client_addr,
+            "OACK negotiation",
+        )
+        .await
+        {
+            Ok(AckOutcome::Acked) => {}
+            Ok(AckOutcome::ClientError) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "client aborted during OACK negotiation",
+                );
+                return Ok(());
             }
-
-            let mut ack_buf = [0u8; 1024];
-            match tokio::time::timeout(
-                Duration::from_secs(negotiated_timeout),
-                socket.recv(&mut ack_buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) => {
-                    let rec = &ack_buf[..n];
-                    if is_error_packet(rec) {
-                        warn!(
-                            "Received TFTP error from client {} during option negotiation",
-                            client_addr
-                        );
-                        return Ok(());
-                    }
-                    if let Some(0) = parse_ack_packet(rec) {
-                        acked = true;
-                        break;
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!("Error receiving OACK ACK from {}: {:?}", client_addr, e);
-                    return Err(e);
-                }
-                Err(_) => {
-                    debug!(
-                        "Timeout waiting for OACK ACK from {}, retrying...",
-                        client_addr
-                    );
-                    retries += 1;
-                }
-            }
-        }
-
-        if !acked {
-            error!(
-                "OACK negotiation with {} timed out after max retries",
-                client_addr
-            );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "OACK negotiation timed out",
-            ));
-        }
-    }
-
-    // 4. Send DATA blocks
-    let mut block_num: u16 = 1;
-    let mut finished = false;
-    let mut read_buf = vec![0u8; negotiated_blksize];
-    let mut current_block_data;
-
-    // Read first block
-    let bytes_read = file.read(&mut read_buf).await?;
-    current_block_data = read_buf[..bytes_read].to_vec();
-    if bytes_read < negotiated_blksize {
-        finished = true;
-    }
-
-    loop {
-        let data_pkt = make_data_packet(block_num, &current_block_data);
-        let mut retries = 0;
-        let mut acked = false;
-
-        while retries < 5 {
-            if let Err(e) = socket.send(&data_pkt).await {
+            Ok(AckOutcome::GaveUp) => {
                 error!(
-                    "Failed to send TFTP block {} to {}: {:?}",
-                    block_num, client_addr, e
+                    "OACK negotiation with {} timed out after max retries",
+                    client_addr
+                );
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "OACK negotiation timed out",
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "OACK negotiation timed out",
+                ));
+            }
+            Err(e) => {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during OACK negotiation",
                 );
                 return Err(e);
             }
+        }
+    }
 
-            let mut ack_buf = [0u8; 1024];
-            match tokio::time::timeout(
-                Duration::from_secs(negotiated_timeout),
-                socket.recv(&mut ack_buf),
-            )
-            .await
-            {
-                Ok(Ok(n)) => {
-                    let rec = &ack_buf[..n];
-                    if is_error_packet(rec) {
-                        warn!(
-                            "Received TFTP error from client {} during transfer",
-                            client_addr
-                        );
-                        return Ok(());
-                    }
-                    if let Some(ack_block) = parse_ack_packet(rec) {
-                        if ack_block == block_num {
-                            acked = true;
-                            break;
-                        } else {
-                            debug!(
-                                "Received ACK for block {}, expected block {} from {}",
-                                ack_block, block_num, client_addr
-                            );
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!("Error receiving TFTP ACK from {}: {:?}", client_addr, e);
-                    return Err(e);
-                }
-                Err(_) => {
-                    debug!(
-                        "Timeout waiting for ACK block {} from {}, retrying...",
-                        block_num, client_addr
-                    );
-                    retries += 1;
-                }
+    // 4. Send DATA blocks with a sliding window (RFC 7440), go-back-N on loss.
+    //    A negotiated window of 1 is ordinary stop-and-wait. The window's blocks
+    //    are buffered so a retransmission never re-reads the file, and reads are
+    //    strictly forward (a rollback replays from the buffer).
+    let window = negotiated_windowsize as u64;
+    let mut read_buf = vec![0u8; negotiated_blksize];
+    // Buffered window blocks keyed by absolute (1-indexed) block number.
+    let mut buffered: std::collections::BTreeMap<u64, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut base: u64 = 1; // first unacknowledged block
+    let mut next_to_send: u64 = 1; // next block to transmit
+    let mut last_block: Option<u64> = None; // absolute number of the final (short) block
+    let mut retries: u32 = 0;
+    let mut ack_buf = [0u8; 1024];
+
+    // TFTP block numbers are 16-bit and start at 1, wrapping 65535 -> 0.
+    let wire_of = |abs: u64| -> u16 { (abs % 65_536) as u16 };
+
+    // Send a DATA packet, marking the host failed on an I/O error before
+    // propagating it.
+    macro_rules! send_data_or_fail {
+        ($abs:expr, $data:expr) => {
+            if let Err(e) = socket.send(&make_data_packet(wire_of($abs), $data)).await {
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during data transfer",
+                );
+                return Err(e);
             }
+        };
+    }
+
+    loop {
+        // Fill the window: transmit every block in [base, base + window) not yet
+        // sent, reading forward from the file. Retransmits reuse the buffer, so
+        // `read_fill` only ever runs on brand-new blocks — a short read (legal
+        // for AsyncRead) is NOT mistaken for EOF, only a genuine `0` marks it.
+        while next_to_send < base + window {
+            if let Some(lb) = last_block
+                && next_to_send > lb
+            {
+                break; // nothing past the terminating block
+            }
+            let data = match buffered.get(&next_to_send) {
+                Some(d) => d.clone(),
+                None => {
+                    let (bytes_read, hit_eof) = read_fill(&mut file, &mut read_buf).await?;
+                    let d = read_buf[..bytes_read].to_vec();
+                    if hit_eof || bytes_read < negotiated_blksize {
+                        last_block = Some(next_to_send);
+                    }
+                    buffered.insert(next_to_send, d.clone());
+                    d
+                }
+            };
+            send_data_or_fail!(next_to_send, &data);
+            next_to_send += 1;
         }
 
-        if !acked {
+        // Bound the wait: retry budget and the overall transfer deadline. Any
+        // receive that isn't a window-advancing ACK (timeout, old/dup ACK, or
+        // garbage) counts against the retry budget so a broken/malicious client
+        // cannot wedge us in a busy loop.
+        if retries >= retry_policy.max_retries || std::time::Instant::now() >= retry_policy.deadline
+        {
             error!(
-                "TFTP transfer to {} timed out waiting for ACK block {}",
-                client_addr, block_num
+                "TFTP transfer to {} timed out waiting for ACK (base block {})",
+                client_addr, base
+            );
+            mark_tftp_failed(
+                &state_store,
+                &mac_addr,
+                &file_path,
+                "timed out waiting for data ACK",
             );
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -321,42 +319,300 @@ async fn handle_tftp_transfer(
             ));
         }
 
-        if finished {
-            info!(
-                "TFTP transfer to {} completed successfully ({} blocks sent)",
-                client_addr, block_num
-            );
-            if let Some(ref mac) = mac_addr {
-                state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
-                state_store.log_event(
-                    "INFO",
-                    Some(mac),
-                    &format!("TFTP transfer completed: {} blocks sent", block_num),
-                );
+        match tokio::time::timeout(retry_policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
+            Ok(Ok(n)) => {
+                let rec = &ack_buf[..n];
+                if is_error_packet(rec) {
+                    warn!(
+                        "Received TFTP error from client {} during data transfer",
+                        client_addr
+                    );
+                    mark_tftp_failed(
+                        &state_store,
+                        &mac_addr,
+                        &file_path,
+                        "client aborted during data transfer",
+                    );
+                    return Ok(());
+                }
+                match parse_ack_packet(rec) {
+                    Some(acked_wire) => {
+                        // Map the wire ACK to an absolute block in the in-flight
+                        // range [base, next_to_send). Only an ACK for a block we
+                        // actually sent advances the window.
+                        let acked_abs =
+                            (base..next_to_send).find(|&abs| wire_of(abs) == acked_wire);
+                        match acked_abs {
+                            Some(abs) => {
+                                let was_partial = abs + 1 < next_to_send;
+                                // Cumulative ACK: retire blocks up to `abs`.
+                                base = abs + 1;
+                                buffered.retain(|&k, _| k >= base);
+                                retries = 0;
+                                if let Some(lb) = last_block
+                                    && base > lb
+                                {
+                                    break; // whole file acknowledged
+                                }
+                                // An ACK for an earlier block than the last one
+                                // sent means the blocks after it were lost or
+                                // dropped out-of-order: roll back to `base` and
+                                // resend the window from there (go-back-N).
+                                if was_partial {
+                                    next_to_send = base;
+                                }
+                            }
+                            None => {
+                                // Old/duplicate ACK or garbage — retry budget.
+                                debug!(
+                                    "Unexpected ACK block {} from {}, retrying...",
+                                    acked_wire, client_addr
+                                );
+                                retries += 1;
+                            }
+                        }
+                    }
+                    None => {
+                        debug!(
+                            "Unexpected packet during data transfer from {}, retrying...",
+                            client_addr
+                        );
+                        retries += 1;
+                    }
+                }
             }
-            break;
-        }
-
-        // Read next block
-        block_num = block_num.wrapping_add(1);
-        let bytes_read = file.read(&mut read_buf).await?;
-        current_block_data = read_buf[..bytes_read].to_vec();
-        if bytes_read < negotiated_blksize {
-            finished = true;
+            Ok(Err(e)) => {
+                error!("Error receiving TFTP ACK from {}: {:?}", client_addr, e);
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "I/O error during data transfer",
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                // Timeout — roll back to `base` and resend the whole window.
+                debug!(
+                    "Timeout waiting for ACK from {}, resending window...",
+                    client_addr
+                );
+                retries += 1;
+                next_to_send = base;
+            }
         }
     }
+
+    let total_blocks = last_block.unwrap_or(0);
+    info!(
+        "TFTP transfer to {} completed successfully ({} blocks sent, windowsize {})",
+        client_addr, total_blocks, negotiated_windowsize
+    );
+    if let Some(ref mac) = mac_addr {
+        state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
+        state_store.log_event(
+            "INFO",
+            Some(mac),
+            &format!("TFTP transfer completed: {} blocks sent", total_blocks),
+        );
+    }
+    bootycall_log::event!(
+        "tftp_transfer_complete",
+        mac = mac_addr.as_deref().unwrap_or(""),
+        file = %file_path.display(),
+        bytes = file_size,
+        blocks = total_blocks,
+        windowsize = negotiated_windowsize,
+        duration_ms = transfer_start.elapsed().as_millis() as u64,
+    );
 
     Ok(())
 }
 
+/// Result of sending a packet and waiting for the matching ACK.
+enum AckOutcome {
+    /// The expected block number was acknowledged.
+    Acked,
+    /// The client sent a TFTP ERROR packet — abort the transfer cleanly.
+    ClientError,
+    /// The retry budget or the overall deadline was exhausted.
+    GaveUp,
+}
+
+/// Retry-bounding parameters shared by every send-and-await-ack step of a
+/// single transfer: identical for OACK negotiation and every DATA block.
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    /// How long to wait for one ACK before counting a retry.
+    per_try_timeout: Duration,
+    /// Maximum number of retries before giving up.
+    max_retries: u32,
+    /// Overall per-transfer deadline; retries stop once it passes.
+    deadline: std::time::Instant,
+}
+
+/// Send `packet` and wait for an ACK of `expected_block`, retrying on timeout
+/// or unexpected packets until either `max_retries` is reached or `deadline`
+/// passes.
+///
+/// Any receive that isn't the expected ACK (timeout, wrong-block ACK, or
+/// random garbage) counts against the retry budget so a malicious/broken
+/// client cannot wedge us in a busy loop by flooding wrong-block ACKs. A
+/// client-sent ERROR packet aborts immediately with [`AckOutcome::ClientError`].
+/// Genuine send/recv I/O errors are propagated to the caller.
+async fn send_and_await_ack(
+    socket: &UdpSocket,
+    packet: &[u8],
+    expected_block: u16,
+    policy: RetryPolicy,
+    client_addr: SocketAddr,
+    what: &str,
+) -> std::io::Result<AckOutcome> {
+    let mut retries: u32 = 0;
+
+    while retries < policy.max_retries && std::time::Instant::now() < policy.deadline {
+        if let Err(e) = socket.send(packet).await {
+            error!("Failed to send during {} to {}: {:?}", what, client_addr, e);
+            return Err(e);
+        }
+
+        let mut ack_buf = [0u8; 1024];
+        match tokio::time::timeout(policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
+            Ok(Ok(n)) => {
+                let rec = &ack_buf[..n];
+                if is_error_packet(rec) {
+                    warn!(
+                        "Received TFTP error from client {} during {}",
+                        client_addr, what
+                    );
+                    return Ok(AckOutcome::ClientError);
+                }
+                if let Some(ack_block) = parse_ack_packet(rec)
+                    && ack_block == expected_block
+                {
+                    return Ok(AckOutcome::Acked);
+                }
+                // Anything else (wrong block, wrong opcode, garbage) —
+                // count it toward the retry bound, not just timeouts.
+                debug!(
+                    "Unexpected packet during {} from {}, retrying...",
+                    what, client_addr
+                );
+                retries += 1;
+            }
+            Ok(Err(e)) => {
+                error!(
+                    "Error receiving ACK from {} during {}: {:?}",
+                    client_addr, what, e
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                debug!("Timeout during {} from {}, retrying...", what, client_addr);
+                retries += 1;
+            }
+        }
+    }
+
+    Ok(AckOutcome::GaveUp)
+}
+
+/// Mark a host's boot as failed and emit a `tftp_transfer_failed` event.
+///
+/// Called from every TFTP failure path (retry/deadline give-up, a client-sent
+/// ERROR packet, or a send/recv I/O error) so a stalled host moves out of
+/// `Booting` into `Failed` instead of being stuck there forever, and the
+/// status API / dashboard can surface the failed boot.
+fn mark_tftp_failed(
+    state_store: &StateStore,
+    mac_addr: &Option<String>,
+    file_path: &std::path::Path,
+    reason: &str,
+) {
+    if let Some(mac) = mac_addr {
+        state_store.update_host_status(mac, HostStatus::Failed, None, None, None, None);
+        state_store.log_event(
+            "ERROR",
+            Some(mac),
+            &format!("TFTP transfer failed: {}", reason),
+        );
+    }
+    bootycall_log::event!(
+        "tftp_transfer_failed",
+        mac = mac_addr.as_deref().unwrap_or(""),
+        file = %file_path.display(),
+        reason = reason,
+    );
+}
+
+/// Fill `buf` from `file`, looping over multiple `read` calls if needed.
+/// Returns `(bytes_read, hit_eof)`. `hit_eof` is true only when a `read`
+/// call returned `0` — that's the only reliable EOF signal from AsyncRead.
+/// A short-but-nonzero read from the underlying reader used to be treated
+/// as EOF and truncated the served file mid-transfer.
+async fn read_fill(file: &mut tokio::fs::File, buf: &mut [u8]) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = file.read(&mut buf[total..]).await?;
+        if n == 0 {
+            return Ok((total, true));
+        }
+        total += n;
+    }
+    Ok((total, false))
+}
+
+/// Ceiling on simultaneous TFTP transfers. Each transfer spawns a task and
+/// opens a fresh UDP socket; without a bound a bogus RRQ flood exhausts
+/// sockets and file descriptors. RFC 1350 transfers are one-shot boot
+/// artefacts, so a modest limit is plenty for real workloads.
+const MAX_CONCURRENT_TRANSFERS: usize = 128;
+
+/// Upper bound on the negotiated RFC 7440 window size. The in-flight window is
+/// buffered in memory (`window * blksize` bytes per transfer), so this caps a
+/// client's ability to force us to buffer unboundedly.
+const MAX_WINDOWSIZE: u16 = 32;
+
+/// RFC 1350 default TFTP block size, and the smallest `blksize` we negotiate
+/// down to (also the initial value before any `blksize` option is seen).
+const DEFAULT_BLKSIZE: usize = 512;
+/// Upper bound on a negotiated `blksize`. Kept under the common 1500-byte
+/// Ethernet MTU (less the 20-byte IP + 8-byte UDP + 4-byte TFTP headers) so a
+/// single DATA packet is not IP-fragmented on a standard LAN.
+const MAX_BLKSIZE: usize = 1432;
+
+/// RFC 2349 default per-packet retransmission timeout, in seconds — the value
+/// used before any `timeout` option is negotiated.
+const DEFAULT_TIMEOUT_SECS: u64 = 3;
+/// Clamp range, in seconds, for a client-requested `timeout` option.
+const MIN_TIMEOUT_SECS: u64 = 1;
+const MAX_TIMEOUT_SECS: u64 = 10;
+
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
+///
+/// Concurrent transfers are bounded by [`MAX_CONCURRENT_TRANSFERS`]. Use
+/// [`run_tftp_server_with_limit`] to override the bound (tests inject a small
+/// limit to exercise the "Server busy" rejection).
 pub async fn run_tftp_server(
     bind_addr: &str,
-    config: Arc<std::sync::RwLock<Config>>,
+    config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
+) -> Result<(), std::io::Error> {
+    run_tftp_server_with_limit(bind_addr, config, state_store, MAX_CONCURRENT_TRANSFERS).await
+}
+
+/// Like [`run_tftp_server`] but with an explicit concurrent-transfer bound so
+/// tests can drive the semaphore-rejection ("Server busy") path at a small
+/// limit instead of the production default of 128.
+pub async fn run_tftp_server_with_limit(
+    bind_addr: &str,
+    config: Arc<parking_lot::RwLock<Config>>,
+    state_store: StateStore,
+    max_concurrent_transfers: usize,
 ) -> Result<(), std::io::Error> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
+    let transfer_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent_transfers));
 
     let mut buf = [0u8; 1500];
     loop {
@@ -369,6 +625,29 @@ pub async fn run_tftp_server(
         };
 
         let packet = &buf[..len];
+        // Distinguish "not a valid RRQ" from "RRQ we can serve": WRQ and
+        // unknown opcodes deserve a proper TFTP ERROR reply so a bad client
+        // sees why it failed instead of silently timing out.
+        if packet.len() >= 2 {
+            let opcode = u16::from_be_bytes([packet[0], packet[1]]);
+            match opcode {
+                OP_RRQ => {} // RRQ — normal path below
+                OP_WRQ => {
+                    // WRQ — writes are not supported; RFC 1350 error code 4.
+                    let err = make_error_packet(4, "Illegal TFTP operation (WRQ not supported)");
+                    let _ = socket.send_to(&err, src_addr).await;
+                    continue;
+                }
+                _ => {
+                    // Any other opcode (DATA/ACK/OACK sent to the listener,
+                    // OACK from a client, etc.) — illegal on this socket.
+                    let err = make_error_packet(4, "Illegal TFTP operation");
+                    let _ = socket.send_to(&err, src_addr).await;
+                    continue;
+                }
+            }
+        }
+
         let request = match parse_rrq(packet) {
             Some(req) => req,
             None => {
@@ -384,7 +663,7 @@ pub async fn run_tftp_server(
         let filename = request.filename.clone();
 
         let (resolved_file_path, mac_addr) = {
-            let config_guard = config.read().unwrap();
+            let config_guard = config.read();
             let state_hosts = state_store.list_hosts();
             let host_state = state_hosts
                 .iter()
@@ -412,7 +691,8 @@ pub async fn run_tftp_server(
                 }
             }
 
-            let safe_path = resolve_safe_path(&config_guard.server.tftp_root, &final_filename);
+            let safe_path =
+                bootycall_core::safe_join(&config_guard.server.tftp_root, &final_filename);
             (safe_path, mac_addr)
         };
 
@@ -469,6 +749,23 @@ pub async fn run_tftp_server(
             continue;
         }
 
+        // Bound concurrent transfers via a semaphore permit held for the
+        // lifetime of the spawned task. A flood of RRQs then fails fast
+        // (client sees a TFTP ERROR "Server busy") instead of exhausting
+        // sockets and file descriptors.
+        let permit = match transfer_slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(
+                    "Refusing TFTP transfer to {}: {} concurrent transfers already in flight",
+                    src_addr, max_concurrent_transfers
+                );
+                let err = make_error_packet(0, "Server busy");
+                let _ = transfer_socket.send(&err).await;
+                continue;
+            }
+        };
+
         let transfer_state_store = state_store.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_tftp_transfer(
@@ -486,6 +783,7 @@ pub async fn run_tftp_server(
                     src_addr, e
                 );
             }
+            drop(permit);
         });
     }
 }

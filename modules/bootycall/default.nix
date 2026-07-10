@@ -10,13 +10,43 @@ let
   bootycallPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   assetsPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
 
-  # Extract port number from a "host:port" bind address string
-  extractPort =
+  # Parse the port out of a "host:port" bind address, returning null when the
+  # address has no ":port" (e.g. a bare IP). Returning null rather than calling
+  # lib.toInt on the whole string lets the assertions below report a clear
+  # error instead of crashing deep inside the firewall port defaults.
+  bindPort =
     bind:
     let
       parts = lib.splitString ":" bind;
+      portStr = lib.last parts;
     in
-    lib.toInt (lib.last parts);
+    if lib.length parts >= 2 && portStr != "" then lib.toInt portStr else null;
+
+  # The firewall port defaults need a concrete port; fall back to a harmless
+  # placeholder for a malformed bind. The matching assertion fails the build
+  # before the firewall is ever configured, so the placeholder never ships.
+  extractPort =
+    bind:
+    let
+      port = bindPort bind;
+    in
+    if port == null then 0 else port;
+
+  # Bind options that must carry a ":port", checked by assertions below.
+  portBinds = [
+    {
+      name = "server.httpBind";
+      value = cfg.server.httpBind;
+    }
+    {
+      name = "server.tftpBind";
+      value = cfg.server.tftpBind;
+    }
+    {
+      name = "server.proxyDhcpBind";
+      value = cfg.server.proxyDhcpBind;
+    }
+  ];
 
   # Generate the bootycall.yaml configuration file from Nix options
   generatedConfigFile = pkgs.writeText "bootycall.yaml" (
@@ -27,8 +57,12 @@ let
         tftp_root = cfg.server.tftpRoot;
         proxy_dhcp_bind = cfg.server.proxyDhcpBind;
         cache_dir = cfg.server.cacheDir;
+        # Absolute static-asset root so serving is independent of the unit's
+        # working directory (matches where preStart seeds the default assets).
+        static_dir = "${cfg.dataDir}/static";
         default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
         default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
+        default_bootloader_bios = cfg.server.defaultBootloaderBios;
       };
       hosts = map (
         h:
@@ -121,6 +155,47 @@ in
       description = "Whether to automatically open firewall ports for BootyCall services.";
     };
 
+    hardware = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Relax the hardened systemd unit so the OLED display and status
+          LED can drive real hardware. Enabling this replaces
+          `PrivateDevices = true` with targeted `DeviceAllow` entries for
+          the GPIO chip and framebuffer, and adds the `gpio` and `video`
+          supplementary groups so the DynamicUser can talk to
+          `/dev/gpiochip0` and `/dev/fb0`. The `gpio` group is created
+          automatically (it is not a NixOS default), and — unless
+          `hardware.manageUdevRules` is disabled — a udev rule assigning the
+          `gpiochip*` devices to it is installed too. Leave this off on
+          hardware that does not have the rackmount OLED (the default
+          hardening will keep BootyCall away from `/dev` entirely).
+        '';
+      };
+      gpioDevices = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "/dev/gpiochip0" ];
+        description = "GPIO chip character devices exposed to the unit when `hardware.enable` is true.";
+      };
+      framebufferDevices = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "/dev/fb0" ];
+        description = "Framebuffer character devices exposed to the unit when `hardware.enable` is true.";
+      };
+      manageUdevRules = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          When `hardware.enable` is set, install a udev rule assigning the GPIO
+          character devices (`gpiochip*`) to the `gpio` group, so the service's
+          DynamicUser (a member of that group) can actually open them. The
+          framebuffer already belongs to the standard `video` group. Set this
+          to false to manage the udev rule yourself. See `docs/operations.md`.
+        '';
+      };
+    };
+
     server = {
       httpBind = lib.mkOption {
         type = lib.types.str;
@@ -165,6 +240,12 @@ in
         default = "boot/arm64/ipxe.efi";
         description = "Default bootloader path for ARM64 UEFI clients.";
       };
+
+      defaultBootloaderBios = lib.mkOption {
+        type = lib.types.str;
+        default = "boot/x64/undionly.kpxe";
+        description = "Default bootloader path for legacy BIOS PXE clients (Option 93 architecture 0), which cannot execute an EFI image.";
+      };
     };
 
     hosts = lib.mkOption {
@@ -201,9 +282,50 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions =
+      # Every bind address must carry a ":port" — otherwise extractPort (used
+      # for the firewall defaults) has nothing to parse. Report it clearly at
+      # eval instead of crashing inside lib.toInt.
+      (map (b: {
+        assertion = bindPort b.value != null;
+        message = ''
+          services.bootycall.${b.name}: bind address "${b.value}" is missing a
+          ":port" (expected e.g. "0.0.0.0:8080").
+        '';
+      }) portBinds)
+      ++ [
+        # configFile fully replaces the generated config, so declaring hosts
+        # alongside it silently drops them. Make the operator pick one source.
+        {
+          assertion = !(cfg.configFile != null && cfg.hosts != [ ]);
+          message = ''
+            services.bootycall: `configFile` is set together with declarative
+            `hosts`. An external `configFile` fully replaces the generated
+            configuration, so the declarative `hosts` would be silently ignored.
+            Provide either an external `configFile` or the declarative
+            `server`/`hosts` options, not both.
+          '';
+        }
+      ];
+
     networking.firewall = lib.mkIf cfg.openFirewall {
       allowedTCPPorts = cfg.firewallPorts.tcp;
       allowedUDPPorts = cfg.firewallPorts.udp;
+    };
+
+    # Assign the GPIO character devices to the `gpio` group the service's
+    # DynamicUser joins, turning the "udev rules are expected to assign the
+    # device nodes" note into a shipped default. See docs/operations.md.
+    services.udev.extraRules = lib.mkIf (cfg.hardware.enable && cfg.hardware.manageUdevRules) ''
+      SUBSYSTEM=="gpio", KERNEL=="gpiochip[0-9]*", GROUP="gpio", MODE="0660"
+    '';
+
+    # DynamicUser joins these supplementary groups when hardware.enable is
+    # set. `video` is standard on NixOS but `gpio` is not, so ensure it
+    # exists — otherwise the unit fails to start. The gpiochip device is
+    # assigned to this group by the udev rule below (hardware.manageUdevRules).
+    users.groups = lib.mkIf cfg.hardware.enable {
+      gpio = { };
     };
 
     systemd.services.bootycall = {
@@ -231,17 +353,42 @@ in
       serviceConfig = {
         ExecStart = "${bootycallPkg}/bin/bootycall-rs --config ${configFile}";
         Restart = "always";
+        # Readiness probe: `GET http://<http_bind>/api/health` returns 200 when
+        # every configured host has cached boot artifacts ready to serve and 503
+        # (JSON `{status: "degraded", hosts_not_ready: [...]}`) otherwise. An
+        # external monitor — or a future sd_notify-based `WatchdogSec` — can poll
+        # it to catch silent degradation.
         DynamicUser = true;
         StateDirectory = "bootycall";
         WorkingDirectory = cfg.dataDir;
         Environment = [
           "TFTP_ROOT=${cfg.server.tftpRoot}"
           "STATIC_ROOT=${cfg.dataDir}/static"
+          # Emit structured lifecycle events as one JSON object per line so a
+          # collector (e.g. Vector) can route them into ClickHouse. See
+          # docs/observability.md.
+          "BOOTYCALL_LOG_FORMAT=json"
         ];
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
         NoNewPrivileges = true;
-        PrivateDevices = true;
+        # `PrivateDevices = true` gives us a private /dev with no physical
+        # devices — great for the network-only path, but incompatible with
+        # the OLED/LED code, which needs /dev/gpiochip0 + /dev/fb0. Gate
+        # the relaxation behind `hardware.enable` so the strict default
+        # stands on boxes that don't have the rackmount accessory.
+        PrivateDevices = !cfg.hardware.enable;
+      }
+      // lib.optionalAttrs cfg.hardware.enable {
+        DeviceAllow = map (d: "${d} rw") (cfg.hardware.gpioDevices ++ cfg.hardware.framebufferDevices);
+        # DynamicUser doesn't inherit any group memberships by default, so
+        # spell out the ones needed to talk to those char devices.
+        SupplementaryGroups = [
+          "gpio"
+          "video"
+        ];
+      }
+      // {
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = [

@@ -34,7 +34,10 @@ in
   packages = with pkgs; [
     bashInteractive
     bootycall
-    cargo-edit # Adds the 'cargo upgrade'
+    cargo-audit
+    cargo-deny # RustSec advisories + license/ban/source policy
+    cargo-edit # Adds 'cargo upgrade'
+    cargo-machete # Detects unused workspace dependencies
     figlet
     gh
     hello
@@ -44,20 +47,28 @@ in
   ];
 
   enterShell = ''
-    figlet -f starwars -w 180 $PROJECT
+    if [[ "${"CI:-false"}" == "true" ]]; then
+      echo "devenv running in CI"
+    else
+      figlet -f slant -w 180 "$(echo "$PROJECT" | tr '[:lower:]-' '[:upper:] ')"
 
-    hello --greeting="Hello ''${USER:-user}, welcome to the $PROJECT project!"
+      hello --greeting="Hello ''${USER:-user}, welcome to the $PROJECT project."
 
-    echo ""
-    echo "#########################"
-    echo "#### Helper scripts #####"
-    echo "#########################"
-    echo "🦾"
-    ${pkgs.gnused}/bin/sed -e 's| |••|g' -e 's|=| |' <<EOF | ${pkgs.util-linuxMinimal}/bin/column -t | ${pkgs.gnused}/bin/sed -e 's|^|🦾 |' -e 's|••| |g'
-    ${lib.generators.toKeyValue { } (lib.mapAttrs (_name: value: value.description) config.scripts)}
-    EOF
-    echo "🦾"
-    echo "#########################"
+      ${lib.optionalString (config.scripts != { }) ''
+        echo ""
+        echo "#########################"
+        echo "#### Helper scripts #####"
+        echo "#########################"
+        echo "🦾"
+        ${lib.concatStrings (
+          lib.mapAttrsToList (
+            name: value: "printf '🦾 %-20s  %s\\n' '${name}' '${value.description}'\n"
+          ) config.scripts
+        )}
+        echo "🦾"
+        echo "#########################"
+      ''}
+    fi
   '';
 
   languages = {
@@ -74,16 +85,20 @@ in
 
   git-hooks = {
     excludes = [
+      ".*\\.drawio$"
       ".devenv/"
       "\\.git(/.*)?$"
       "^.vscode/"
-      "target/"
+      "^\\.cache(/.*)?$"
+      "^\\.devenv(/.*)?$"
+      "^\\.direnv(/.*)?$"
+      "^\\.git(/.*)?$"
       "^scratch(/.*)?$"
+      "target/"
     ];
     hooks = {
       actionlint.enable = true;
       action-validator.enable = true;
-
       check-json.enable = true;
       check-merge-conflicts.enable = true;
       check-shebang-scripts-are-executable = {
@@ -209,7 +224,6 @@ in
             "gruntfuggly.todo-tree"
             "hediet.vscode-drawio"
             "jnoortheen.nix-ide"
-            "mkhl.direnv"
             "nhoizey.gremlins"
             "pinage404.nix-extension-pack"
             "redhat.vscode-yaml"
@@ -250,6 +264,10 @@ in
   };
 
   enterTest = ''
-    echo "Running devenv tests..."
+    echo "Running workspace tests..."
+    # Actually run the suite so `devenv test` (locally and the ci-devenv-test
+    # job) is meaningful. --all-features matches ci-cargo-test and the clippy
+    # hook so feature-gated tests run too.
+    cargo test --workspace --all-features
   '';
 }

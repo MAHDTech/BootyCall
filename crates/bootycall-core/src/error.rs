@@ -11,9 +11,6 @@ pub enum CoreError {
     #[error("File watcher error: {0}")]
     Watcher(#[from] notify::Error),
 
-    #[error("Configuration error: {0}")]
-    Config(String),
-
-    #[error("Host not found for MAC address: {0}")]
-    HostNotFound(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }

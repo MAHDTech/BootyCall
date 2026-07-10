@@ -1,10 +1,16 @@
-# BootyCall 🦾
+# 📞 BootyCall
 
-`bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite written in Rust.
+![status](https://img.shields.io/badge/status-alpha-orange?style=for-the-badge)
 
-It serves as a modern replacement for the legacy stack of Caddy, TFTPd, and iPXE.
+`bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite.
+
+It serves as a modern replacement for the legacy stack of TFTPd, iPXE and integrates HTTP.
 
 It hosts three core protocols (Proxy DHCP, TFTP, and HTTP) on a single asynchronous Tokio runtime, working alongside your existing primary DHCP server.
+
+It was originally written to run on a _UniFi CloudKey Gen2 Plus_ so is built to be as lightweight as possible with a single goal, to _always answer the call_ to boot your servers.
+
+![teaser](./docs/images/teaser.png)
 
 ---
 
@@ -58,6 +64,7 @@ We use [devenv](https://devenv.sh) integrated with Nix flakes for our developmen
 
 ```bash
 nix develop --impure
+
 cargo run -p bootycall-rs -- --config bootycall.yaml
 ```
 
@@ -77,3 +84,5 @@ cargo test --all
 
 - [Specification Guide](docs/spec.md) - Deep architectural and schema details.
 - [Development Usage Guide](docs/usage.md) - How to setup directory trees, configure yaml, and bind privileged ports.
+- [Operations Runbook](docs/operations.md) - Day-two operations: cache reset, GPIO/udev requirements, unit recovery, and logs.
+- [Observability Guide](docs/observability.md) - Structured event schema and shipping boot activity into ClickHouse.

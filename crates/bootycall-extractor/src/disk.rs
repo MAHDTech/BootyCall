@@ -39,10 +39,34 @@ impl<F: Read + Seek> Read for PartitionSlice<F> {
 
 impl<F: Seek> Seek for PartitionSlice<F> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        let new_pos = match pos {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::End(offset) => self.len as i64 + offset,
-            SeekFrom::Current(offset) => self.pos as i64 + offset,
+        // BUG-12: use checked arithmetic instead of raw `as` casts. GPT
+        // offsets are untrusted (a crafted image can hand us
+        // near-`u64::MAX` values), and `i64::MAX as u64` silently wraps
+        // an out-of-range Start offset to a very small number without
+        // returning an error.
+        let new_pos: i64 = match pos {
+            SeekFrom::Start(offset) => i64::try_from(offset).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Seek offset too large")
+            })?,
+            SeekFrom::End(offset) => {
+                let base = i64::try_from(self.len).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Partition length too large")
+                })?;
+                base.checked_add(offset).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Seek overflowed partition end")
+                })?
+            }
+            SeekFrom::Current(offset) => {
+                let base = i64::try_from(self.pos).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "Partition position too large")
+                })?;
+                base.checked_add(offset).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Seek overflowed current position",
+                    )
+                })?
+            }
         };
 
         if new_pos < 0 {
@@ -83,6 +107,7 @@ pub fn extract_from_disk(
     initrd_override: Option<&str>,
     out_kernel_path: &Path,
     out_initrd_path: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<(), ExtractorError> {
     let disk = GptConfig::new()
         .writable(false)
@@ -123,23 +148,22 @@ pub fn extract_from_disk(
             let kernel_extracted = match kernel_override {
                 Some(kp) => {
                     if let Ok(mut fat_file) = root_dir.open_file(kp) {
-                        let mut out_file = File::create(out_kernel_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
+                        crate::copy_capped(&mut fat_file, out_kernel_path, max_bytes)?;
                         true
                     } else {
                         false
                     }
                 }
                 None => {
-                    if let Ok(Some(mut fat_file)) = find_file_recursive_fat(&root_dir, &|name| {
-                        let lower = name.to_lowercase();
-                        lower == "vmlinuz" || lower == "bzimage" || lower == "kernel"
-                    }) {
-                        let mut out_file = File::create(out_kernel_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
-                        true
-                    } else {
-                        false
+                    // Propagate genuine walker I/O errors (`?`) instead of
+                    // masking them as "not found"; only Ok(None) falls through
+                    // to the next partition.
+                    match find_file_recursive_fat(&root_dir, &|name| crate::is_kernel_name(name))? {
+                        Some(mut fat_file) => {
+                            crate::copy_capped(&mut fat_file, out_kernel_path, max_bytes)?;
+                            true
+                        }
+                        None => false,
                     }
                 }
             };
@@ -147,27 +171,29 @@ pub fn extract_from_disk(
             if !kernel_extracted {
                 continue; // Try next partition
             }
+            // Once we've extracted a kernel we're committed to this
+            // partition — a missing initrd here is a genuine error, not
+            // a signal to keep hunting through other partitions and
+            // eventually claim the kernel is missing too (BUG-13).
 
             let initrd_extracted = match initrd_override {
                 Some(ip) => {
                     if let Ok(mut fat_file) = root_dir.open_file(ip) {
-                        let mut out_file = File::create(out_initrd_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
+                        crate::copy_capped(&mut fat_file, out_initrd_path, max_bytes)?;
                         true
                     } else {
                         false
                     }
                 }
                 None => {
-                    if let Ok(Some(mut fat_file)) = find_file_recursive_fat(&root_dir, &|name| {
-                        let lower = name.to_lowercase();
-                        lower.contains("initrd") || lower.contains("initramfs")
-                    }) {
-                        let mut out_file = File::create(out_initrd_path)?;
-                        io::copy(&mut fat_file, &mut out_file)?;
-                        true
-                    } else {
-                        false
+                    // Propagate genuine walker I/O errors (`?`); Ok(None) means
+                    // no initrd on this (already kernel-bearing) partition.
+                    match find_file_recursive_fat(&root_dir, &|name| crate::is_initrd_name(name))? {
+                        Some(mut fat_file) => {
+                            crate::copy_capped(&mut fat_file, out_initrd_path, max_bytes)?;
+                            true
+                        }
+                        None => false,
                     }
                 }
             };
@@ -175,6 +201,7 @@ pub fn extract_from_disk(
             if initrd_extracted {
                 return Ok(());
             }
+            return Err(ExtractorError::InitrdNotFound);
         }
     }
 
@@ -185,6 +212,25 @@ fn find_file_recursive_fat<'a, T: ReadWriteSeek>(
     dir: &FatDir<'a, T>,
     filter: &dyn Fn(&str) -> bool,
 ) -> io::Result<Option<FatFile<'a, T>>> {
+    find_file_recursive_fat_bounded(dir, filter, 0)
+}
+
+/// Bound FAT directory recursion. `fatfs` abstracts cluster indices away, so
+/// a cycle-detection visited-set isn't practical from here — the depth cap is
+/// the pragmatic guard against pathological or cyclic images taking down the
+/// whole process via stack overflow.
+fn find_file_recursive_fat_bounded<'a, T: ReadWriteSeek>(
+    dir: &FatDir<'a, T>,
+    filter: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> io::Result<Option<FatFile<'a, T>>> {
+    if crate::iso::depth_exceeded(depth) {
+        bootycall_log::warn!(
+            "FAT walker hit MAX_DIR_DEPTH={} — refusing to recurse further",
+            crate::iso::MAX_DIR_DEPTH
+        );
+        return Ok(None);
+    }
     for entry_res in dir.iter() {
         let entry = entry_res?;
         let name = entry.file_name();
@@ -197,7 +243,7 @@ fn find_file_recursive_fat<'a, T: ReadWriteSeek>(
                 continue;
             }
             let subdir = entry.to_dir();
-            if let Some(found) = find_file_recursive_fat(&subdir, filter)? {
+            if let Some(found) = find_file_recursive_fat_bounded(&subdir, filter, depth + 1)? {
                 return Ok(Some(found));
             }
         }

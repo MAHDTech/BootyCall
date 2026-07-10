@@ -17,6 +17,12 @@ on:
   schedule:
     - cron: "0 0 * * 0"
 
+# Cancel superseded scans on the same ref rather than stacking duplicate,
+# long-running security scans on rapid pushes (mirrors ci.yml).
+concurrency:
+  group: codeql-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: read
@@ -39,7 +45,7 @@ jobs:
   analyze:
     name: CodeQL Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     continue-on-error: false
 
     strategy:

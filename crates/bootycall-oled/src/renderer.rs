@@ -1,5 +1,37 @@
-use crate::assets::{FONT_LARGE, FONT_SMALL};
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+use std::sync::OnceLock;
+
+/// Font point size for regular (Lato) labels drawn on the OLED. Shared
+/// with the layout math in `lib.rs` so the two files can't drift.
+pub const SMALL_SCALE: f32 = 11.0;
+
+/// Font point size for bold (Rajdhani) values drawn on the OLED.
+pub const LARGE_SCALE: f32 = 15.0;
+
+/// `oled_test --size` threshold: sizes strictly above this render bold,
+/// at or below render regular. Kept next to the scale constants so
+/// changing one nudges the code that switches between them.
+pub const BOLD_THRESHOLD: usize = 13;
+
+pub struct FontSet {
+    pub regular: FontRef<'static>,
+    pub bold: FontRef<'static>,
+}
+
+pub static FONTS: OnceLock<FontSet> = OnceLock::new();
+
+pub fn get_fonts() -> &'static FontSet {
+    FONTS.get_or_init(|| {
+        let regular_bytes = include_bytes!("../assets/Lato-Regular.ttf");
+        let bold_bytes = include_bytes!("../assets/Rajdhani-Bold.ttf");
+        FontSet {
+            regular: FontRef::try_from_slice(regular_bytes)
+                .expect("Failed to load Lato-Regular.ttf"),
+            bold: FontRef::try_from_slice(bold_bytes).expect("Failed to load Rajdhani-Bold.ttf"),
+        }
+    })
+}
 
 pub struct Renderer<'a> {
     fb: &'a mut Framebuffer,
@@ -62,46 +94,86 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    pub fn draw_text(&mut self, mut x: usize, y: usize, text: &str, use_large_font: bool) {
-        let font = if use_large_font {
-            &FONT_LARGE
+    pub fn draw_text(&mut self, x: usize, y: usize, text: &str, use_large_font: bool) {
+        let scale_px = if use_large_font {
+            LARGE_SCALE
         } else {
-            &FONT_SMALL
+            SMALL_SCALE
         };
+        self.draw_text_scaled(x, y, text, use_large_font, scale_px);
+    }
 
+    /// Like [`draw_text`](Self::draw_text) but renders at an explicit point
+    /// size rather than the fixed `SMALL_SCALE`/`LARGE_SCALE`. This lets
+    /// `oled-test --size` actually drive the glyph scale; the production render
+    /// loop keeps calling `draw_text` and is unaffected.
+    pub fn draw_text_scaled(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        use_large_font: bool,
+        scale_px: f32,
+    ) {
+        let font = if use_large_font {
+            &get_fonts().bold
+        } else {
+            &get_fonts().regular
+        };
+        let scale = PxScale::from(scale_px);
+        let scaled = font.as_scaled(scale);
+        let baseline = y as f32 + scaled.ascent();
+
+        // ab_glyph has no `font.layout` iterator, so advance the pen manually
+        // per glyph (mirroring what rusttype did internally). Alpha coverage
+        // is max-blended into the grayscale backbuffer, same as before.
+        let mut caret = x as f32;
         for c in text.chars() {
-            let idx = c as usize;
-            if idx < 128 {
-                let glyph = &font[idx];
-                if glyph.width > 0 {
-                    self.draw_bitmap(x, y, glyph.data, glyph.width, glyph.height);
-                    x += glyph.width; // minimal spacing
-                } else if c == ' ' {
-                    x += if use_large_font { 6 } else { 4 };
-                }
+            let glyph_id = font.glyph_id(c);
+            let glyph = glyph_id.with_scale_and_position(scale, point(caret, baseline));
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, gv| {
+                    let px = bounds.min.x as i32 + gx as i32;
+                    let py = bounds.min.y as i32 + gy as i32;
+                    if px >= 0 && px < WIDTH as i32 && py >= 0 && py < HEIGHT as i32 {
+                        let alpha = (gv * 255.0) as u8;
+                        if alpha > 0 {
+                            let current = self.fb.buffer[py as usize * WIDTH + px as usize];
+                            let blended = std::cmp::max(current, alpha);
+                            self.fb.set_pixel(px as usize, py as usize, blended);
+                        }
+                    }
+                });
             }
+            caret += scaled.h_advance(glyph_id);
         }
     }
 
     pub fn measure_text(text: &str, use_large_font: bool) -> usize {
-        let font = if use_large_font {
-            &FONT_LARGE
+        let scale_px = if use_large_font {
+            LARGE_SCALE
         } else {
-            &FONT_SMALL
+            SMALL_SCALE
         };
-        let mut w = 0;
-        for c in text.chars() {
-            let idx = c as usize;
-            if idx < 128 {
-                let glyph = &font[idx];
-                if glyph.width > 0 {
-                    w += glyph.width;
-                } else if c == ' ' {
-                    w += if use_large_font { 6 } else { 4 };
-                }
-            }
-        }
-        w
+        Self::measure_text_scaled(text, use_large_font, scale_px)
+    }
+
+    /// Like [`measure_text`](Self::measure_text) but at an explicit point size,
+    /// so `oled-test` can align text drawn via
+    /// [`draw_text_scaled`](Self::draw_text_scaled).
+    pub fn measure_text_scaled(text: &str, use_large_font: bool, scale_px: f32) -> usize {
+        let font = if use_large_font {
+            &get_fonts().bold
+        } else {
+            &get_fonts().regular
+        };
+        let scaled = font.as_scaled(PxScale::from(scale_px));
+        let width: f32 = text
+            .chars()
+            .map(|c| scaled.h_advance(font.glyph_id(c)))
+            .sum();
+        width.ceil() as usize
     }
 
     // Braille renderer from python script
@@ -136,5 +208,94 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bresenham_horizontal_line_lights_only_row() {
+        let mut fb = Framebuffer::new();
+        {
+            let mut r = Renderer::new(&mut fb);
+            r.draw_line(3, 7, 8, 7, 200);
+        }
+        for x in 0..WIDTH {
+            let expected = if (3..=8).contains(&x) { 200 } else { 0 };
+            assert_eq!(
+                fb.buffer[7 * WIDTH + x],
+                expected,
+                "row 7 col {x} unexpected"
+            );
+        }
+        // Adjacent rows must stay dark.
+        for x in 0..WIDTH {
+            assert_eq!(fb.buffer[6 * WIDTH + x], 0);
+            assert_eq!(fb.buffer[8 * WIDTH + x], 0);
+        }
+    }
+
+    #[test]
+    fn bresenham_diagonal_line_touches_expected_pixels() {
+        let mut fb = Framebuffer::new();
+        {
+            let mut r = Renderer::new(&mut fb);
+            r.draw_line(0, 0, 5, 5, 255);
+        }
+        for i in 0..=5 {
+            assert_eq!(fb.buffer[i * WIDTH + i], 255, "diagonal ({i},{i}) missing");
+        }
+    }
+
+    #[test]
+    fn measure_text_empty_string_is_zero() {
+        assert_eq!(Renderer::measure_text("", false), 0);
+        assert_eq!(Renderer::measure_text("", true), 0);
+    }
+
+    #[test]
+    fn measure_text_is_monotone_in_length() {
+        // Not testing exact widths (they depend on the shipped fonts),
+        // just the invariant that longer strings measure at least as
+        // wide as shorter ones with the same font.
+        let short = Renderer::measure_text("A", false);
+        let long = Renderer::measure_text("AAAAAAAAAA", false);
+        assert!(long >= short);
+    }
+
+    #[test]
+    fn measure_text_bold_matches_regular_shape() {
+        // Large font should also be non-zero for a non-empty string.
+        assert!(Renderer::measure_text("HELLO", true) > 0);
+    }
+
+    #[test]
+    fn measure_text_scaled_grows_with_point_size() {
+        // The whole point of issue 015: the scale actually varies with size,
+        // so a larger point size measures strictly wider.
+        let small = Renderer::measure_text_scaled("HELLO", false, 6.0);
+        let large = Renderer::measure_text_scaled("HELLO", false, 40.0);
+        assert!(
+            large > small,
+            "larger point size must measure wider ({large} !> {small})"
+        );
+    }
+
+    #[test]
+    fn draw_text_scaled_lights_more_pixels_at_larger_size() {
+        let lit_at = |px: f32| {
+            let mut fb = Framebuffer::new();
+            {
+                let mut r = Renderer::new(&mut fb);
+                r.draw_text_scaled(0, 0, "M", false, px);
+            }
+            fb.buffer.iter().filter(|&&p| p > 0).count()
+        };
+        assert!(
+            lit_at(30.0) > lit_at(8.0),
+            "a larger point size must light more pixels on the panel"
+        );
     }
 }

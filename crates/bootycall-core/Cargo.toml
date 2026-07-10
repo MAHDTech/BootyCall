@@ -2,14 +2,18 @@
 name = "bootycall-core"
 version.workspace = true
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 notify = { workspace = true }
 bootycall-log = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

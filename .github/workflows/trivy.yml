@@ -17,6 +17,12 @@ on:
   schedule:
     - cron: "0 0 * * 0"
 
+# Cancel superseded scans on the same ref rather than stacking duplicate,
+# long-running security scans on rapid pushes (mirrors ci.yml).
+concurrency:
+  group: trivy-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   actions: write
   contents: read
@@ -40,7 +46,7 @@ jobs:
   scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     continue-on-error: false
 
     steps:

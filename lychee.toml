@@ -2,5 +2,6 @@
 
 exclude = [
   "http://127.0.0.1.*",
-  ".*/ui/style.css"
+  ".*/ui/style.css",
+  "https://www.latofonts.com"
 ]

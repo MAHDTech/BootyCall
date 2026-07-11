@@ -679,7 +679,7 @@ pub async fn run_tftp_server_with_limit(
 
         let filename = request.filename.clone();
 
-        let (resolved_file_path, mac_addr) = {
+        let (tftp_root, final_filename, mac_addr) = {
             let config_guard = config.read();
             let state_hosts = state_store.list_hosts();
             let host_state = state_hosts
@@ -708,9 +708,32 @@ pub async fn run_tftp_server_with_limit(
                 }
             }
 
-            let safe_path =
-                bootycall_core::safe_join(&config_guard.server.tftp_root, &final_filename);
-            (safe_path, mac_addr)
+            (
+                config_guard.server.tftp_root.clone(),
+                final_filename,
+                mac_addr,
+            )
+        };
+
+        // CONVENTION (issue 070): no blocking `std::fs` on the async runtime.
+        // `safe_join` canonicalises (two blocking stat/resolve syscalls), so
+        // it runs on the blocking pool — the listener is a single task and an
+        // inline call would stall every pending RRQ *and* the worker thread.
+        // The config read guard above is dropped first: awaiting while
+        // holding it would block config reloads for the duration of the
+        // filesystem work (parking_lot guards must never live across .await).
+        let resolved_file_path = match tokio::task::spawn_blocking(move || {
+            bootycall_core::safe_join(&tftp_root, &final_filename)
+        })
+        .await
+        {
+            Ok(path) => path,
+            Err(e) => {
+                // Task panicked or was cancelled — never fail open on a
+                // path-containment check; drop the request.
+                error!("TFTP path resolution task failed for {}: {:?}", src_addr, e);
+                continue;
+            }
         };
 
         let file_path = match resolved_file_path {

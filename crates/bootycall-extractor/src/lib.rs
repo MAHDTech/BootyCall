@@ -217,6 +217,12 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
 /// serve this host's boot artifacts right now". It does NOT stat the source
 /// image or trigger extraction, so it is cheap to poll and does not report
 /// degraded merely because a source ISO is momentarily unreachable.
+///
+/// Blocking: this performs two synchronous `std::fs` stats per call. Like the
+/// rest of this crate it is written for the synchronous extraction path;
+/// async callers must not invoke it directly on a tokio worker thread — wrap
+/// the sweep in `tokio::task::spawn_blocking`, as the HTTP `/api/health`
+/// handler does (issue 070).
 pub fn host_cache_ready(mac: &str, cache_dir: &Path) -> bool {
     let host_cache_dir = cache_dir.join(mac);
     let nonempty = |name: &str| {

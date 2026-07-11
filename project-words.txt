@@ -174,3 +174,9 @@ clickhouse
 evented
 journalctl
 udevadm
+NETLINK
+SUIDSGID
+Tunables
+getaddrinfo
+ioctls
+nscd

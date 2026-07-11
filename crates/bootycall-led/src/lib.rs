@@ -1,6 +1,8 @@
-use bootycall_log::info;
+use bootycall_log::{info, warn};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use tokio::time::{Duration, sleep};
 
 const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
@@ -12,20 +14,73 @@ const LED_TEST_BLINK_CYCLES: usize = 10;
 /// off for this long).
 const LED_TEST_BLINK_MS: u64 = 500;
 
+/// Errors returned by the public LED test entry point.
+#[derive(Debug, thiserror::Error)]
+pub enum LedError {
+    /// The requested test colour is not one of `blue`, `white`, or `off`.
+    #[error("Unknown LED color: {0}. Valid colors are blue, white, off.")]
+    UnknownColor(String),
+}
+
+/// Per-path availability latch (BUG-072). The rackmount LEDs are optional
+/// hardware: on a host without `/sys/class/leds/{blue,white}/brightness` the
+/// 500 ms `run_led_manager` tick would otherwise re-log the open failure
+/// forever (~4 error lines/sec). Mirroring the OLED `PanelSink.fb_available`
+/// latch, each path logs once on the present→absent transition, stays silent
+/// while absent, and logs once more if the node comes back.
+fn led_availability() -> &'static Mutex<HashMap<String, bool>> {
+    static LED_AVAILABILITY: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    LED_AVAILABILITY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Feed a write outcome into the availability latch, logging only on
+/// available↔absent transitions for `path`.
+fn note_led_write_result(path: &str, result: &std::io::Result<()>) {
+    let mut availability = led_availability()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let available = availability.entry(path.to_string()).or_insert(true);
+    match result {
+        Ok(()) => {
+            if !*available {
+                info!("LED path {} is now available", path);
+                *available = true;
+            }
+        }
+        Err(e) => {
+            if *available {
+                warn!(
+                    "LED path {} not available (optional hardware): {}; suppressing further messages until it returns",
+                    path, e
+                );
+                *available = false;
+            }
+        }
+    }
+}
+
+/// Raw sysfs write. Deliberately log-free: every caller routes the outcome
+/// through the availability latch (`note_led_write_result`) so absent
+/// hardware is logged once per transition, not per attempt.
+fn write_led_sysfs(path: &str, value: u8) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    write!(file, "{}", value)
+}
+
 fn set_led(path: &str, value: u8) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().write(true).open(path).map_err(|e| {
-        bootycall_log::error!("Failed to open LED path {}: {:?}", path, e);
-        e
-    })?;
-    write!(file, "{}", value).map_err(|e| {
-        bootycall_log::error!(
-            "Failed to write value {} to LED path {}: {:?}",
-            value,
-            path,
-            e
-        );
-        e
-    })
+    set_led_with(path, value, write_led_sysfs)
+}
+
+/// Same as `set_led` but takes the "actually write" closure as a parameter so
+/// unit tests can exercise the availability latch without touching
+/// `/sys/class/leds/*`.
+fn set_led_with<F>(path: &str, value: u8, mut writer: F) -> std::io::Result<()>
+where
+    F: FnMut(&str, u8) -> std::io::Result<()>,
+{
+    let result = writer(path, value);
+    note_led_write_result(path, &result);
+    result
 }
 
 /// Write `value` to `path` only when it differs from the last-known-good
@@ -34,20 +89,21 @@ fn set_led(path: &str, value: u8) -> std::io::Result<()> {
 /// calls thought the hardware was already in the right state and never
 /// retried.
 fn set_led_cached(path: &str, value: u8, last_value: &mut Option<u8>) {
-    set_led_cached_with(path, value, last_value, set_led);
+    set_led_cached_with(path, value, last_value, write_led_sysfs);
 }
 
 /// Same as `set_led_cached` but takes the "actually write" closure as a
 /// parameter so unit tests can exercise the caching-on-success logic
-/// without touching `/sys/class/leds/*`.
-fn set_led_cached_with<F>(path: &str, value: u8, last_value: &mut Option<u8>, mut writer: F)
+/// without touching `/sys/class/leds/*`. Writes route through
+/// `set_led_with`, so failures also drive the availability latch.
+fn set_led_cached_with<F>(path: &str, value: u8, last_value: &mut Option<u8>, writer: F)
 where
     F: FnMut(&str, u8) -> std::io::Result<()>,
 {
     if Some(value) == *last_value {
         return;
     }
-    if writer(path, value).is_ok() {
+    if set_led_with(path, value, writer).is_ok() {
         *last_value = Some(value);
     }
 }
@@ -145,7 +201,7 @@ pub async fn run_led_manager(
 }
 
 /// Dynamic LED testing for testing color and blinking states.
-pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
+pub fn led_test(color: &str, blinking: bool) -> Result<(), LedError> {
     // Resolve which sysfs path is driven "on" (255) for the requested colour;
     // the paired path is always driven to 0. `off` drives both to 0 (no "on"
     // path). This collapses the previously duplicated blue/white arms — which
@@ -155,10 +211,7 @@ pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
         "white" => (Some(LED_WHITE_PATH), LED_BLUE_PATH),
         "off" => (None, LED_WHITE_PATH),
         _ => {
-            return Err(anyhow::anyhow!(
-                "Unknown LED color: {}. Valid colors are blue, white, off.",
-                color
-            ));
+            return Err(LedError::UnknownColor(color.to_string()));
         }
     };
 
@@ -193,12 +246,63 @@ pub fn led_test(color: &str, blinking: bool) -> Result<(), anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::sync::Arc;
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // NOTE: the availability latch is process-global, so every test uses a
+    // unique mock path name to avoid interference between parallel tests.
+
+    /// A `MakeWriter` that appends everything into a shared buffer so a test
+    /// can inspect the formatted log output.
+    #[derive(Clone, Default)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `f` with a thread-scoped subscriber and return everything it
+    /// logged as a string.
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish();
+        let guard = subscriber.set_default();
+        f();
+        drop(guard);
+        let bytes = buf.0.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8(bytes.clone()).expect("log output must be valid UTF-8")
+    }
+
+    fn absent() -> io::Error {
+        io::Error::from(io::ErrorKind::NotFound)
+    }
 
     #[test]
     fn cache_updates_on_successful_write() {
         let mut last = None;
         let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
+        set_led_cached_with("test/led-cache-ok", 255, &mut last, |_, v| {
             writes.push(v);
             Ok(())
         });
@@ -210,9 +314,9 @@ mod tests {
     fn cache_stays_none_when_write_fails() {
         let mut last = None;
         let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
+        set_led_cached_with("test/led-cache-fail", 255, &mut last, |_, v| {
             writes.push(v);
-            Err(std::io::Error::other("boom"))
+            Err(io::Error::other("boom"))
         });
         assert_eq!(
             last, None,
@@ -225,7 +329,7 @@ mod tests {
     fn cache_hit_skips_write_entirely() {
         let mut last = Some(255);
         let mut writes = Vec::new();
-        set_led_cached_with("led", 255, &mut last, |_, v| {
+        set_led_cached_with("test/led-cache-hit", 255, &mut last, |_, v| {
             writes.push(v);
             Ok(())
         });
@@ -241,15 +345,92 @@ mod tests {
         // poison `last_value`, so the next call still attempts the write.
         let mut last = None;
         let mut attempts = 0;
-        set_led_cached_with("led", 255, &mut last, |_, _| {
+        set_led_cached_with("test/led-cache-retry", 255, &mut last, |_, _| {
             attempts += 1;
-            Err(std::io::Error::other("boom"))
+            Err(io::Error::other("boom"))
         });
-        set_led_cached_with("led", 255, &mut last, |_, _| {
+        set_led_cached_with("test/led-cache-retry", 255, &mut last, |_, _| {
             attempts += 1;
             Ok(())
         });
         assert_eq!(attempts, 2, "second call must retry after a failed write");
         assert_eq!(last, Some(255));
+    }
+
+    #[test]
+    fn repeated_failed_cached_writes_log_absence_once() {
+        // The regression BUG-072 covers: with the LED sysfs nodes absent the
+        // 500 ms manager tick keeps retrying, but the absence must be logged
+        // once, not on every attempt.
+        let path = "test/led-absent-spam";
+        let mut attempts = 0;
+        let output = capture_logs(|| {
+            let mut last = None;
+            for _ in 0..5 {
+                set_led_cached_with(path, 255, &mut last, |_, _| {
+                    attempts += 1;
+                    Err(absent())
+                });
+            }
+        });
+        assert_eq!(attempts, 5, "every tick must still retry the hardware");
+        let absence_msg = format!("LED path {} not available", path);
+        assert_eq!(
+            output.matches(&absence_msg).count(),
+            1,
+            "absence must be logged exactly once, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn repeated_failed_raw_writes_log_absence_once() {
+        // `run_boot_blink`, `activate_*_led`, and `led_test` drive the LEDs
+        // through the raw `set_led` path; it shares the same latch, so a
+        // boot-blink against absent hardware must not spam either.
+        let path = "test/led-raw-absent";
+        let output = capture_logs(|| {
+            for _ in 0..5 {
+                let _ = set_led_with(path, 255, |_, _| Err(absent()));
+            }
+        });
+        let absence_msg = format!("LED path {} not available", path);
+        assert_eq!(
+            output.matches(&absence_msg).count(),
+            1,
+            "absence must be logged exactly once, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn each_availability_transition_logs_once() {
+        let path = "test/led-recovery";
+        let output = capture_logs(|| {
+            let mut last = None;
+            // absent → logs once
+            set_led_cached_with(path, 255, &mut last, |_, _| Err(absent()));
+            set_led_cached_with(path, 255, &mut last, |_, _| Err(absent()));
+            // recovers → logs once
+            set_led_cached_with(path, 255, &mut last, |_, _| Ok(()));
+            // absent again (new value defeats the value cache) → logs once
+            set_led_cached_with(path, 0, &mut last, |_, _| Err(absent()));
+        });
+        let absence_msg = format!("LED path {} not available", path);
+        let recovery_msg = format!("LED path {} is now available", path);
+        assert_eq!(
+            output.matches(&absence_msg).count(),
+            2,
+            "each present→absent transition must log once, got:\n{output}"
+        );
+        assert_eq!(
+            output.matches(&recovery_msg).count(),
+            1,
+            "recovery must log once, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn led_test_rejects_unknown_color() {
+        let err = led_test("purple", false).expect_err("purple is not a valid LED color");
+        assert!(matches!(err, LedError::UnknownColor(ref c) if c == "purple"));
     }
 }

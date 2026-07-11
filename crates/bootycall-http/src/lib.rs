@@ -1,5 +1,7 @@
+pub mod error;
 pub mod server;
 
+pub use error::HttpError;
 pub use server::run_http_server;
 
 #[cfg(test)]

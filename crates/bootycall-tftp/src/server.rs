@@ -9,6 +9,7 @@ use tokio::time::Duration;
 use bootycall_core::config::Config;
 use bootycall_core::state::{HostStatus, StateStore};
 
+use crate::error::TftpError;
 use crate::wire::{
     OP_RRQ, OP_WRQ, is_error_packet, make_data_packet, make_error_packet, make_oack_packet,
     parse_ack_packet,
@@ -111,7 +112,7 @@ async fn handle_tftp_transfer(
     request: RrqRequest,
     state_store: StateStore,
     mac_addr: Option<String>,
-) -> Result<(), std::io::Error> {
+) -> Result<(), TftpError> {
     let transfer_start = std::time::Instant::now();
 
     // RFC 1350: we only implement `octet` (binary) mode. A `netascii` client
@@ -147,7 +148,7 @@ async fn handle_tftp_transfer(
             );
             let err_pkt = make_error_packet(code, msg);
             let _ = socket.send(&err_pkt).await;
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -231,10 +232,7 @@ async fn handle_tftp_transfer(
                     &file_path,
                     "OACK negotiation timed out",
                 );
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "OACK negotiation timed out",
-                ));
+                return Err(TftpError::OackNegotiationTimedOut);
             }
             Err(e) => {
                 mark_tftp_failed(
@@ -243,7 +241,7 @@ async fn handle_tftp_transfer(
                     &file_path,
                     "I/O error during OACK negotiation",
                 );
-                return Err(e);
+                return Err(e.into());
             }
         }
     }
@@ -276,7 +274,7 @@ async fn handle_tftp_transfer(
                     &file_path,
                     "I/O error during data transfer",
                 );
-                return Err(e);
+                return Err(e.into());
             }
         };
     }
@@ -324,10 +322,7 @@ async fn handle_tftp_transfer(
                 &file_path,
                 "timed out waiting for data ACK",
             );
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TFTP block ack timed out",
-            ));
+            return Err(TftpError::BlockAckTimedOut);
         }
 
         match tokio::time::timeout(retry_policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
@@ -400,7 +395,7 @@ async fn handle_tftp_transfer(
                     &file_path,
                     "I/O error during data transfer",
                 );
-                return Err(e);
+                return Err(e.into());
             }
             Err(_) => {
                 // Timeout — roll back to `base` and resend the whole window.
@@ -625,7 +620,7 @@ pub async fn run_tftp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
-) -> Result<(), std::io::Error> {
+) -> Result<(), TftpError> {
     run_tftp_server_with_limit(bind_addr, config, state_store, MAX_CONCURRENT_TRANSFERS).await
 }
 
@@ -637,7 +632,7 @@ pub async fn run_tftp_server_with_limit(
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
     max_concurrent_transfers: usize,
-) -> Result<(), std::io::Error> {
+) -> Result<(), TftpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
     let transfer_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent_transfers));

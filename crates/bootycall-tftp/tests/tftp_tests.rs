@@ -1193,3 +1193,129 @@ async fn test_tftp_windowsize_recovers_lost_block() {
         "transfer must be byte-exact after a mid-window loss"
     );
 }
+
+#[tokio::test]
+async fn test_tftp_non_utf8_option_ignored_transfer_proceeds() {
+    // RFC 2347: a server ignores options it cannot parse. An RRQ carrying one
+    // option pair with non-UTF-8 bytes must NOT abort the request — the
+    // transfer proceeds, and options after the bad pair still negotiate
+    // (previously the `?` on `from_utf8` failed the whole parse and the
+    // request was silently dropped, so the client just timed out).
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    let file_content = b"payload served despite a non-UTF-8 option";
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), file_content).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25200", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25200", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Hand-build the RRQ: opcode 1, filename\0, octet\0, then a non-UTF-8
+    // option pair (0xFF 0xFE key), followed by a valid `tsize` option that
+    // must still be honoured after the bad pair is skipped.
+    let mut rrq = vec![0x00, 0x01];
+    rrq.extend_from_slice(b"boot/x64/ipxe.efi");
+    rrq.push(0);
+    rrq.extend_from_slice(b"octet");
+    rrq.push(0);
+    rrq.extend_from_slice(&[0xFF, 0xFE]); // non-UTF-8 option key
+    rrq.push(0);
+    rrq.extend_from_slice(b"junk");
+    rrq.push(0);
+    rrq.extend_from_slice(b"tsize");
+    rrq.push(0);
+    rrq.extend_from_slice(b"0");
+    rrq.push(0);
+
+    let client = UdpSocket::bind("127.0.0.1:25201").await.unwrap();
+    client.send_to(&rrq, "127.0.0.1:25200").await.unwrap();
+
+    // The `tsize` option after the skipped pair still negotiates: an OACK
+    // arrives instead of a silent drop (the pre-fix behaviour).
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("RRQ with a non-UTF-8 option must still be served, not dropped")
+        .unwrap();
+    let oack = parse_oack(&buf[..n]);
+    assert!(
+        oack.contains(&("tsize".to_string(), file_content.len().to_string())),
+        "the valid tsize option after the bad pair must still negotiate, got {oack:?}"
+    );
+
+    // Complete the transfer: ACK 0, receive DATA block 1, verify the bytes.
+    client
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("DATA block 1 should arrive")
+        .unwrap();
+    let (block, data) = parse_data(&buf[..n]);
+    assert_eq!(block, 1);
+    assert_eq!(data, file_content.to_vec());
+    client
+        .send_to(&make_ack_packet(1), server_tid)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_tftp_malformed_rrq_draws_error_code_4() {
+    // A packet with a valid RRQ opcode but an unparseable body (no
+    // null-terminated filename/mode) must draw ERROR code 4 (Illegal TFTP
+    // operation) so the client fails fast, instead of the pre-fix silent
+    // drop that left it timing out.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25210", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25210", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // RRQ opcode followed by garbage with no null terminators: parse_rrq
+    // cannot extract a filename/mode pair.
+    let malformed = [0x00u8, 0x01, 0xFF, 0xFE, 0xFD];
+
+    let client = UdpSocket::bind("127.0.0.1:25211").await.unwrap();
+    client.send_to(&malformed, "127.0.0.1:25210").await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, _from) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("malformed RRQ should draw an ERROR reply, not a silent drop")
+        .unwrap();
+    let (opcode, code, msg) = parse_error_packet(&buf[..n]);
+    assert_eq!(opcode, 5, "expected a TFTP ERROR packet (opcode 5)");
+    assert_eq!(code, 4, "malformed RRQ uses illegal-operation code 4");
+    assert!(
+        msg.contains("Illegal TFTP operation"),
+        "message should mention the illegal operation, got {msg:?}"
+    );
+}

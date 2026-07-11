@@ -1,3 +1,4 @@
+use crate::error::DhcpError;
 use bootycall_core::config::{Config, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
 use bootycall_log::{debug, error, info, warn};
@@ -266,7 +267,7 @@ pub async fn run_dhcp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
-) -> Result<(), std::io::Error> {
+) -> Result<(), DhcpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     socket.set_broadcast(true)?;
     info!("Proxy DHCP Server listening on {}", bind_addr);

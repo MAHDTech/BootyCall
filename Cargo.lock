@@ -198,6 +198,7 @@ dependencies = [
  "bootycall-log",
  "dhcproto",
  "parking_lot",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -233,6 +234,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
 ]
@@ -299,6 +301,7 @@ dependencies = [
  "bootycall-log",
  "parking_lot",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 

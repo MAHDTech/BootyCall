@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::error::HttpError;
 use bootycall_core::config::{Config, HostConfig, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
 
@@ -849,23 +850,21 @@ pub async fn run_http_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
-) -> Result<(), std::io::Error> {
+) -> Result<(), HttpError> {
     // Initialise minijinja environment. A template that fails to compile (e.g.
     // after a bad edit to MENU_TEMPLATE/BOOT_TEMPLATE) surfaces as a clean
-    // startup error instead of a panic — run_http_server returns io::Error.
+    // startup error instead of a panic — run_http_server returns HttpError.
     let mut env = minijinja::Environment::new();
-    env.add_template("ipxemenu", MENU_TEMPLATE).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to register ipxemenu template: {e}"),
-        )
-    })?;
-    env.add_template("boot", BOOT_TEMPLATE).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("failed to register boot template: {e}"),
-        )
-    })?;
+    env.add_template("ipxemenu", MENU_TEMPLATE)
+        .map_err(|source| HttpError::TemplateRegistration {
+            name: "ipxemenu",
+            source,
+        })?;
+    env.add_template("boot", BOOT_TEMPLATE)
+        .map_err(|source| HttpError::TemplateRegistration {
+            name: "boot",
+            source,
+        })?;
     let jinja_env = Arc::new(env);
 
     let server_state = ServerState {

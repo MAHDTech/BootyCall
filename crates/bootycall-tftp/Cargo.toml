@@ -9,6 +9,7 @@ bootycall-core = { path = "../bootycall-core" }
 tokio = { workspace = true }
 bootycall-log = { workspace = true }
 parking_lot = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

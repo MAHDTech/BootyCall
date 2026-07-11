@@ -865,6 +865,115 @@ async fn test_tftp_server_ipv6_negotiation_and_transfer() {
 }
 
 #[tokio::test]
+async fn test_tftp_bios_default_redirected_to_override() {
+    // A legacy-BIOS host that requests the *BIOS* default NBP must be
+    // redirected to its per-MAC bootloader override, exactly like the
+    // amd64/arm64 EFI defaults already are (the redirect check used to omit
+    // `default_bootloader_bios`).
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    // The BIOS default exists with decoy content: if the redirect regresses,
+    // the client receives these bytes and the assertions below catch it.
+    let decoy_content = b"decoy legacy BIOS NBP payload";
+    fs::write(tftp_root.join("boot/x64/undionly.kpxe"), decoy_content).unwrap();
+    let special_content = b"override payload served instead of the BIOS default";
+    fs::write(tftp_root.join("boot/special.efi"), special_content).unwrap();
+
+    let host = HostConfig {
+        mac: "00:aa:bb:cc:dd:72".to_string(),
+        name: "bios-client".to_string(),
+        image_path: "/tmp/nixos.iso".into(),
+        bootloader: Some("boot/special.efi".to_string()),
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+    let config = Config {
+        server: base_server_config("127.0.0.1:25190", &tftp_root),
+        hosts: vec![host],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Map 127.0.0.1 -> the overridden MAC so the RRQ associates the host.
+    let mac = "00:aa:bb:cc:dd:72";
+    state_store.update_host_status(
+        mac,
+        HostStatus::Polling,
+        Some("bios-client".to_string()),
+        None,
+        Some("127.0.0.1".to_string()),
+        Some("x86 (BIOS)".to_string()),
+    );
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25190", server_config_clone, server_store)
+                .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The client asks for the BIOS default (`default_bootloader_bios`).
+    let client_socket = UdpSocket::bind("127.0.0.1:25191").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/undionly.kpxe",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25190")
+        .await
+        .unwrap();
+
+    // The OACK's tsize must already reflect the override file, not the decoy.
+    let mut response_buf = [0u8; 1024];
+    let (len, server_tid_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("BIOS client should receive an OACK")
+    .unwrap();
+    let negotiated_options = parse_oack(&response_buf[..len]);
+    assert!(
+        negotiated_options.contains(&("tsize".to_string(), special_content.len().to_string())),
+        "OACK tsize must be the override file's size, got {negotiated_options:?}"
+    );
+
+    // ACK block 0, then the DATA must carry the override bytes.
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid_addr)
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("BIOS client should receive DATA block 1")
+    .unwrap();
+    let (block_num, data) = parse_data(&response_buf[..len]);
+    assert_eq!(block_num, 1);
+    assert_eq!(
+        data,
+        special_content.to_vec(),
+        "BIOS-default request must be redirected to the per-MAC override"
+    );
+    assert_ne!(
+        data,
+        decoy_content.to_vec(),
+        "the decoy BIOS default must not be served"
+    );
+    client_socket
+        .send_to(&make_ack_packet(1), server_tid_addr)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_tftp_wrq_rejected_with_error() {
     // A WRQ (opcode 2) is not supported: the listener must reply with an
     // ERROR packet (RFC 1350 code 4, illegal operation) rather than ignore it.

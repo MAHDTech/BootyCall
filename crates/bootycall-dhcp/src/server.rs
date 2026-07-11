@@ -1,6 +1,6 @@
 use bootycall_core::config::{Config, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
-use bootycall_log::{debug, error, info};
+use bootycall_log::{debug, error, info, warn};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder, v4};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -195,13 +195,23 @@ fn parse_pxe_request(packet: &[u8], src_addr: SocketAddr) -> Option<PxeRequest> 
 /// Pick the default bootloader for a client's advertised architecture
 /// (Option 93). arch 0 is a legacy real-mode BIOS PXE ROM that cannot execute
 /// an EFI image, so it gets `default_bootloader_bios`; arch 11 gets the arm64
-/// EFI default; everything else (X64/BC EFI, or unknown) gets the amd64 EFI
-/// default. Used only when the host has no explicit `bootloader` override.
-fn select_default_bootloader(server: &ServerConfig, arch: Option<v4::Architecture>) -> String {
+/// EFI default; X64/BC EFI — or a client that sent no Option 93 at all — gets
+/// the amd64 EFI default. Every other architecture (IA32 EFI, ARM32 EFI, the
+/// UEFI HTTP-boot classes, ...) has no image this server can hand out, so
+/// selection returns `None` and the caller must refuse the request instead of
+/// silently serving an amd64 binary the machine cannot execute. Used only
+/// when the host has no explicit `bootloader` override.
+fn select_default_bootloader(
+    server: &ServerConfig,
+    arch: Option<v4::Architecture>,
+) -> Option<String> {
     match arch {
-        Some(a) if a.0 == ARCH_ARM64 => server.default_bootloader_arm64.clone(),
-        Some(a) if a.0 == ARCH_BIOS_X86 => server.default_bootloader_bios.clone(),
-        _ => server.default_bootloader_amd64.clone(),
+        Some(a) if a.0 == ARCH_ARM64 => Some(server.default_bootloader_arm64.clone()),
+        Some(a) if a.0 == ARCH_BIOS_X86 => Some(server.default_bootloader_bios.clone()),
+        Some(v4::Architecture::X64) | Some(v4::Architecture::BC) | None => {
+            Some(server.default_bootloader_amd64.clone())
+        }
+        Some(_) => None,
     }
 }
 
@@ -312,11 +322,33 @@ pub async fn run_dhcp_server(
             let config_guard = config.read();
             let host_config = config_guard.find_host(&mac_str);
             let bootloader_path = match host_config.and_then(|h| h.bootloader.clone()) {
-                Some(override_path) => override_path,
+                Some(override_path) => Some(override_path),
                 None => select_default_bootloader(&config_guard.server, arch),
             };
             let host_name = host_config.map(|h| h.name.clone());
             (bootloader_path, host_name)
+        };
+
+        // No configured image can run on this architecture (e.g. IA32 EFI or
+        // ARM32 EFI): refuse loudly and stay silent on the wire instead of
+        // serving the amd64 EFI default the machine cannot execute — the
+        // client sees no offer and the operator sees why.
+        let Some(bootloader_path) = bootloader_path else {
+            warn!(
+                "Refusing PXE request from {} (mac {}): unsupported client architecture {:?} and no per-host bootloader override",
+                src_addr,
+                mac_str,
+                arch.map(|a| a.0)
+            );
+            state_store.log_event(
+                "WARN",
+                Some(&mac_str),
+                &format!(
+                    "Refused PXE request: unsupported client architecture {:?}",
+                    arch.map(|a| a.0)
+                ),
+            );
+            continue;
         };
 
         // Resolve Next-Server IP
@@ -530,27 +562,47 @@ mod tests {
     fn bootloader_selection_routes_arch_to_the_right_default() {
         let server = server_with_bootloaders("amd64.efi", "arm64.efi", "bios.kpxe");
 
-        // arch 0 → BIOS (the regression this issue fixes: it used to fall
+        // arch 0 → BIOS (the regression issue 033 fixed: it used to fall
         // through to the amd64 EFI default, which a BIOS ROM cannot run).
         assert_eq!(
             select_default_bootloader(&server, Some(v4::Architecture(ARCH_BIOS_X86))),
-            "bios.kpxe"
+            Some("bios.kpxe".to_string())
         );
         // arch 11 → arm64 EFI.
         assert_eq!(
             select_default_bootloader(&server, Some(v4::Architecture(ARCH_ARM64))),
-            "arm64.efi"
+            Some("arm64.efi".to_string())
         );
-        // X64 / BC / unknown all → amd64 EFI default.
+        // X64 / BC / absent Option 93 all → amd64 EFI default.
         assert_eq!(
             select_default_bootloader(&server, Some(v4::Architecture::X64)),
-            "amd64.efi"
+            Some("amd64.efi".to_string())
         );
         assert_eq!(
             select_default_bootloader(&server, Some(v4::Architecture::BC)),
-            "amd64.efi"
+            Some("amd64.efi".to_string())
         );
-        assert_eq!(select_default_bootloader(&server, None), "amd64.efi");
+        assert_eq!(
+            select_default_bootloader(&server, None),
+            Some("amd64.efi".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_arches_get_no_bootloader() {
+        let server = server_with_bootloaders("amd64.efi", "arm64.efi", "bios.kpxe");
+
+        // IA32 EFI (6), ARM32 EFI (10), the UEFI HTTP-boot classes (15/16),
+        // and unassigned codes have no image this server can hand out;
+        // selection must refuse (`None`) instead of falling through to the
+        // amd64 EFI default those machines cannot execute.
+        for arch_code in [6u16, 10, 15, 16, 0xFFFF] {
+            assert_eq!(
+                select_default_bootloader(&server, Some(v4::Architecture(arch_code))),
+                None,
+                "arch {arch_code} must be refused, not served an amd64 image"
+            );
+        }
     }
 
     #[test]

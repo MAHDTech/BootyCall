@@ -24,6 +24,16 @@ const DHCP_CLIENT_PORT: u16 = 68;
 /// The PXE proxy-DHCP port; clients that reached us here listen on it too.
 const PXE_PROXY_PORT: u16 = 4011;
 
+/// BOOTP/DHCP carries `chaddr` in a fixed 16-byte field, so a valid `hlen`
+/// can never exceed this. `dhcproto` 0.15 decodes `hlen` from the wire
+/// without clamping it while storing `chaddr` as `[u8; 16]`, and its
+/// `Message::chaddr()` accessor slices `&self.chaddr[..hlen]` — so any
+/// `hlen > 16` panics. We must enforce the bound ourselves (issue 066).
+const CHADDR_MAX_LEN: usize = 16;
+/// Shortest hardware address we accept: we need at least an Ethernet MAC's
+/// worth of bytes to identify the client.
+const MAC_LEN: usize = 6;
+
 fn get_local_ip_for_target(target: Ipv4Addr) -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket
@@ -79,6 +89,107 @@ fn is_pxe_client(request: &v4::Message) -> bool {
         Some(v4::DhcpOption::ClassIdentifier(bytes)) => bytes.windows(9).any(|w| w == b"PXEClient"),
         _ => false,
     }
+}
+
+/// A decoded, validated PXE boot request extracted from a raw DHCP datagram.
+///
+/// Produced only by [`parse_pxe_request`]; holding one means the datagram
+/// decoded cleanly, carried a plausible hardware address length, advertised
+/// `PXEClient` (Option 60), and is a message type we answer.
+struct PxeRequest {
+    /// The decoded DHCP message, used to craft the reply.
+    message: v4::Message,
+    /// The client MAC (first six `chaddr` bytes), normalised via
+    /// [`bootycall_core::format_mac`].
+    mac_str: String,
+    /// Client system architecture (Option 93), if advertised.
+    arch: Option<v4::Architecture>,
+    /// The DHCP message type to answer with: Offer for Discover, Ack for
+    /// Request/Inform.
+    response_type: v4::MessageType,
+}
+
+/// Decode and validate one raw datagram into a [`PxeRequest`].
+///
+/// Returns `None` (after a `debug!` log) for anything the proxy must ignore:
+/// undecodable packets, hardware address lengths outside
+/// [`MAC_LEN`]`..=`[`CHADDR_MAX_LEN`], non-PXE clients (no `PXEClient` in
+/// Option 60, per RFC 4578), and message types other than
+/// Discover/Request/Inform.
+///
+/// Security (issue 066): the `hlen` bounds check runs **before** the first
+/// `chaddr()` call. `hlen` is attacker-controlled and `dhcproto` 0.15 decodes
+/// it unclamped, so `chaddr()` (which slices `[..hlen]` on a fixed
+/// `[u8; 16]`) panics for `hlen > 16`. Without this guard a single crafted
+/// UDP datagram unwinds `run_dhcp_server` and takes the whole process down —
+/// a remote unauthenticated DoS.
+#[tracing::instrument(skip_all, fields(%src_addr, packet_len = packet.len()))]
+fn parse_pxe_request(packet: &[u8], src_addr: SocketAddr) -> Option<PxeRequest> {
+    let request = match v4::Message::decode(&mut Decoder::new(packet)) {
+        Ok(msg) => msg,
+        Err(e) => {
+            debug!("Failed to decode DHCP packet from {}: {:?}", src_addr, e);
+            return None;
+        }
+    };
+
+    // Reject bogus hardware address lengths before *any* `chaddr()` access:
+    // 0 is meaningless, 1..=5 is too short to hold an Ethernet MAC, and
+    // anything above 16 overruns dhcproto's fixed array (a panic).
+    let hlen = usize::from(request.hlen());
+    if !(MAC_LEN..=CHADDR_MAX_LEN).contains(&hlen) {
+        debug!(
+            "Skipping packet from {} with invalid hardware address length: {}",
+            src_addr, hlen
+        );
+        return None;
+    }
+
+    // Safe: `hlen` is validated to `6..=16` above and `chaddr()` returns
+    // exactly `hlen` bytes, so the six-byte MAC prefix always exists. Route
+    // through the shared core helper rather than a bespoke `format!`
+    // (issue 030).
+    let mac_bytes = request.chaddr();
+    let mac_array: [u8; MAC_LEN] = mac_bytes[..MAC_LEN].try_into().ok()?;
+    let mac_str = bootycall_core::format_mac(&mac_array);
+
+    // RFC 4578: only reply to clients advertising `PXEClient` in the
+    // vendor-class identifier (Option 60). Injecting PXE options into
+    // every DHCP message on the segment would disrupt non-PXE clients
+    // and violates the spec.
+    if !is_pxe_client(&request) {
+        debug!(
+            "Skipping non-PXE DHCP message from {} (mac {}): missing/unrecognised Option 60",
+            src_addr, mac_str
+        );
+        return None;
+    }
+
+    // Parse client system architecture (Option 93)
+    let arch = match request.opts().get(v4::OptionCode::ClientSystemArchitecture) {
+        Some(v4::DhcpOption::ClientSystemArchitecture(arch)) => Some(*arch),
+        _ => None,
+    };
+
+    // Determine message type and reply message type
+    let response_type = match request.opts().msg_type() {
+        Some(v4::MessageType::Discover) => v4::MessageType::Offer,
+        Some(v4::MessageType::Request) | Some(v4::MessageType::Inform) => v4::MessageType::Ack,
+        other => {
+            debug!(
+                "Ignoring DHCP message type {:?} from {} (mac {})",
+                other, src_addr, mac_str
+            );
+            return None;
+        }
+    };
+
+    Some(PxeRequest {
+        message: request,
+        mac_str,
+        arch,
+        response_type,
+    })
 }
 
 /// Pick the default bootloader for a client's advertised architecture
@@ -160,50 +271,18 @@ pub async fn run_dhcp_server(
             }
         };
 
-        let packet = &buf[..len];
-        let request = match v4::Message::decode(&mut Decoder::new(packet)) {
-            Ok(msg) => msg,
-            Err(e) => {
-                debug!("Failed to decode DHCP packet from {}: {:?}", src_addr, e);
-                continue;
-            }
-        };
-
-        // Determine client MAC address and normalize it
-        let mac_bytes = request.chaddr();
-        if mac_bytes.len() < 6 {
-            debug!(
-                "Skipping packet with invalid hardware address length: {}",
-                mac_bytes.len()
-            );
+        // Decode, validate, and parse in one testable step; anything the
+        // proxy must ignore (including the malicious `hlen > 16` packets
+        // that used to panic the process, issue 066) yields `None`.
+        let Some(parsed) = parse_pxe_request(&buf[..len], src_addr) else {
             continue;
-        }
-        // Guarded above: `mac_bytes.len() >= 6`, so the fixed-size conversion
-        // cannot fail. Route through the shared core helper rather than a
-        // bespoke `format!` (issue 030).
-        let mac_array: [u8; 6] = match mac_bytes[..6].try_into() {
-            Ok(arr) => arr,
-            Err(_) => continue,
         };
-        let mac_str = bootycall_core::format_mac(&mac_array);
-
-        // RFC 4578: only reply to clients advertising `PXEClient` in the
-        // vendor-class identifier (Option 60). Injecting PXE options into
-        // every DHCP message on the segment would disrupt non-PXE clients
-        // and violates the spec.
-        if !is_pxe_client(&request) {
-            debug!(
-                "Skipping non-PXE DHCP message from {} (mac {}): missing/unrecognised Option 60",
-                src_addr, mac_str
-            );
-            continue;
-        }
-
-        // Parse client system architecture (Option 93)
-        let arch = match request.opts().get(v4::OptionCode::ClientSystemArchitecture) {
-            Some(v4::DhcpOption::ClientSystemArchitecture(arch)) => Some(*arch),
-            _ => None,
-        };
+        let PxeRequest {
+            message: request,
+            mac_str,
+            arch,
+            response_type,
+        } = parsed;
 
         let arch_str = match arch {
             Some(v4::Architecture::X64) => "x86_64",
@@ -227,16 +306,6 @@ pub async fn run_dhcp_server(
         };
 
         let client_ip_str = client_ip.to_string();
-
-        // Determine message type and reply message type
-        let response_type = match request.opts().msg_type() {
-            Some(v4::MessageType::Discover) => v4::MessageType::Offer,
-            Some(v4::MessageType::Request) | Some(v4::MessageType::Inform) => v4::MessageType::Ack,
-            _ => {
-                // Ignore other message types
-                continue;
-            }
-        };
 
         // Read configuration in a nested block to drop the lock guard before await points
         let (bootloader_path, host_name) = {
@@ -281,7 +350,9 @@ pub async fn run_dhcp_server(
             next_server = %our_ip,
         );
 
-        // Craft reply message
+        // Craft reply message. `request.chaddr()` (and `new_with_id`'s
+        // internal `chaddr.len() <= 16` assert) are safe here only because
+        // `parse_pxe_request` already validated `hlen`.
         let mut reply = v4::Message::new_with_id(
             request.xid(),
             request.ciaddr(),
@@ -346,6 +417,94 @@ pub async fn run_dhcp_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a raw DHCPDISCOVER datagram, byte by byte, with an arbitrary
+    /// `hlen`. dhcproto's encoder clamps `hlen` on the way out, so crafting
+    /// the malicious `hlen > 16` packets of issue 066 requires hand-rolling
+    /// the fixed BOOTP layout: op, htype, hlen, hops, xid, secs, flags,
+    /// ciaddr, yiaddr, siaddr, giaddr, chaddr[16], sname[64], file[128],
+    /// magic cookie, then options. Option 60 carries `PXEClient` and
+    /// Option 53 is Discover, so the packet passes every other check and the
+    /// result isolates the `hlen` validation under test.
+    fn raw_pxe_discover_with_hlen(hlen: u8) -> Vec<u8> {
+        let mut p = Vec::with_capacity(300);
+        p.push(1); // op: BOOTREQUEST
+        p.push(1); // htype: Ethernet
+        p.push(hlen); // hlen: attacker-controlled, deliberately unclamped
+        p.push(0); // hops
+        p.extend_from_slice(&0x1234_5678_u32.to_be_bytes()); // xid
+        p.extend_from_slice(&[0u8; 2]); // secs
+        p.extend_from_slice(&[0u8; 2]); // flags
+        p.extend_from_slice(&[0u8; 16]); // ciaddr, yiaddr, siaddr, giaddr
+        // chaddr is always 16 bytes on the wire regardless of hlen.
+        p.extend_from_slice(&[
+            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x10,
+        ]);
+        p.extend_from_slice(&[0u8; 64]); // sname
+        p.extend_from_slice(&[0u8; 128]); // file
+        p.extend_from_slice(&[99, 130, 83, 99]); // DHCP magic cookie
+        p.extend_from_slice(&[53, 1, 1]); // Option 53: message type Discover
+        p.push(60); // Option 60: vendor class identifier
+        p.push(9);
+        p.extend_from_slice(b"PXEClient");
+        p.push(255); // end option
+        p
+    }
+
+    fn test_src() -> SocketAddr {
+        "192.0.2.10:68".parse().unwrap()
+    }
+
+    #[test]
+    fn oversized_hlen_is_rejected_without_panicking() {
+        // Regression for issue 066: any `hlen` in 17..=255 used to panic
+        // inside dhcproto's `chaddr()` ("range end index out of range for
+        // slice of length 16"), unwinding the whole DHCP task.
+        for hlen in [17u8, 255] {
+            assert!(
+                parse_pxe_request(&raw_pxe_discover_with_hlen(hlen), test_src()).is_none(),
+                "hlen {hlen} must be rejected, not parsed (or worse, panic)"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_and_undersized_hlen_are_rejected() {
+        // hlen 0 is meaningless; 1..=5 cannot hold an Ethernet MAC.
+        for hlen in [0u8, 1, 5] {
+            assert!(
+                parse_pxe_request(&raw_pxe_discover_with_hlen(hlen), test_src()).is_none(),
+                "hlen {hlen} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_hlen_values_still_parse() {
+        // 6 (Ethernet), 12, and 16 (the chaddr field maximum) must all keep
+        // working; the fix may only reject 0 and >16 on top of the
+        // pre-existing <6 floor.
+        for hlen in [6u8, 12, 16] {
+            let parsed = parse_pxe_request(&raw_pxe_discover_with_hlen(hlen), test_src())
+                .unwrap_or_else(|| panic!("hlen {hlen} must parse successfully"));
+            // The MAC is always the first six chaddr bytes.
+            assert_eq!(parsed.mac_str, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(parsed.response_type, v4::MessageType::Offer);
+            assert_eq!(parsed.message.hlen(), hlen);
+        }
+    }
+
+    #[test]
+    fn non_pxe_clients_are_still_filtered_after_the_refactor() {
+        // Strip Option 60 ("PXEClient") off an otherwise valid Discover; the
+        // RFC 4578 filter must still reject it inside the parse helper.
+        let mut packet = raw_pxe_discover_with_hlen(6);
+        let opt60_start = packet.len() - 12; // 60, len 9, "PXEClient", 255
+        packet.truncate(opt60_start);
+        packet.push(255); // restore the end option
+        assert!(parse_pxe_request(&packet, test_src()).is_none());
+    }
 
     fn server_with_bootloaders(amd64: &str, arm64: &str, bios: &str) -> ServerConfig {
         ServerConfig {

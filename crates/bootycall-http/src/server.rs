@@ -142,6 +142,7 @@ async fn safe_join_blocking(root: PathBuf, requested: String) -> Option<PathBuf>
     }
 }
 
+#[tracing::instrument(skip_all, fields(dir = %dir.display(), path = %relative_path))]
 async fn serve_file_from_dir(dir: PathBuf, relative_path: String) -> Result<Response, StatusCode> {
     let full_path = safe_join_blocking(dir, relative_path.clone())
         .await
@@ -299,6 +300,7 @@ fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
 }
 
 // /start endpoint - chains client to MAC specific poll endpoint
+#[tracing::instrument(skip_all)]
 async fn start_handler(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
     let server_host = {
         let config_guard = state.config.read();
@@ -389,6 +391,11 @@ fn decide_poll_outcome(
 }
 
 // /poll/{mac} endpoint
+//
+// Per-request span: `mac` is the raw path segment (recorded before
+// normalisation/validation so rejected values are still correlatable) and
+// `client` the connecting socket address.
+#[tracing::instrument(skip_all, fields(mac = %mac, client = %client_addr))]
 async fn poll_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -504,6 +511,7 @@ async fn poll_handler(
 }
 
 // /ipxemenu endpoint fallback for manual choice
+#[tracing::instrument(skip_all)]
 async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
     let (server_host, hosts_list) = {
         let config_guard = state.config.read();
@@ -568,6 +576,7 @@ async fn collect_wallpaper_candidates(dir: &Path) -> Vec<String> {
 }
 
 // Dynamic wallpaper selection endpoint
+#[tracing::instrument(skip_all, fields(width = ?query.width, height = ?query.height))]
 async fn wallpaper_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -650,6 +659,7 @@ async fn wallpaper_handler(
 }
 
 // API endpoint: GET /api/status
+#[tracing::instrument(skip_all)]
 async fn api_status_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -667,6 +677,7 @@ async fn api_status_handler(
 }
 
 // API endpoint: GET /api/logs
+#[tracing::instrument(skip_all)]
 async fn api_logs_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -688,6 +699,7 @@ async fn api_logs_handler(
 // /api/status — so `hosts_not_ready` is only included when `check_api_token`
 // passes (issue 086). When no `api_token` is configured the endpoint stays
 // fully open, matching the /api/status posture.
+#[tracing::instrument(skip_all)]
 async fn api_health_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -793,6 +805,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 // API endpoint: POST /api/override
+//
+// The raw client-supplied MAC and target are recorded on the span (before
+// validation, so rejected requests are still correlatable). The token header
+// is skipped along with the rest of the args.
+#[tracing::instrument(skip_all, fields(mac = %payload.mac, target = %payload.target))]
 async fn api_override_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -846,6 +863,11 @@ async fn api_override_handler(
 }
 
 /// Runs the Axum HTTP routing server, handling iPXE client scripting and the dashboard.
+///
+/// Span layout: one process-lifetime `run_http_server{bind_addr}` span for
+/// the listener (axum's serve loop never returns); per-request context comes
+/// from the `#[tracing::instrument]` spans on the individual handlers.
+#[tracing::instrument(skip(config, state_store))]
 pub async fn run_http_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,

@@ -3,6 +3,7 @@ use iso9660::{DirectoryEntry, ISO9660, ISO9660Reader, ISODirectory, ISOFile};
 use std::fs::File;
 use std::path::Path;
 
+#[tracing::instrument(skip_all, fields(image = %iso_path.display()))]
 pub fn extract_from_iso(
     iso_path: &Path,
     kernel_override: Option<&str>,

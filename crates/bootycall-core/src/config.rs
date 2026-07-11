@@ -103,6 +103,9 @@ pub struct Config {
 }
 
 impl Config {
+    /// The generic `path` is skipped (no `Debug` bound on `P`) and recorded
+    /// as a display field instead.
+    #[tracing::instrument(skip(path), fields(path = %path.as_ref().display()))]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CoreError> {
         let file_content = std::fs::read_to_string(path)?;
         let mut config: Config = serde_yaml::from_str(&file_content)?;
@@ -249,6 +252,7 @@ impl Config {
     }
 }
 
+#[tracing::instrument(skip(on_reload), fields(path = %path.display()))]
 pub fn watch_config<F>(
     path: PathBuf,
     mut on_reload: F,
@@ -285,6 +289,12 @@ where
     watcher.watch(&watch_dir, notify::RecursiveMode::NonRecursive)?;
 
     std::thread::spawn(move || {
+        // Spans do not cross thread spawns; give the reload loop its own so
+        // every debounce/reload record carries the watched path. The loop is
+        // fully synchronous, so holding the entered guard for the thread
+        // lifetime is safe.
+        let _reload_span =
+            tracing::info_span!("config_reload_watcher", path = %path.display()).entered();
         loop {
             // Block until at least one event arrives; if the channel closes,
             // the watcher is gone and we can exit the reload thread.

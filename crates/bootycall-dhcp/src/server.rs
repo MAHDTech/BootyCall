@@ -263,6 +263,13 @@ fn choose_reply_dest(
 }
 
 /// Runs the Proxy DHCP server UDP loop, handling configuration-based PXE redirection.
+///
+/// Span layout: `#[instrument]` on this function would produce a single span
+/// for the whole process lifetime (the loop never returns), so per-request
+/// context comes from [`respond_to_pxe_request`] instead — the loop itself
+/// carries one long-lived `run_dhcp_server{bind_addr}` span that groups every
+/// nested record under the DHCP subsystem.
+#[tracing::instrument(skip(config, state_store))]
 pub async fn run_dhcp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
@@ -288,162 +295,181 @@ pub async fn run_dhcp_server(
         let Some(parsed) = parse_pxe_request(&buf[..len], src_addr) else {
             continue;
         };
-        let PxeRequest {
-            message: request,
+        respond_to_pxe_request(&socket, &config, &state_store, parsed, src_addr).await;
+    }
+}
+
+/// Answer one validated PXE request: pick the bootloader, update the state
+/// store, emit the `dhcp_pxe_offer` event, and send the proxy-DHCP reply.
+///
+/// This is the per-request unit of work extracted from the `run_dhcp_server`
+/// loop so each request gets its own span (client address + MAC); every log
+/// and `bootycall_log::event!` record emitted while answering carries that
+/// context. `skip_all` because none of the args are cheap/useful to Debug
+/// (socket, shared config/state, and the decoded `v4::Message`).
+#[tracing::instrument(skip_all, fields(%src_addr, mac = %parsed.mac_str))]
+async fn respond_to_pxe_request(
+    socket: &UdpSocket,
+    config: &parking_lot::RwLock<Config>,
+    state_store: &StateStore,
+    parsed: PxeRequest,
+    src_addr: SocketAddr,
+) {
+    let PxeRequest {
+        message: request,
+        mac_str,
+        arch,
+        response_type,
+    } = parsed;
+
+    let arch_str = match arch {
+        Some(v4::Architecture::X64) => "x86_64",
+        Some(v4::Architecture::BC) => "BC (x86_64)",
+        Some(a) if a.0 == ARCH_ARM64 => "aarch64",
+        Some(a) if a.0 == ARCH_BIOS_X86 => "x86 (BIOS)",
+        Some(other) => {
+            debug!("Other architecture detected: {:?}", other.0);
+            "other"
+        }
+        None => "unknown",
+    };
+
+    // Resolve client IP (use ciaddr or source IP)
+    let client_ip = if !request.ciaddr().is_unspecified() {
+        request.ciaddr()
+    } else if let SocketAddr::V4(addr) = src_addr {
+        *addr.ip()
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    };
+
+    let client_ip_str = client_ip.to_string();
+
+    // Read configuration in a nested block to drop the lock guard before await points
+    let (bootloader_path, host_name) = {
+        let config_guard = config.read();
+        let host_config = config_guard.find_host(&mac_str);
+        let bootloader_path = match host_config.and_then(|h| h.bootloader.clone()) {
+            Some(override_path) => Some(override_path),
+            None => select_default_bootloader(&config_guard.server, arch),
+        };
+        let host_name = host_config.map(|h| h.name.clone());
+        (bootloader_path, host_name)
+    };
+
+    // No configured image can run on this architecture (e.g. IA32 EFI or
+    // ARM32 EFI): refuse loudly and stay silent on the wire instead of
+    // serving the amd64 EFI default the machine cannot execute — the
+    // client sees no offer and the operator sees why.
+    let Some(bootloader_path) = bootloader_path else {
+        warn!(
+            "Refusing PXE request from {} (mac {}): unsupported client architecture {:?} and no per-host bootloader override",
+            src_addr,
             mac_str,
-            arch,
-            response_type,
-        } = parsed;
-
-        let arch_str = match arch {
-            Some(v4::Architecture::X64) => "x86_64",
-            Some(v4::Architecture::BC) => "BC (x86_64)",
-            Some(a) if a.0 == ARCH_ARM64 => "aarch64",
-            Some(a) if a.0 == ARCH_BIOS_X86 => "x86 (BIOS)",
-            Some(other) => {
-                debug!("Other architecture detected: {:?}", other.0);
-                "other"
-            }
-            None => "unknown",
-        };
-
-        // Resolve client IP (use ciaddr or source IP)
-        let client_ip = if !request.ciaddr().is_unspecified() {
-            request.ciaddr()
-        } else if let SocketAddr::V4(addr) = src_addr {
-            *addr.ip()
-        } else {
-            Ipv4Addr::UNSPECIFIED
-        };
-
-        let client_ip_str = client_ip.to_string();
-
-        // Read configuration in a nested block to drop the lock guard before await points
-        let (bootloader_path, host_name) = {
-            let config_guard = config.read();
-            let host_config = config_guard.find_host(&mac_str);
-            let bootloader_path = match host_config.and_then(|h| h.bootloader.clone()) {
-                Some(override_path) => Some(override_path),
-                None => select_default_bootloader(&config_guard.server, arch),
-            };
-            let host_name = host_config.map(|h| h.name.clone());
-            (bootloader_path, host_name)
-        };
-
-        // No configured image can run on this architecture (e.g. IA32 EFI or
-        // ARM32 EFI): refuse loudly and stay silent on the wire instead of
-        // serving the amd64 EFI default the machine cannot execute — the
-        // client sees no offer and the operator sees why.
-        let Some(bootloader_path) = bootloader_path else {
-            warn!(
-                "Refusing PXE request from {} (mac {}): unsupported client architecture {:?} and no per-host bootloader override",
-                src_addr,
-                mac_str,
-                arch.map(|a| a.0)
-            );
-            state_store.log_event(
-                "WARN",
-                Some(&mac_str),
-                &format!(
-                    "Refused PXE request: unsupported client architecture {:?}",
-                    arch.map(|a| a.0)
-                ),
-            );
-            continue;
-        };
-
-        // Resolve Next-Server IP
-        let our_ip = resolve_local_ip(&request, &socket);
-
-        // Update StateStore
-        state_store.update_host_status(
-            &mac_str,
-            HostStatus::Polling,
-            host_name,
-            None,
-            Some(client_ip_str.clone()),
-            Some(arch_str.to_string()),
+            arch.map(|a| a.0)
         );
-
         state_store.log_event(
-            "INFO",
+            "WARN",
             Some(&mac_str),
             &format!(
-                "Serving PXE redirection (Bootloader: {}, Next-Server: {}) for {}",
-                bootloader_path, our_ip, arch_str
+                "Refused PXE request: unsupported client architecture {:?}",
+                arch.map(|a| a.0)
             ),
         );
+        return;
+    };
 
-        bootycall_log::event!(
-            "dhcp_pxe_offer",
-            mac = %mac_str,
-            arch = arch_str,
-            client_ip = %client_ip_str,
-            bootloader = %bootloader_path,
-            next_server = %our_ip,
-        );
+    // Resolve Next-Server IP
+    let our_ip = resolve_local_ip(&request, socket);
 
-        // Craft reply message. `request.chaddr()` (and `new_with_id`'s
-        // internal `chaddr.len() <= 16` assert) are safe here only because
-        // `parse_pxe_request` already validated `hlen`.
-        let mut reply = v4::Message::new_with_id(
-            request.xid(),
-            request.ciaddr(),
-            Ipv4Addr::UNSPECIFIED,
-            our_ip,
-            request.giaddr(),
-            request.chaddr(),
-        );
+    // Update StateStore
+    state_store.update_host_status(
+        &mac_str,
+        HostStatus::Polling,
+        host_name,
+        None,
+        Some(client_ip_str.clone()),
+        Some(arch_str.to_string()),
+    );
 
-        reply.set_flags(request.flags());
-        reply.set_opcode(v4::Opcode::BootReply);
+    state_store.log_event(
+        "INFO",
+        Some(&mac_str),
+        &format!(
+            "Serving PXE redirection (Bootloader: {}, Next-Server: {}) for {}",
+            bootloader_path, our_ip, arch_str
+        ),
+    );
 
-        // Set mandatory options
-        reply
-            .opts_mut()
-            .insert(v4::DhcpOption::MessageType(response_type));
-        reply
-            .opts_mut()
-            .insert(v4::DhcpOption::ServerIdentifier(our_ip));
-        reply
-            .opts_mut()
-            .insert(v4::DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
-        reply.opts_mut().insert(v4::DhcpOption::TFTPServerName(
-            our_ip.to_string().as_bytes().to_vec(),
-        ));
-        reply.opts_mut().insert(v4::DhcpOption::BootfileName(
-            bootloader_path.as_bytes().to_vec(),
-        ));
+    bootycall_log::event!(
+        "dhcp_pxe_offer",
+        mac = %mac_str,
+        arch = arch_str,
+        client_ip = %client_ip_str,
+        bootloader = %bootloader_path,
+        next_server = %our_ip,
+    );
 
-        // Copy Client Identifier if present
-        if let Some(client_id) = request.opts().get(v4::OptionCode::ClientIdentifier) {
-            reply.opts_mut().insert(client_id.clone());
-        }
+    // Craft reply message. `request.chaddr()` (and `new_with_id`'s
+    // internal `chaddr.len() <= 16` assert) are safe here only because
+    // `parse_pxe_request` already validated `hlen`.
+    let mut reply = v4::Message::new_with_id(
+        request.xid(),
+        request.ciaddr(),
+        Ipv4Addr::UNSPECIFIED,
+        our_ip,
+        request.giaddr(),
+        request.chaddr(),
+    );
 
-        // Encode reply
-        let mut response_buf = Vec::new();
-        let mut encoder = Encoder::new(&mut response_buf);
-        if let Err(e) = reply.encode(&mut encoder) {
-            error!("Failed to encode DHCP reply: {:?}", e);
-            continue;
-        }
+    reply.set_flags(request.flags());
+    reply.set_opcode(v4::Opcode::BootReply);
 
-        // Send reply. RFC 2131 §4.1: honour the client's broadcast flag (PXE
-        // NICs that cannot yet receive unicast set it) before falling back to
-        // the relay/ciaddr/source unicast routing.
-        let local_port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
-        let dest_addr = choose_reply_dest(
-            local_port,
-            src_addr,
-            request.giaddr(),
-            request.ciaddr(),
-            request.flags().broadcast(),
-        );
+    // Set mandatory options
+    reply
+        .opts_mut()
+        .insert(v4::DhcpOption::MessageType(response_type));
+    reply
+        .opts_mut()
+        .insert(v4::DhcpOption::ServerIdentifier(our_ip));
+    reply
+        .opts_mut()
+        .insert(v4::DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
+    reply.opts_mut().insert(v4::DhcpOption::TFTPServerName(
+        our_ip.to_string().as_bytes().to_vec(),
+    ));
+    reply.opts_mut().insert(v4::DhcpOption::BootfileName(
+        bootloader_path.as_bytes().to_vec(),
+    ));
 
-        debug!("Sending DHCP reply to {}", dest_addr);
-        if let Err(e) = socket.send_to(&response_buf, dest_addr).await {
-            error!("Failed to send DHCP reply to {}: {:?}", dest_addr, e);
-        }
+    // Copy Client Identifier if present
+    if let Some(client_id) = request.opts().get(v4::OptionCode::ClientIdentifier) {
+        reply.opts_mut().insert(client_id.clone());
+    }
+
+    // Encode reply
+    let mut response_buf = Vec::new();
+    let mut encoder = Encoder::new(&mut response_buf);
+    if let Err(e) = reply.encode(&mut encoder) {
+        error!("Failed to encode DHCP reply: {:?}", e);
+        return;
+    }
+
+    // Send reply. RFC 2131 §4.1: honour the client's broadcast flag (PXE
+    // NICs that cannot yet receive unicast set it) before falling back to
+    // the relay/ciaddr/source unicast routing.
+    let local_port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
+    let dest_addr = choose_reply_dest(
+        local_port,
+        src_addr,
+        request.giaddr(),
+        request.ciaddr(),
+        request.flags().broadcast(),
+    );
+
+    debug!("Sending DHCP reply to {}", dest_addr);
+    if let Err(e) = socket.send_to(&response_buf, dest_addr).await {
+        error!("Failed to send DHCP reply to {}: {:?}", dest_addr, e);
     }
 }
 
@@ -670,6 +696,85 @@ mod tests {
         assert_eq!(
             choose_reply_dest(DHCP_SERVER_PORT, src, Ipv4Addr::UNSPECIFIED, ciaddr, false,),
             SocketAddr::new(IpAddr::V4(ciaddr), DHCP_CLIENT_PORT)
+        );
+    }
+
+    /// Span-nesting evidence (issue 079): the `dhcp_pxe_offer` event emitted
+    /// while answering a request must carry the per-request
+    /// `respond_to_pxe_request` span (client address + MAC) in the JSON
+    /// output consumed by the downstream log pipeline.
+    #[tokio::test]
+    async fn dhcp_offer_event_nests_inside_the_per_request_span() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        /// A `MakeWriter` that appends everything into a shared buffer so the
+        /// test can inspect the formatted JSON output.
+        #[derive(Clone, Default)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("buffer lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(buf.clone())
+            .finish();
+        // Thread-local default: the current-thread tokio test runtime keeps
+        // every poll of `respond_to_pxe_request` on this thread.
+        let guard = subscriber.set_default();
+
+        // Loopback source so the reply send stays on-host; the discover has
+        // no broadcast flag/relay, so `choose_reply_dest` unicasts to it.
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let src: SocketAddr = "127.0.0.1:16868".parse().unwrap();
+        let parsed =
+            parse_pxe_request(&raw_pxe_discover_with_hlen(6), src).expect("valid discover");
+        let config = parking_lot::RwLock::new(Config {
+            server: server_with_bootloaders("amd64.efi", "arm64.efi", "bios.kpxe"),
+            hosts: Vec::new(),
+        });
+        let state_store = StateStore::new();
+
+        respond_to_pxe_request(&socket, &config, &state_store, parsed, src).await;
+        drop(guard);
+
+        let bytes = buf.0.lock().expect("buffer lock").clone();
+        let out = String::from_utf8(bytes).expect("log output must be UTF-8");
+        let offer = out
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).expect("each line is one JSON log")
+            })
+            .find(|v| v["fields"]["event"] == "dhcp_pxe_offer")
+            .expect("a dhcp_pxe_offer event must be emitted");
+
+        // The event's innermost span is the per-request one, carrying the
+        // correlating client address and MAC fields.
+        assert_eq!(offer["span"]["name"], "respond_to_pxe_request");
+        assert_eq!(offer["span"]["mac"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(offer["span"]["src_addr"], "127.0.0.1:16868");
+        let spans = offer["spans"].as_array().expect("span list present");
+        assert!(
+            spans.iter().any(|s| s["name"] == "respond_to_pxe_request"),
+            "the span list must include the per-request span, got: {spans:?}"
         );
     }
 }

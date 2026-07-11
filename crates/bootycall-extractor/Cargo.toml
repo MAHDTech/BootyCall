@@ -10,6 +10,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 bootycall-log = { workspace = true }
+tracing = { workspace = true }
 iso9660 = { workspace = true }
 fatfs = { workspace = true }
 gpt = { workspace = true }

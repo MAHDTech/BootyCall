@@ -149,6 +149,7 @@ async fn blink_until_stopped(stop_rx: &mut tokio::sync::mpsc::Receiver<()>) -> b
 
 /// Blinks the white LED to indicate booting/initialization.
 /// The `stop_rx` channel should be sent a message when booting is complete.
+#[tracing::instrument(skip(stop_rx))]
 pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
     if blink_until_stopped(&mut stop_rx).await {
         // Clean stop: startup completed, turn solid blue to indicate ready.
@@ -166,6 +167,7 @@ pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
 
 /// Background LED manager that polls StateStore for active deployments
 /// and blinks Blue if active, or stays solid Blue if idle.
+#[tracing::instrument(skip(state_store, shutdown_rx))]
 pub async fn run_led_manager(
     state_store: bootycall_core::state::StateStore,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,

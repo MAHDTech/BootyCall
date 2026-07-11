@@ -25,6 +25,7 @@ struct RrqRequest {
     windowsize: Option<u16>,
 }
 
+#[tracing::instrument(skip_all, fields(packet_len = packet.len()))]
 fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
     if packet.len() < 4 {
         return None;
@@ -105,6 +106,19 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
     })
 }
 
+/// Per-transfer span: every log and `bootycall_log::event!` record emitted
+/// while a bootloader streams out carries the client address, MAC, and file
+/// path. The socket/state-store/request args are skipped (non-Debug or
+/// noisy); the useful request fields are recorded explicitly.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        %client_addr,
+        mac = mac_addr.as_deref().unwrap_or(""),
+        file = %file_path.display(),
+        filename = %request.filename,
+    )
+)]
 async fn handle_tftp_transfer(
     socket: UdpSocket,
     client_addr: SocketAddr,
@@ -466,6 +480,7 @@ struct RetryPolicy {
 /// client cannot wedge us in a busy loop by flooding wrong-block ACKs. A
 /// client-sent ERROR packet aborts immediately with [`AckOutcome::ClientError`].
 /// Genuine send/recv I/O errors are propagated to the caller.
+#[tracing::instrument(skip_all, fields(%client_addr, expected_block, what))]
 async fn send_and_await_ack(
     socket: &UdpSocket,
     packet: &[u8],
@@ -616,6 +631,12 @@ fn wildcard_bind_addr(peer: &SocketAddr) -> &'static str {
 /// Concurrent transfers are bounded by [`MAX_CONCURRENT_TRANSFERS`]. Use
 /// [`run_tftp_server_with_limit`] to override the bound (tests inject a small
 /// limit to exercise the "Server busy" rejection).
+///
+/// Span layout: the listener loop carries one process-lifetime
+/// `run_tftp_server_with_limit{bind_addr}` span (a span per loop iteration
+/// would be meaningless for an accept loop); per-transfer context comes from
+/// the [`handle_tftp_transfer`] span on each spawned transfer task.
+#[tracing::instrument(skip(config, state_store))]
 pub async fn run_tftp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
@@ -627,6 +648,7 @@ pub async fn run_tftp_server(
 /// Like [`run_tftp_server`] but with an explicit concurrent-transfer bound so
 /// tests can drive the semaphore-rejection ("Server busy") path at a small
 /// limit instead of the production default of 128.
+#[tracing::instrument(skip(config, state_store))]
 pub async fn run_tftp_server_with_limit(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,

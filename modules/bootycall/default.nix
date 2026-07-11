@@ -395,6 +395,34 @@ in
           cfg.dataDir
           cfg.server.cacheDir
         ];
+        # Defence-in-depth hardening for a daemon parsing untrusted
+        # DHCP/TFTP/HTTP input. The address-family allowlist matches actual
+        # socket usage: AF_INET/AF_INET6 for the UDP (DHCP/TFTP) and TCP
+        # (HTTP) listeners plus the UDP-connect local-IP probe; AF_UNIX and
+        # AF_NETLINK for glibc's getaddrinfo (NSS/nscd lookup and interface
+        # enumeration) when a bind address is given as a hostname. The OLED
+        # and LED hardware paths use plain file I/O and ioctls on character
+        # devices, so they need no additional families.
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK"
+          "AF_UNIX"
+        ];
+        SystemCallFilter = [ "@system-service" ];
+        SystemCallArchitectures = "native";
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectClock = true;
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        # Safe for a pure ahead-of-time compiled Rust binary: nothing in the
+        # workspace JIT-compiles or needs writable+executable mappings.
+        MemoryDenyWriteExecute = true;
       };
     };
   };

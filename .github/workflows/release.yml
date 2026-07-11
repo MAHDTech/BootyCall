@@ -3,6 +3,17 @@ name: Release
 # Gate the release on the CI workflow succeeding (INFRA-5). Firing on
 # `workflow_run` instead of the raw push avoids ever tagging + shipping
 # a build that never passed tests / clippy / flake check.
+#
+# Release flow:
+#   1. check_release   - refuse unless CI was green, we are on the default
+#                        branch, and the Cargo.toml version is untagged.
+#   2. build_bootycall - native per-arch matrix (ubuntu-latest for x86_64,
+#                        ubuntu-24.04-arm for aarch64) that builds the
+#                        appliance binary and uploads it as a workflow
+#                        artifact. No Cachix and no emulation.
+#   3. release         - build the iPXE blobs, download both bootycall
+#                        artifacts (failing loudly if either is missing),
+#                        then tag and publish the GitHub release.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -21,23 +32,23 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Release
+  check_release:
+    name: Check Release Preconditions
     runs-on: ubuntu-latest
     # workflow_run fires on both success and failure; refuse to release
     # unless CI was actually green.
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      is_default: ${{ steps.check_default_branch.outputs.is_default }}
+      create_release: ${{ steps.check_tag_existence.outputs.create_release }}
+      version: ${{ steps.read_cargo_version.outputs.version }}
+      tag: ${{ steps.read_cargo_version.outputs.tag }}
     steps:
       - id: checkout_repository
         name: Checkout Repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # INFRA-6: pull real LFS blobs so the assets derivation ships
-          # actual wallpapers instead of pointer files. iPXE builds don't
-          # depend on LFS but this checkout is shared.
-          lfs: true
+          fetch-depth: 1
 
       - id: check_default_branch
         name: Check if on Default Branch
@@ -52,30 +63,6 @@ jobs:
             echo "Running on default branch ($DEFAULT_BRANCH). Proceeding with release."
             echo "is_default=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - id: get_repository_owner
-        name: Get lowercased repository owner
-        if: steps.check_default_branch.outputs.is_default == 'true'
-        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
-        env:
-          OWNER: ${{ github.repository_owner }}
-
-      - id: setup_devenv
-        name: Setup Devenv
-        if: steps.check_default_branch.outputs.is_default == 'true'
-        uses: ./.github/actions/setup-devenv
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
-          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skip-push: "true"
-
-      - id: configure_git
-        name: Configure Git
-        if: steps.check_default_branch.outputs.is_default == 'true'
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - id: read_cargo_version
         name: Read Cargo Version
@@ -97,8 +84,9 @@ jobs:
       - id: check_tag_existence
         name: Check if Tag Exists
         if: steps.check_default_branch.outputs.is_default == 'true'
+        env:
+          TAG: ${{ steps.read_cargo_version.outputs.tag }}
         run: |
-          TAG="${{ steps.read_cargo_version.outputs.tag }}"
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
             echo "Release/Tag $TAG already exists on remote. Skipping release."
             echo "create_release=false" >> "$GITHUB_OUTPUT"
@@ -107,50 +95,183 @@ jobs:
             echo "create_release=true" >> "$GITHUB_OUTPUT"
           fi
 
+  build_bootycall:
+    # INFRA-4: ship the appliance binary alongside the iPXE blobs.
+    # Each arch is built natively on its own runner (no cross-compilation,
+    # no binfmt emulation) and deliberately without Cachix — the cache has
+    # a 5 GB limit and the arm64 CI leg never pushes to it (skip-push), so
+    # relying on a substitute would silently break the arm64 release.
+    # Instead the binary is handed to the release job as a workflow
+    # artifact (issue 067).
+    name: Build bootycall (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - check_release
+    # The implicit success() on `needs` means a skipped or failed
+    # check_release gate skips the builds too.
+    if: >-
+      needs.check_release.outputs.is_default == 'true' &&
+      needs.check_release.outputs.create_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: free_disk_space
+        name: Free Disk Space
+        uses: ./.github/actions/free-disk-space
+
+      - id: install_nix
+        name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: nix_cache
+        name: Cache Nix Store
+        # Same cache key as .github/actions/setup-devenv so these jobs
+        # restore the store the CI matrix already populated for this arch.
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: ${{ runner.os }}-${{ runner.arch }}-nix-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-created: P7D
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: nix_build_bootycall
+        name: Nix Build bootycall
+        run: nix build .#bootycall --out-link result-bootycall
+
+      - id: stage_binary
+        name: Stage Binary
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          install -D -m 0755 result-bootycall/bin/bootycall-rs "dist/bootycall-${ARCH}-linux"
+          file "dist/bootycall-${ARCH}-linux"
+
+      - id: upload_binary
+        name: Upload Binary Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bootycall-${{ matrix.arch }}-linux
+          path: dist/bootycall-${{ matrix.arch }}-linux
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs:
+      - check_release
+      - build_bootycall
+    # The implicit success() on `needs` means a failed bootycall build
+    # (either arch) fails the whole workflow instead of shipping a
+    # partial release.
+    if: >-
+      needs.check_release.outputs.is_default == 'true' &&
+      needs.check_release.outputs.create_release == 'true'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # INFRA-6: pull real LFS blobs so the assets derivation ships
+          # actual wallpapers instead of pointer files. iPXE builds don't
+          # depend on LFS but this checkout is shared.
+          lfs: true
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: configure_git
+        name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
       - id: generate_release_notes
         name: Generate Release Notes
-        if: >-
-          steps.check_default_branch.outputs.is_default == 'true' &&
-          steps.check_tag_existence.outputs.create_release == 'true'
         shell: bash -c "nix develop --impure -c bash -- {0}"
+        env:
+          TAG: ${{ needs.check_release.outputs.tag }}
         run: |
-          TAG="${{ steps.read_cargo_version.outputs.tag }}"
           # Generate notes for the new version since the last tag
           convco changelog --max-versions 1 --unreleased "$TAG" > RELEASE_NOTES.md
 
       - id: build_ipxe_binaries
         name: Build iPXE Binaries
-        if: >-
-          steps.check_default_branch.outputs.is_default == 'true' &&
-          steps.check_tag_existence.outputs.create_release == 'true'
         run: |
           nix build .#ipxe-amd64 --out-link result-amd64
           nix build .#ipxe-arm64 --out-link result-arm64
 
-      - id: build_bootycall_binaries
-        name: Build bootycall Binaries
-        if: >-
-          steps.check_default_branch.outputs.is_default == 'true' &&
-          steps.check_tag_existence.outputs.create_release == 'true'
-        # INFRA-4: ship the appliance binary alongside the iPXE blobs.
-        # Cross-compile the arm64 build using nix's per-system output —
-        # `--system aarch64-linux` uses binfmt on the amd64 runner if
-        # available; otherwise it falls back to the cache from
-        # ci-nix-build-bootycall(arm64) that produced it earlier.
+      # The bootycall appliance binaries are built natively per arch by
+      # the build_bootycall matrix above and travel here as workflow
+      # artifacts — no Cachix round-trip and no emulated build.
+      # `actions/download-artifact` fails the job when a named artifact
+      # is missing, so a lost arm64 binary aborts the release loudly.
+      - id: download_bootycall_x86_64
+        name: Download bootycall x86_64 Binary
+        uses: actions/download-artifact@v8
+        with:
+          name: bootycall-x86_64-linux
+          path: dist
+
+      - id: download_bootycall_aarch64
+        name: Download bootycall aarch64 Binary
+        uses: actions/download-artifact@v8
+        with:
+          name: bootycall-aarch64-linux
+          path: dist
+
+      - id: verify_bootycall_binaries
+        name: Verify bootycall Binaries
+        # Belt-and-braces on top of the download failures above: refuse to
+        # publish if either binary is missing or empty so an artifact
+        # regression can never ship a partial release unnoticed.
         run: |
-          nix build .#bootycall --out-link result-bootycall-amd64
-          nix build .#packages.aarch64-linux.bootycall \
-            --system aarch64-linux \
-            --out-link result-bootycall-arm64
+          MISSING=0
+          for BINARY in bootycall-x86_64-linux bootycall-aarch64-linux; do
+            if [ ! -s "dist/${BINARY}" ]; then
+              echo "::error::Required release binary '${BINARY}' is missing or empty; refusing to publish a partial release."
+              MISSING=1
+            else
+              file "dist/${BINARY}"
+            fi
+          done
+          exit "$MISSING"
 
       - id: create_github_release
         name: Push Tag and Create GitHub Release
-        if: >-
-          steps.check_default_branch.outputs.is_default == 'true' &&
-          steps.check_tag_existence.outputs.create_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.read_cargo_version.outputs.tag }}
+          TAG: ${{ needs.check_release.outputs.tag }}
         run: |
           # Create and push the tag
           git tag "$TAG"
@@ -166,5 +287,5 @@ jobs:
             result-amd64/snponly.efi#snponly-amd64.efi \
             result-arm64/ipxe.efi#ipxe-arm64.efi \
             result-arm64/snponly.efi#snponly-arm64.efi \
-            result-bootycall-amd64/bin/bootycall-rs#bootycall-x86_64-linux \
-            result-bootycall-arm64/bin/bootycall-rs#bootycall-aarch64-linux
+            dist/bootycall-x86_64-linux \
+            dist/bootycall-aarch64-linux

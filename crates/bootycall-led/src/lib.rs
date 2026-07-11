@@ -120,14 +120,18 @@ pub fn activate_white_led() {
     info!("LED set to solid White (Service Stopped)");
 }
 
-/// Blinks the white LED to indicate booting/initialization.
-/// The `stop_rx` channel should be sent a message when booting is complete.
-pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
+/// Drive the boot-blink pattern until the stop channel resolves.
+///
+/// Returns `true` when a stop signal (`Some(())`) was received — the clean
+/// "startup completed" stop — and `false` when the sender was dropped
+/// without one (`None`), which means `main` returned early on a startup
+/// failure (BUG-075).
+async fn blink_until_stopped(stop_rx: &mut tokio::sync::mpsc::Receiver<()>) -> bool {
     let mut state = false;
     loop {
         tokio::select! {
-            _ = stop_rx.recv() => {
-                break;
+            msg = stop_rx.recv() => {
+                return msg.is_some();
             }
             _ = sleep(Duration::from_millis(500)) => {
                 if state {
@@ -141,9 +145,23 @@ pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
             }
         }
     }
+}
 
-    // Once stopped, turn solid blue to indicate ready
-    activate_blue_led();
+/// Blinks the white LED to indicate booting/initialization.
+/// The `stop_rx` channel should be sent a message when booting is complete.
+pub async fn run_boot_blink(mut stop_rx: tokio::sync::mpsc::Receiver<()>) {
+    if blink_until_stopped(&mut stop_rx).await {
+        // Clean stop: startup completed, turn solid blue to indicate ready.
+        activate_blue_led();
+    } else {
+        // Sender dropped without a stop signal: startup aborted before it
+        // could signal completion (BUG-075). Show solid white ("Service
+        // Stopped") so the rack LED never reports a healthy box that failed
+        // to start. This also closes the mid-blink race: any blink tick that
+        // slips in after `main`'s synchronous white write is followed by
+        // this white write, never a blue one.
+        activate_white_led();
+    }
 }
 
 /// Background LED manager that polls StateStore for active deployments
@@ -432,5 +450,35 @@ mod tests {
     fn led_test_rejects_unknown_color() {
         let err = led_test("purple", false).expect_err("purple is not a valid LED color");
         assert!(matches!(err, LedError::UnknownColor(ref c) if c == "purple"));
+    }
+
+    // Both boot-blink stop tests resolve the channel before the first 500 ms
+    // blink tick can fire, so `blink_until_stopped` returns without touching
+    // the sysfs LED paths.
+
+    #[tokio::test]
+    async fn boot_blink_clean_stop_signal_reports_running() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(())
+            .await
+            .expect("stop channel must accept a signal");
+        assert!(
+            blink_until_stopped(&mut rx).await,
+            "an explicit stop signal is a clean stop and must resolve to the running (blue) state"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_blink_dropped_sender_reports_stopped() {
+        // The regression BUG-075 covers: `main` returning early on a startup
+        // failure drops the sender without a stop signal — that must NOT be
+        // treated as a clean stop, or the rack LED turns blue ("Service
+        // Running") on a box that failed to start.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        drop(tx);
+        assert!(
+            !blink_until_stopped(&mut rx).await,
+            "a dropped sender means startup aborted and must resolve to the stopped (white) state"
+        );
     }
 }

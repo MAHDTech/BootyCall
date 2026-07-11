@@ -6,9 +6,11 @@ use std::time::SystemTime;
 
 /// Upper bound on host entries kept in the state store. SEC-4: an unbounded
 /// map lets a MAC-injection flood balloon memory (the state store is fed by
-/// every DHCP/HTTP/TFTP touch). New MACs beyond this ceiling are silently
-/// dropped by `update_host_status`; the periodic cleaner sweeps stale
-/// entries so headroom returns on its own.
+/// every DHCP/HTTP/TFTP touch). When the map is full, `update_host_status`
+/// admits a new MAC by evicting the least-recently-seen entry (LRU), so a
+/// sustained flood of continuously-refreshed MACs cannot permanently crowd
+/// out hosts that appear later. The periodic cleaner still sweeps entries
+/// that go idle, reclaiming headroom once a flood subsides.
 pub const MAX_TRACKED_HOSTS: usize = 4096;
 
 /// Upper bound on retained log events. The dashboard shows a rolling window, so
@@ -74,11 +76,20 @@ impl StateStore {
     ) {
         let mut hosts = self.hosts.write();
         let normalized = crate::mac::normalize_mac(mac);
-        // SEC-4: if we're at the ceiling and this MAC is new, drop the
-        // update instead of unboundedly growing the map. Existing entries
-        // (real hosts) keep updating.
+        // SEC-4: if we're at the ceiling and this MAC is new, evict the
+        // least-recently-seen entry (LRU) to make room instead of dropping
+        // the newcomer. Dropping would let an attacker who keeps their
+        // flood MACs warm permanently hide every host that appears later;
+        // eviction bounds memory while keeping the store live. The O(n)
+        // scan only runs on the full-map new-MAC path (n = 4096).
         if !hosts.contains_key(&normalized) && hosts.len() >= MAX_TRACKED_HOSTS {
-            return;
+            let oldest = hosts
+                .values()
+                .min_by_key(|state| state.last_seen)
+                .map(|state| state.mac.clone());
+            if let Some(oldest_mac) = oldest {
+                hosts.remove(&oldest_mac);
+            }
         }
         let entry = hosts
             .entry(normalized.clone())
@@ -367,7 +378,8 @@ mod tests {
             "store should hold exactly MAX_TRACKED_HOSTS entries"
         );
 
-        // (a) A brand-new MAC at the ceiling is dropped, not inserted.
+        // (a) A brand-new MAC at the ceiling is admitted by evicting the
+        // least-recently-seen entry; the map never grows past the ceiling.
         store.update_host_status(
             "de:ad:be:ef:00:01",
             HostStatus::Polling,
@@ -377,13 +389,17 @@ mod tests {
             None,
         );
         assert!(
-            store.get_host("de:ad:be:ef:00:01").is_none(),
-            "a new MAC beyond the ceiling must be dropped"
+            store.get_host("de:ad:be:ef:00:01").is_some(),
+            "a new MAC at the ceiling must be admitted via LRU eviction"
         );
-        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+        assert_eq!(
+            store.list_hosts().len(),
+            MAX_TRACKED_HOSTS,
+            "eviction must keep the map at the ceiling, never above it"
+        );
 
-        // (b) An already-tracked MAC still updates at the ceiling.
-        let existing = "02:00:00:00:00:00";
+        // (b) An already-tracked MAC still updates in place at the ceiling.
+        let existing = "de:ad:be:ef:00:01";
         store.update_host_status(existing, HostStatus::Completed, None, None, None, None);
         assert_eq!(
             store.get_host(existing).unwrap().status,
@@ -391,5 +407,55 @@ mod tests {
             "existing entries must keep updating at the ceiling"
         );
         assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+    }
+
+    #[test]
+    fn test_warm_flood_evicts_lru_to_admit_new_mac() {
+        let store = StateStore::new();
+
+        // Fill the store to the ceiling with an attacker's distinct MACs.
+        for i in 0..MAX_TRACKED_HOSTS {
+            let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
+            store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+        }
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+
+        // Let real time pass, then re-send every flood MAC except one victim,
+        // keeping the rest "warm" so clean_stale_hosts would never reclaim a
+        // slot. The victim keeps its strictly older last_seen timestamp.
+        let victim = "02:00:00:00:04:d2"; // i = 1234
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        for i in 0..MAX_TRACKED_HOSTS {
+            let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
+            if mac != victim {
+                store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+            }
+        }
+        assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
+
+        // A legitimate host shows up while the flood keeps the map full: it
+        // must be admitted, evicting the least-recently-seen entry.
+        store.update_host_status(
+            "aa:bb:cc:dd:ee:0f",
+            HostStatus::Polling,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            store.get_host("aa:bb:cc:dd:ee:0f").is_some(),
+            "a new MAC must be admitted even when the map is full of warm entries"
+        );
+        assert!(
+            store.get_host(victim).is_none(),
+            "the least-recently-seen entry must be the one evicted"
+        );
+        assert_eq!(
+            store.list_hosts().len(),
+            MAX_TRACKED_HOSTS,
+            "eviction must swap one entry, keeping the map at the ceiling"
+        );
     }
 }

@@ -311,6 +311,56 @@ fn test_cache_invalidated_on_kernel_path_change() {
     assert_eq!(before, after, "second override sync must not re-extract");
 }
 
+#[test]
+fn test_stale_tmp_artifacts_swept_on_cache_hit() {
+    // Extraction stages artifacts as `kernel.tmp`/`initrd.tmp` before an
+    // atomic rename (issue 085). A crash mid-extraction can strand those
+    // staging files; a later sync that is a cache HIT (no re-extraction to
+    // overwrite them) must still sweep the debris while leaving the live
+    // artifacts untouched.
+    let dir = tempdir().unwrap();
+    let disk_path = dir.path().join("test_disk.img");
+    let cache_dir = dir.path().join("cache");
+    build_dual_kernel_gpt_image(&disk_path);
+
+    let host = HostConfig {
+        mac: "00:11:22:33:44:ee".to_string(),
+        name: "tmp-sweep-host".to_string(),
+        image_path: disk_path.clone(),
+        bootloader: None,
+        kernel_path: None,
+        initrd_path: None,
+        cmdline: None,
+    };
+
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+
+    let host_cache_dir = cache_dir.join(&host.mac);
+    let kernel_tmp = host_cache_dir.join("kernel.tmp");
+    let initrd_tmp = host_cache_dir.join("initrd.tmp");
+    assert!(
+        !kernel_tmp.exists() && !initrd_tmp.exists(),
+        "no staging files may survive a successful extraction"
+    );
+
+    // Plant crash debris, then re-sync (cache hit) — it must be swept.
+    fs::write(&kernel_tmp, b"crash leftover").unwrap();
+    fs::write(&initrd_tmp, b"crash leftover").unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    assert!(!kernel_tmp.exists(), "stale kernel.tmp not swept");
+    assert!(!initrd_tmp.exists(), "stale initrd.tmp not swept");
+
+    // The live artifacts are untouched by the sweep.
+    assert_eq!(
+        fs::read_to_string(host_cache_dir.join("kernel")).unwrap(),
+        "default_kernel"
+    );
+    assert_eq!(
+        fs::read_to_string(host_cache_dir.join("initrd")).unwrap(),
+        "default_initrd"
+    );
+}
+
 fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
     ServerConfig {
         http_bind: "0.0.0.0:8080".to_string(),
@@ -435,6 +485,14 @@ fn test_sync_host_cache_size_ceiling() {
     assert!(
         !host_cache_dir.join("metadata.json").exists(),
         "metadata left behind"
+    );
+    assert!(
+        !host_cache_dir.join("kernel.tmp").exists(),
+        "staging kernel.tmp left behind"
+    );
+    assert!(
+        !host_cache_dir.join("initrd.tmp").exists(),
+        "staging initrd.tmp left behind"
     );
 
     // A generous ceiling extracts the same host fine.

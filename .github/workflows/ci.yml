@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /nix
-          key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv/default.nix', 'flake.nix', 'flake.lock') }}
           lookup-only: true
 
       - id: cargo_cache_lookup

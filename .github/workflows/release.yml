@@ -133,7 +133,7 @@ jobs:
 
       - id: install_nix
         name: Install Nix
-        uses: cachix/install-nix-action@v31
+        uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -141,7 +141,7 @@ jobs:
         name: Cache Nix Store
         # Same cache key as .github/actions/setup-devenv so these jobs
         # restore the store the CI matrix already populated for this arch.
-        uses: nix-community/cache-nix-action@v7
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
           primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: ${{ runner.os }}-${{ runner.arch }}-nix-

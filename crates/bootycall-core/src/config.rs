@@ -3,6 +3,12 @@ use bootycall_log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Quiet window the hot-reload watcher waits for after a config-file event
+/// before reloading. Atomic saves (`vim`, `sed -i`, Ansible) fire a burst of
+/// remove/create/modify events within a few milliseconds; debouncing collapses
+/// the burst into a single reload.
+const CONFIG_DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn default_oled_enabled() -> bool {
     true
 }
@@ -105,7 +111,8 @@ impl Config {
     /// - the three bind fields parse as `std::net::SocketAddr`;
     /// - `default_bootloader_amd64` / `_arm64` / `_bios` are non-empty;
     /// - each host MAC is a valid normalised MAC;
-    /// - host MACs and host names are unique;
+    /// - host MACs and host names are unique (names are compared after
+    ///   trimming, so `"web"` and `"web "` count as duplicates);
     /// - `api_token`, when set, is non-empty (an empty token would
     ///   authenticate a caller sending an empty `X-API-Token` header).
     pub fn validate(&self) -> Result<(), CoreError> {
@@ -183,13 +190,15 @@ impl Config {
                     host.mac
                 )));
             }
-            if host.name.trim().is_empty() {
+            // Key uniqueness on the *trimmed* name: "web" and "web " would
+            // otherwise pass as two distinct hosts and confuse the dashboard.
+            let name = host.name.trim();
+            if name.is_empty() {
                 return Err(invalid("a host has an empty name".to_string()));
             }
-            if !seen_names.insert(host.name.as_str()) {
+            if !seen_names.insert(name) {
                 return Err(invalid(format!(
-                    "duplicate host name {:?} (each host name must be unique)",
-                    host.name
+                    "duplicate host name {name:?} (each host name must be unique)"
                 )));
             }
         }
@@ -239,8 +248,6 @@ where
     watcher.watch(&watch_dir, notify::RecursiveMode::NonRecursive)?;
 
     std::thread::spawn(move || {
-        let debounce = std::time::Duration::from_millis(200);
-
         loop {
             // Block until at least one event arrives; if the channel closes,
             // the watcher is gone and we can exit the reload thread.
@@ -251,13 +258,23 @@ where
 
             let mut dirty = event_targets_config(&first, watch_name.as_deref());
 
-            // Drain follow-up events (typical for an atomic
-            // save: remove + create + modify all fire within a few ms).
+            // Drain follow-up events (typical for an atomic save:
+            // remove + create + modify all fire within a few ms) against a
+            // rolling deadline. Only events that target the config file
+            // extend the window — unrelated sibling-file churn in the watched
+            // directory would otherwise reset the timeout on every event and
+            // starve the reload indefinitely.
+            let mut deadline = std::time::Instant::now() + CONFIG_DEBOUNCE_DURATION;
             loop {
-                match rx.recv_timeout(debounce) {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(remaining) {
                     Ok(res) => {
                         if event_targets_config(&res, watch_name.as_deref()) {
                             dirty = true;
+                            deadline = std::time::Instant::now() + CONFIG_DEBOUNCE_DURATION;
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => break,
@@ -718,6 +735,21 @@ hosts:
     fn validate_rejects_duplicate_name() {
         let mut cfg = valid_config();
         cfg.hosts[1].name = cfg.hosts[0].name.clone();
+        assert_invalid(&cfg, "duplicate host name");
+    }
+
+    #[test]
+    fn validate_rejects_trimmed_duplicate_name() {
+        // "web" and "web " must collide: uniqueness keys on the trimmed name.
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = "web".to_string();
+        cfg.hosts[1].name = "web ".to_string();
+        assert_invalid(&cfg, "duplicate host name");
+
+        // Leading whitespace collides too.
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = " web".to_string();
+        cfg.hosts[1].name = "web".to_string();
         assert_invalid(&cfg, "duplicate host name");
     }
 

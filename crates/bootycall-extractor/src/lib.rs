@@ -171,6 +171,7 @@ impl SyncSummary {
 /// configuration. Returns `Err` only when the cache directory itself cannot be
 /// created (a genuine setup failure); per-host extraction failures are
 /// collected into the returned [`SyncSummary`] rather than aborting the sweep.
+#[tracing::instrument(skip_all, fields(hosts = config.hosts.len()))]
 pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorError> {
     let cache_dir = &config.server.cache_dir;
     if !cache_dir.exists() {
@@ -235,6 +236,13 @@ pub fn host_cache_ready(mac: &str, cache_dir: &Path) -> bool {
 
 /// Synchronises the cache directory for a single host. `max_artifact_bytes`
 /// caps the size of each extracted kernel/initrd (`None` = unbounded).
+///
+/// Per-host span: the `extract_cache_hit`/`_miss`/`_complete`/`_failed`
+/// events emitted below all nest inside it, correlated by host/MAC/image.
+#[tracing::instrument(
+    skip_all,
+    fields(host = %host.name, mac = %host.mac, image = %host.image_path.display())
+)]
 pub fn sync_host_cache(
     host: &HostConfig,
     cache_dir: &Path,

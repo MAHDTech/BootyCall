@@ -114,6 +114,7 @@ impl<F: Write + Seek> Write for PartitionSlice<F> {
     }
 }
 
+#[tracing::instrument(skip_all, fields(image = %disk_path.display()))]
 pub fn extract_from_disk(
     disk_path: &Path,
     kernel_override: Option<&str>,

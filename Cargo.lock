@@ -188,6 +188,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -198,9 +199,11 @@ dependencies = [
  "bootycall-log",
  "dhcproto",
  "parking_lot",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -216,6 +219,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -237,6 +241,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -247,6 +252,7 @@ dependencies = [
  "bootycall-log",
  "thiserror",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -303,6 +309,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -749,7 +749,13 @@ async fn test_health_endpoint_reflects_cache_readiness() {
         status.contains("503"),
         "missing artifacts must be degraded, got: {status}"
     );
-    assert!(String::from_utf8_lossy(&body).contains("degraded"));
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["hosts_total"], 1);
+    assert_eq!(json["hosts_not_ready_count"], 1);
+    // No api_token configured → the endpoint stays fully open and the
+    // not-ready names are still disclosed (matches the /api/status posture).
+    assert_eq!(json["hosts_not_ready"], serde_json::json!(["nixos-test"]));
 
     // Provision non-empty kernel + initrd, then it must be healthy.
     let host_cache = cache_dir.join(&host_mac);
@@ -762,7 +768,84 @@ async fn test_health_endpoint_reflects_cache_readiness() {
         status.contains("200"),
         "present artifacts must be healthy, got: {status}"
     );
-    assert!(String::from_utf8_lossy(&body).contains("healthy"));
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "healthy");
+    assert_eq!(json["hosts_not_ready_count"], 0);
+}
+
+/// GET `path` with an `X-API-Token` header, returning (status line, body).
+async fn http_get_with_token(port: u16, path: &str, token: &str) -> (String, Vec<u8>) {
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-API-Token: {token}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, body) = parse_http_response(&response);
+    (status, body)
+}
+
+#[tokio::test]
+async fn test_health_hides_host_names_from_unauthenticated_callers() {
+    // Issue 086: with an api_token configured, the open readiness probe must
+    // keep working (status + counts, correct HTTP code) but must not disclose
+    // configured host names; the `hosts_not_ready` list only appears when the
+    // caller presents the valid token.
+    let port: u16 = 26111;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.api_token = Some("health-secret".to_string());
+    }
+
+    // Unauthenticated: still a usable probe (503 while degraded, never 401),
+    // but counts only — no host names anywhere in the body.
+    let (status, body) = http_get(port, "/api/health").await;
+    assert!(
+        status.contains("503"),
+        "probe must stay usable without a token, got: {status}"
+    );
+    let body_str = String::from_utf8_lossy(&body).to_string();
+    assert!(
+        !body_str.contains("nixos-test"),
+        "unauthenticated health body must not leak host names, got: {body_str}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["hosts_total"], 1);
+    assert_eq!(json["hosts_not_ready_count"], 1);
+    assert!(
+        json.get("hosts_not_ready").is_none(),
+        "unauthenticated health body must omit hosts_not_ready, got: {body_str}"
+    );
+
+    // A wrong token is treated exactly like no token: probe still answers,
+    // names still withheld.
+    let (status, body) = http_get_with_token(port, "/api/health", "wrong-token").await;
+    assert!(
+        status.contains("503"),
+        "probe must stay usable with a bad token, got: {status}"
+    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("hosts_not_ready").is_none(),
+        "bad-token health body must omit hosts_not_ready, got: {json}"
+    );
+
+    // Valid token: the not-ready host-name list is included.
+    let (status, body) = http_get_with_token(port, "/api/health", "health-secret").await;
+    assert!(status.contains("503"), "still degraded, got: {status}");
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["hosts_not_ready_count"], 1);
+    assert_eq!(json["hosts_not_ready"], serde_json::json!(["nixos-test"]));
 }
 
 async fn http_get_with_host(port: u16, path: &str, host_header: &str) -> (String, String) {

@@ -680,7 +680,17 @@ async fn api_logs_handler(
 // API endpoint: GET /api/health — unauthenticated readiness probe. Healthy when
 // every configured host has non-empty cached kernel+initrd artifacts ready to
 // serve; degraded (HTTP 503) otherwise. Suitable for a systemd watchdog / LB.
-async fn api_health_handler(State(state): State<ServerState>) -> impl IntoResponse {
+//
+// The bare status + counts stay open so a load balancer can probe readiness
+// without credentials (issue 032), but the list of not-ready host names is
+// fleet inventory — the same data issue 037 gated behind `api_token` on
+// /api/status — so `hosts_not_ready` is only included when `check_api_token`
+// passes (issue 086). When no `api_token` is configured the endpoint stays
+// fully open, matching the /api/status posture.
+async fn api_health_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let (cache_dir, hosts) = {
         let config_guard = state.config.read();
         (
@@ -689,6 +699,10 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
         )
     };
     let hosts_total = hosts.len();
+
+    // May the caller see host names? Never turns the probe into a 401 — an
+    // unauthenticated caller still gets status + counts, just not the names.
+    let names_authorized = check_api_token(&state, &headers).is_ok();
 
     // `host_cache_ready` stats two files per configured host with blocking
     // `std::fs`, so the whole fleet sweep runs on the blocking pool — a load
@@ -713,7 +727,7 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
                 Json(serde_json::json!({
                     "status": "error",
                     "hosts_total": hosts_total,
-                    "hosts_not_ready": serde_json::Value::Null,
+                    "hosts_not_ready_count": serde_json::Value::Null,
                 })),
             );
         }
@@ -725,11 +739,14 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "status": if healthy { "healthy" } else { "degraded" },
         "hosts_total": hosts_total,
-        "hosts_not_ready": not_ready,
+        "hosts_not_ready_count": not_ready.len(),
     });
+    if names_authorized {
+        body["hosts_not_ready"] = serde_json::Value::from(not_ready);
+    }
 
     (status_code, Json(body))
 }
@@ -737,7 +754,9 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
 /// Enforce the optional `api_token`: when one is configured, require a matching
 /// `X-API-Token` header (constant-time), else `Err(UNAUTHORIZED)`. When no token
 /// is configured the endpoint stays open (backwards-compatible). Shared by the
-/// mutating `/api/override` and the read `/api/status` + `/api/logs` endpoints.
+/// mutating `/api/override` and the read `/api/status` + `/api/logs` endpoints;
+/// `/api/health` also consults it — not to reject the probe, but to decide
+/// whether the not-ready host-name list may be disclosed (issue 086).
 fn check_api_token(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
     let config_guard = state.config.read();
     if let Some(expected) = config_guard.server.api_token.as_deref() {

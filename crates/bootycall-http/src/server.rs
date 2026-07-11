@@ -10,7 +10,7 @@ use minijinja::context;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bootycall_core::config::{Config, HostConfig, ServerConfig};
@@ -119,14 +119,39 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response, StatusCode> {
-    let full_path = match bootycall_core::safe_join(dir, relative_path) {
-        Some(p) => p,
-        None => return Err(StatusCode::FORBIDDEN),
-    };
+/// Run [`bootycall_core::safe_join`] on tokio's blocking thread pool.
+///
+/// CONVENTION (issue 070): handlers here are `async fn`s executing on tokio
+/// worker threads and must never perform blocking `std::fs` work — stat,
+/// canonicalize, open, read — directly, nor call helpers that do (such as
+/// `safe_join`, which canonicalises twice). A blocked worker stalls unrelated
+/// DHCP/TFTP/HTTP futures under load. Route all filesystem work through
+/// `tokio::fs` (which offloads internally) or `tokio::task::spawn_blocking`,
+/// as here.
+///
+/// A failed join (panicked or cancelled task) maps to `None`, i.e. deny —
+/// never fail open on a path-containment check.
+async fn safe_join_blocking(root: PathBuf, requested: String) -> Option<PathBuf> {
+    match tokio::task::spawn_blocking(move || bootycall_core::safe_join(&root, &requested)).await {
+        Ok(joined) => joined,
+        Err(e) => {
+            error!("safe_join task panicked or was cancelled: {e:?}");
+            None
+        }
+    }
+}
 
-    if !full_path.exists() || !full_path.is_file() {
-        return Err(StatusCode::NOT_FOUND);
+async fn serve_file_from_dir(dir: PathBuf, relative_path: String) -> Result<Response, StatusCode> {
+    let full_path = safe_join_blocking(dir, relative_path.clone())
+        .await
+        .ok_or(StatusCode::FORBIDDEN)?;
+
+    // One offloaded stat (tokio::fs runs it on the blocking pool) replaces the
+    // old on-runtime `exists()` + `is_file()` pair; a missing path and a
+    // non-file (directory, socket, …) both map to 404 as before.
+    match tokio::fs::metadata(&full_path).await {
+        Ok(meta) if meta.is_file() => {}
+        _ => return Err(StatusCode::NOT_FOUND),
     }
 
     let file = match tokio::fs::File::open(&full_path).await {
@@ -134,7 +159,7 @@ async fn serve_file_from_dir(dir: &Path, relative_path: &str) -> Result<Response
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    let content_type = content_type_for(relative_path);
+    let content_type = content_type_for(&relative_path);
 
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = axum::body::Body::from_stream(stream);
@@ -176,7 +201,7 @@ async fn serve_static_file(
         let config_guard = state.config.read();
         config_guard.server.static_dir.clone()
     };
-    serve_file_from_dir(&static_dir, &path).await
+    serve_file_from_dir(static_dir, path).await
 }
 
 // Serving cached kernels and initrds
@@ -188,7 +213,7 @@ async fn serve_cache_file(
         let config_guard = state.config.read();
         config_guard.server.cache_dir.clone()
     };
-    serve_file_from_dir(&cache_dir, &path).await
+    serve_file_from_dir(cache_dir, path).await
 }
 
 /// Strip an optional `:port` suffix from a `Host` header value, handling
@@ -572,10 +597,13 @@ async fn wallpaper_handler(
     let mut selected_path = None;
 
     // First, check if a specific resolution directory is requested and exists.
-    // Route the resolution segment through `safe_join` for defence in depth.
+    // Route the resolution segment through `safe_join` for defence in depth —
+    // via the blocking pool, since it canonicalises (see `safe_join_blocking`).
     if let (Some(w), Some(h)) = (target_width, target_height) {
         let res_dir_name = format!("{}x{}", w, h);
-        if let Some(res_path) = bootycall_core::safe_join(&wallpapers_root, &res_dir_name) {
+        if let Some(res_path) =
+            safe_join_blocking(wallpapers_root.clone(), res_dir_name.clone()).await
+        {
             let candidates = collect_wallpaper_candidates(&res_path).await;
             if !candidates.is_empty() {
                 use rand::seq::IndexedRandom;
@@ -660,12 +688,36 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
             config_guard.hosts.clone(),
         )
     };
+    let hosts_total = hosts.len();
 
-    let not_ready: Vec<String> = hosts
-        .iter()
-        .filter(|h| !bootycall_extractor::host_cache_ready(&h.mac, &cache_dir))
-        .map(|h| h.name.clone())
-        .collect();
+    // `host_cache_ready` stats two files per configured host with blocking
+    // `std::fs`, so the whole fleet sweep runs on the blocking pool — a load
+    // balancer polling /api/health against a large fleet must not stall
+    // runtime workers (issue 070; see the convention on `safe_join_blocking`).
+    let not_ready: Vec<String> = match tokio::task::spawn_blocking(move || {
+        hosts
+            .into_iter()
+            .filter(|h| !bootycall_extractor::host_cache_ready(&h.mac, &cache_dir))
+            .map(|h| h.name)
+            .collect()
+    })
+    .await
+    {
+        Ok(names) => names,
+        Err(e) => {
+            // The sweep task panicked or was cancelled — report a server
+            // error rather than claiming the box is healthy or degraded.
+            error!("health readiness sweep task failed: {e:?}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "hosts_total": hosts_total,
+                    "hosts_not_ready": serde_json::Value::Null,
+                })),
+            );
+        }
+    };
 
     let healthy = not_ready.is_empty();
     let status_code = if healthy {
@@ -675,7 +727,7 @@ async fn api_health_handler(State(state): State<ServerState>) -> impl IntoRespon
     };
     let body = serde_json::json!({
         "status": if healthy { "healthy" } else { "degraded" },
-        "hosts_total": hosts.len(),
+        "hosts_total": hosts_total,
         "hosts_not_ready": not_ready,
     });
 
@@ -865,6 +917,45 @@ mod tests {
         assert_eq!(content_type_for("data.json"), "application/json");
         assert_eq!(content_type_for("script.ipxe"), "text/plain");
         assert_eq!(content_type_for("some-file"), "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn serve_file_from_dir_maps_status_codes() {
+        // Guards the issue-070 rework (safe_join + stat moved off the runtime
+        // threads): the 200/404/403 contract must not change.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("file.bin"), b"DATA").unwrap();
+
+        // Existing file → 200.
+        let ok = serve_file_from_dir(dir.path().to_path_buf(), "file.bin".to_string())
+            .await
+            .expect("existing file must serve");
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        // Missing file → 404.
+        assert_eq!(
+            serve_file_from_dir(dir.path().to_path_buf(), "missing.bin".to_string())
+                .await
+                .unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Directory (exists, not a file) → 404.
+        assert_eq!(
+            serve_file_from_dir(dir.path().to_path_buf(), "subdir".to_string())
+                .await
+                .unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Traversal → 403.
+        assert_eq!(
+            serve_file_from_dir(dir.path().to_path_buf(), "../etc/passwd".to_string())
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     fn test_config(hosts: Vec<HostConfig>) -> Config {

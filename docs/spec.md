@@ -75,7 +75,7 @@ The project is a Cargo Workspace rooted at the repo root (`Cargo.toml` at `./`).
     │   └── src/
     │       ├── lib.rs
     │       └── server.rs               # iPXE scripting, /api/{status,logs,override}, wallpaper picker, UI
-    ├── bootycall-oled/                 # 256×64 OLED render loop + rusttype text
+    ├── bootycall-oled/                 # 160×60 OLED render loop + ab_glyph text
     ├── bootycall-led/                  # Rackmount status LED driver
     └── bootycall-rs/                   # Main binary
         ├── Cargo.toml
@@ -109,9 +109,14 @@ server:
   tftp_root: "./tftpboot"
   proxy_dhcp_bind: "0.0.0.0:4011"
   cache_dir: "./cache"
+  static_dir: "./static" # Optional; root for static HTTP assets (default "./static")
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
   default_bootloader_bios: "boot/x64/undionly.kpxe" # Legacy BIOS PXE (arch 0)
+  oled_enabled: true # Optional; set false to skip the OLED render task (default true)
+  oled_brightness: 255 # Optional; OLED panel brightness 0-255 (default 255)
+  api_token: "a-long-random-secret" # Optional; when set, gates the /api endpoints
+  max_artifact_bytes: 1073741824 # Optional; per-artifact extraction cap in bytes (default unbounded)
 
 hosts:
   - mac: "52:54:00:10:10:10"
@@ -170,4 +175,4 @@ To maintain rich custom console aesthetics, the iPXE boot menus support dynamic 
 - **Resource Constraints**:
   - Target memory footprint: `< 30MB` RAM at idle.
   - User-space execution only (except binding privileged ports like 67/69, which is handled via systemd socket activation or Capabilities `CAP_NET_BIND_SERVICE`).
-- **UEFI Mode Only**: Standard UEFI loaders only; legacy BIOS PXE (`undionly.kpxe`/`memdisk`) is not targeted.
+- **UEFI First, Legacy BIOS Supported**: UEFI loaders (`ipxe.efi`) are the primary target. Legacy BIOS PXE clients (DHCP Option 93 architecture 0) are also supported: they cannot execute an EFI image, so the proxy DHCP server hands them the real-mode NBP configured via `default_bootloader_bios` (default `boot/x64/undionly.kpxe`). `memdisk`-style whole-image boots are not targeted.

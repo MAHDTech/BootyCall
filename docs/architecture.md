@@ -98,12 +98,12 @@ graph TD
    - Exposes configuration parser `Config::load(path)` and directory watchers utilising the `notify` crate.
    - Manages a thread-safe `StateStore` wrapping an in-memory `HashMap` of host boot status mappings, shared across all asynchronous network loops using `Arc<RwLock>`.
 2. **`bootycall-extractor`**:
-   - Exposes `Extractor::sync_cache(config, state)` to parse, extract, and index bootloader files in user-space, avoiding loop device system mounts.
+   - Exposes the free function `sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorError>` to parse, extract, and index kernel/initrd files in user-space, avoiding loop device system mounts.
 3. **`bootycall-dhcp`**:
    - Executes a Tokio UDP socket bind loop. Parses architecture configuration packets (DHCP Option 93) and responds with PXE options telling the client where to fetch the network boot loaders.
 4. **`bootycall-tftp`**:
    - Implements an async TFTP parser serving files from the configured TFTP directory. Matches requested filenames against configured overrides in the state store.
 5. **`bootycall-http`**:
-   - Axum-based HTTP handler serving `/start`, `/poll/:mac`, `/dynamic/wallpaper.ipxe`, caching endpoints for kernel/initrd, and the embedded Web dashboard UI.
+   - Axum-based HTTP handler serving `/start`, `/poll/{mac}`, `/dynamic/wallpaper.ipxe`, caching endpoints for kernel/initrd, and the embedded Web dashboard UI.
 6. **`bootycall-rs`**:
    - Orchestrates service boot, coordinates graceful shutdown signals, and handles logging instrumentation (`tracing-subscriber`).

@@ -4,7 +4,7 @@
 
 `bootycall-rs` is a high-performance, single-binary, all-in-one network booting suite.
 
-It serves as a modern replacement for the legacy stack of TFTPd, iPXE and integrates HTTP.
+It serves as a modern replacement for the legacy setup of Caddy, TFTPd, and Shoelaces.
 
 It hosts three core protocols (Proxy DHCP, TFTP, and HTTP) on a single asynchronous Tokio runtime, working alongside your existing primary DHCP server.
 

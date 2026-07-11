@@ -81,13 +81,18 @@ let
         default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
         default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
         default_bootloader_bios = cfg.server.defaultBootloaderBios;
+        oled_enabled = cfg.server.oledEnabled;
+        oled_brightness = cfg.server.oledBrightness;
       }
       // lib.optionalAttrs (cfg.server.advertisedHost != null) {
         advertised_host = cfg.server.advertisedHost;
       }
       // lib.optionalAttrs (cfg.server.allowedHosts != [ ]) {
         allowed_hosts = cfg.server.allowedHosts;
-      };
+      }
+      # The service rejects an empty api_token at startup and treats an absent
+      # key as "no auth", so only emit the key when a token is configured.
+      // lib.optionalAttrs (cfg.server.apiToken != null) { api_token = cfg.server.apiToken; };
       hosts = map (
         h:
         {
@@ -307,6 +312,39 @@ in
           reflect-the-header behaviour.
         '';
       };
+
+      oledEnabled = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Whether the service spawns the OLED render task
+          (`server.oled_enabled`). Set to false on hardware without the
+          rackmount OLED panel. Note that driving the real panel additionally
+          requires `hardware.enable` to relax the unit hardening.
+        '';
+      };
+
+      oledBrightness = lib.mkOption {
+        type = lib.types.ints.u8;
+        default = 255;
+        description = ''
+          OLED panel brightness (`server.oled_brightness`, 0-255). Lower
+          values dim the display and reduce burn-in/power.
+        '';
+      };
+
+      apiToken = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Shared secret (`server.api_token`) required via the `X-API-Token`
+          header on the API endpoints. When null (default), the API endpoints
+          are unauthenticated. Warning: the generated configuration file is
+          written to the world-readable Nix store, so any token set here is
+          visible to local users; to keep the secret out of the store, provide
+          an externally-managed `configFile` instead.
+        '';
+      };
     };
 
     hosts = lib.mkOption {
@@ -381,6 +419,16 @@ in
             configuration, so the declarative `hosts` would be silently ignored.
             Provide either an external `configFile` or the declarative
             `server`/`hosts` options, not both.
+          '';
+        }
+        # The service refuses to start on an empty api_token (it would
+        # authenticate an empty header); catch it at eval time instead.
+        {
+          assertion = cfg.server.apiToken != "";
+          message = ''
+            services.bootycall.server.apiToken is set to an empty string.
+            Set it to null (default) to disable API authentication, or
+            provide a real secret.
           '';
         }
       ];

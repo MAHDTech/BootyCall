@@ -76,6 +76,7 @@ hediet
 horiz
 ifopen
 initrds
+ints
 ipxe
 ipxemenu
 iventoy

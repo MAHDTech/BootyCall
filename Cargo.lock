@@ -241,10 +241,11 @@ dependencies = [
 name = "bootycall-led"
 version = "0.1.3"
 dependencies = [
- "anyhow",
  "bootycall-core",
  "bootycall-log",
+ "thiserror",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

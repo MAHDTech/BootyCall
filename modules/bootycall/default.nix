@@ -81,6 +81,12 @@ let
         default_bootloader_amd64 = cfg.server.defaultBootloaderAmd64;
         default_bootloader_arm64 = cfg.server.defaultBootloaderArm64;
         default_bootloader_bios = cfg.server.defaultBootloaderBios;
+      }
+      // lib.optionalAttrs (cfg.server.advertisedHost != null) {
+        advertised_host = cfg.server.advertisedHost;
+      }
+      // lib.optionalAttrs (cfg.server.allowedHosts != [ ]) {
+        allowed_hosts = cfg.server.allowedHosts;
       };
       hosts = map (
         h:
@@ -269,6 +275,37 @@ in
         type = lib.types.str;
         default = "boot/x64/undionly.kpxe";
         description = "Default bootloader path for legacy BIOS PXE clients (Option 93 architecture 0), which cannot execute an EFI image.";
+      };
+
+      advertisedHost = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "boot.example.internal:8080";
+        description = ''
+          Authoritative `host[:port]` advertised to PXE clients inside
+          generated iPXE boot scripts (kernel/initrd/chain URLs). When set,
+          the client-supplied `Host:` header is ignored while building those
+          URLs, preventing boot-script cache poisoning behind a path-keyed
+          caching proxy. When null (the default), the `Host` header is used,
+          validated against `allowedHosts` when that list is non-empty.
+        '';
+      };
+
+      allowedHosts = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [
+          "192.168.1.10"
+          "boot.example.internal"
+        ];
+        description = ''
+          Allowlist of hostnames/IP addresses (compared without any `:port`)
+          that the client-supplied `Host:` header may reflect into generated
+          boot-script URLs when `advertisedHost` is unset. Requests carrying
+          an unlisted `Host` fall back to the first entry combined with the
+          port from `httpBind`. An empty list (the default) keeps the legacy
+          reflect-the-header behaviour.
+        '';
       };
     };
 

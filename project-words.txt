@@ -119,6 +119,7 @@ rajdhani
 ranlib
 rarr
 ripsecrets
+rsplit
 rustc
 rustsec
 rusttype

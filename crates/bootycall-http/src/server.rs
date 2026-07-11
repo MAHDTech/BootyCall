@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use bootycall_core::config::{Config, HostConfig};
+use bootycall_core::config::{Config, HostConfig, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
 
 #[derive(RustEmbed)]
@@ -191,23 +191,97 @@ async fn serve_cache_file(
     serve_file_from_dir(&cache_dir, &path).await
 }
 
-/// Extract the client-facing `Host:` header (used to build the URLs the
-/// generated iPXE scripts hand back), falling back to the dev default. Kept in
-/// one place so the `localhost:8080` default lives at a single site.
-fn host_header(headers: &HeaderMap) -> &str {
-    headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost:8080")
+/// Strip an optional `:port` suffix from a `Host` header value, handling
+/// bracketed IPv6 literals (`[::1]:8080` → `::1`). Unbracketed values with
+/// more than one colon are returned untouched — an unbracketed IPv6 literal
+/// has no unambiguous port separator.
+fn host_without_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match host.split_once(':') {
+        Some((name, port))
+            if !port.is_empty()
+                && !port.contains(':')
+                && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => host,
+    }
+}
+
+/// Resolve the `host[:port]` clients are sent to in generated iPXE
+/// boot-script URLs (bound as `server_ip_port` in the templates).
+///
+/// Reflecting the client-supplied `Host:` header verbatim lets an attacker
+/// behind a path-keyed caching proxy poison the cached boot script so *other*
+/// PXE clients fetch their kernel/initrd from an attacker host (issue 069),
+/// so trusted configuration wins:
+///
+/// 1. `server.advertised_host`, when set, is always used; the `Host` header
+///    is ignored entirely.
+/// 2. Otherwise, when `server.allowed_hosts` is non-empty, the header is
+///    reflected only if its host part (port stripped) matches an allowlist
+///    entry; anything else is replaced by the first allowed host plus the
+///    trusted `http_bind` port.
+/// 3. With neither option configured the raw header is reflected as before
+///    (falling back to the historical `localhost:8080` dev default) so
+///    existing deployments keep booting — set `advertised_host` on any
+///    installation fronted by a shared cache.
+fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
+    if let Some(advertised) = server.advertised_host.as_deref() {
+        return advertised.to_string();
+    }
+
+    let host_hdr = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+
+    if server.allowed_hosts.is_empty() {
+        return host_hdr.unwrap_or("localhost:8080").to_string();
+    }
+
+    if let Some(hdr) = host_hdr {
+        let host_only = host_without_port(hdr);
+        if server
+            .allowed_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host_only))
+        {
+            return hdr.to_string();
+        }
+    }
+
+    // Unknown or missing Host: replace it with the first allowed host and the
+    // port from `http_bind` — the port carried by an attacker-supplied header
+    // is just as untrusted as its hostname.
+    let port = server
+        .http_bind
+        .rsplit_once(':')
+        .map(|(_, p)| p)
+        .unwrap_or("8080");
+    let host = server
+        .allowed_hosts
+        .first()
+        .map(String::as_str)
+        .unwrap_or("localhost");
+    if host.contains(':') {
+        // Bare IPv6 literal — bracket it so the port stays unambiguous.
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 // /start endpoint - chains client to MAC specific poll endpoint
-async fn start_handler(headers: HeaderMap) -> impl IntoResponse {
-    let host_hdr = host_header(&headers);
+async fn start_handler(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
+    let server_host = {
+        let config_guard = state.config.read();
+        advertised_host_port(&config_guard.server, &headers)
+    };
 
     let script = format!(
         "#!ipxe\necho BootyCall starting...\nchain --autofree --replace http://{}/poll/${{mac:hexhyp}}\n",
-        host_hdr
+        server_host
     );
 
     ([(header::CONTENT_TYPE, "text/plain")], script)
@@ -229,18 +303,20 @@ enum PollOutcome {
 /// Decide what to serve for a `/poll/{mac}` request: boot a directly-configured
 /// host, boot a manually-overridden target, report a render failure, or keep
 /// polling. Pure (no state mutation) so every branch can be tested directly.
+/// `server_host` must already be resolved via [`advertised_host_port`] — never
+/// pass the raw `Host:` header here.
 fn decide_poll_outcome(
     boot_template: &minijinja::Template<'_, '_>,
     config: &Config,
     state_store: &StateStore,
     mac_str: &str,
-    host_hdr: &str,
+    server_host: &str,
 ) -> PollOutcome {
     // 1. Host configured directly in yaml.
     if let Some(host_config) = config.find_host(mac_str) {
         return match boot_template.render(context! {
             name => host_config.name.as_str(),
-            server_ip_port => host_hdr,
+            server_ip_port => server_host,
             mac => host_config.mac.as_str(),
             cmdline => host_config.cmdline.as_deref().unwrap_or(""),
             target_of => None::<&str>,
@@ -263,7 +339,7 @@ fn decide_poll_outcome(
     {
         return match boot_template.render(context! {
             name => target_config.name.as_str(),
-            server_ip_port => host_hdr,
+            server_ip_port => server_host,
             mac => target_config.mac.as_str(),
             cmdline => target_config.cmdline.as_deref().unwrap_or(""),
             target_of => Some(mac_str),
@@ -293,7 +369,10 @@ async fn poll_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     AxumPath(mac): AxumPath<String>,
 ) -> impl IntoResponse {
-    let host_hdr = host_header(&headers);
+    let server_host = {
+        let config_guard = state.config.read();
+        advertised_host_port(&config_guard.server, &headers)
+    };
 
     let mac_str = bootycall_core::normalize_mac(&mac);
     // SEC-5: reject `%0a`-injected or otherwise malformed MACs before they
@@ -321,7 +400,7 @@ async fn poll_handler(
             &config_guard,
             &state.state_store,
             &mac_str,
-            host_hdr,
+            &server_host,
         )
     };
 
@@ -391,7 +470,7 @@ async fn poll_handler(
             // configuration is assigned).
             let retry_script = format!(
                 "#!ipxe\nprompt --key 0x02 --timeout 4000 BootyCall: Press Ctrl-B for manual override... \\\n  && chain --autofree http://{}/ipxemenu \\\n  || chain --autofree http://{}/poll/{}\n",
-                host_hdr, host_hdr, mac_str
+                server_host, server_host, mac_str
             );
             ([(header::CONTENT_TYPE, "text/plain")], retry_script).into_response()
         }
@@ -400,11 +479,12 @@ async fn poll_handler(
 
 // /ipxemenu endpoint fallback for manual choice
 async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> impl IntoResponse {
-    let host_hdr = host_header(&headers);
-
-    let hosts_list = {
+    let (server_host, hosts_list) = {
         let config_guard = state.config.read();
-        config_guard.hosts.clone()
+        (
+            advertised_host_port(&config_guard.server, &headers),
+            config_guard.hosts.clone(),
+        )
     };
 
     let menu_template = match state.jinja_env.get_template("ipxemenu") {
@@ -419,7 +499,7 @@ async fn menu_handler(State(state): State<ServerState>, headers: HeaderMap) -> i
     };
 
     let rendered = match menu_template.render(context!(
-        server_ip_port => host_hdr,
+        server_ip_port => server_host,
         hosts => hosts_list
     )) {
         Ok(res) => res,
@@ -467,7 +547,10 @@ async fn wallpaper_handler(
     headers: HeaderMap,
     Query(query): Query<WallpaperQuery>,
 ) -> impl IntoResponse {
-    let host_hdr = host_header(&headers);
+    let server_host = {
+        let config_guard = state.config.read();
+        advertised_host_port(&config_guard.server, &headers)
+    };
 
     // Determine target width & height
     let mut target_width = query.width;
@@ -523,7 +606,7 @@ async fn wallpaper_handler(
             let h = target_height.unwrap_or(768);
             format!(
                 "#!ipxe\nconsole --x {} --y {} --picture http://{}/static/{} --depth 32 --keep || exit\n",
-                w, h, host_hdr, path
+                w, h, server_host, path
             )
         }
         None => {
@@ -785,7 +868,6 @@ mod tests {
     }
 
     fn test_config(hosts: Vec<HostConfig>) -> Config {
-        use bootycall_core::config::ServerConfig;
         Config {
             server: ServerConfig {
                 http_bind: "0.0.0.0:8080".to_string(),
@@ -801,9 +883,100 @@ mod tests {
                 oled_brightness: 255,
                 api_token: None,
                 max_artifact_bytes: None,
+                advertised_host: None,
+                allowed_hosts: Vec::new(),
             },
             hosts,
         }
+    }
+
+    fn headers_with_host(host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, host.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn host_without_port_strips_only_port_suffixes() {
+        assert_eq!(host_without_port("127.0.0.1:26080"), "127.0.0.1");
+        assert_eq!(
+            host_without_port("boot.example.internal"),
+            "boot.example.internal"
+        );
+        assert_eq!(
+            host_without_port("boot.example.internal:8080"),
+            "boot.example.internal"
+        );
+        // Bracketed IPv6 with and without a port.
+        assert_eq!(host_without_port("[::1]:8080"), "::1");
+        assert_eq!(host_without_port("[fd00::2]"), "fd00::2");
+        // Unbracketed IPv6 has no unambiguous port separator — untouched.
+        assert_eq!(host_without_port("::1"), "::1");
+        // Non-numeric or empty "port" is not a port.
+        assert_eq!(host_without_port("host:abc"), "host:abc");
+        assert_eq!(host_without_port("host:"), "host:");
+    }
+
+    #[test]
+    fn advertised_host_wins_over_any_host_header() {
+        let mut config = test_config(vec![]);
+        config.server.advertised_host = Some("boot.internal:8080".to_string());
+        config.server.allowed_hosts = vec!["other.example".to_string()];
+
+        let resolved =
+            advertised_host_port(&config.server, &headers_with_host("attacker.example:9999"));
+        assert_eq!(resolved, "boot.internal:8080");
+    }
+
+    #[test]
+    fn allowlisted_host_header_is_reflected_with_its_port() {
+        let mut config = test_config(vec![]);
+        config.server.allowed_hosts = vec!["192.168.1.10".to_string()];
+
+        let resolved =
+            advertised_host_port(&config.server, &headers_with_host("192.168.1.10:8080"));
+        assert_eq!(resolved, "192.168.1.10:8080");
+
+        // Hostname comparison is case-insensitive (DNS names are).
+        config.server.allowed_hosts = vec!["Boot.Internal".to_string()];
+        let resolved =
+            advertised_host_port(&config.server, &headers_with_host("boot.internal:8080"));
+        assert_eq!(resolved, "boot.internal:8080");
+    }
+
+    #[test]
+    fn spoofed_host_header_is_replaced_by_first_allowed_host() {
+        let mut config = test_config(vec![]);
+        config.server.allowed_hosts = vec!["192.168.1.10".to_string(), "boot.internal".to_string()];
+
+        let resolved =
+            advertised_host_port(&config.server, &headers_with_host("attacker.example:8080"));
+        assert_eq!(resolved, "192.168.1.10:8080");
+        assert!(!resolved.contains("attacker.example"));
+
+        // A missing Host header takes the same trusted fallback.
+        let resolved = advertised_host_port(&config.server, &HeaderMap::new());
+        assert_eq!(resolved, "192.168.1.10:8080");
+    }
+
+    #[test]
+    fn ipv6_allowed_host_fallback_is_bracketed() {
+        let mut config = test_config(vec![]);
+        config.server.allowed_hosts = vec!["fd00::2".to_string()];
+
+        let resolved = advertised_host_port(&config.server, &headers_with_host("attacker.example"));
+        assert_eq!(resolved, "[fd00::2]:8080");
+    }
+
+    #[test]
+    fn legacy_reflection_only_without_advertised_or_allowlist() {
+        let config = test_config(vec![]);
+        let resolved =
+            advertised_host_port(&config.server, &headers_with_host("anything.example:1234"));
+        assert_eq!(resolved, "anything.example:1234");
+
+        let resolved = advertised_host_port(&config.server, &HeaderMap::new());
+        assert_eq!(resolved, "localhost:8080");
     }
 
     fn test_host(mac: &str, name: &str) -> HostConfig {

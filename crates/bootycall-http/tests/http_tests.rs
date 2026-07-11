@@ -76,6 +76,8 @@ async fn test_http_server_endpoints() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let host = HostConfig {
@@ -244,6 +246,8 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let host = HostConfig {
@@ -693,6 +697,8 @@ async fn test_static_served_from_configured_dir() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -757,6 +763,112 @@ async fn test_health_endpoint_reflects_cache_readiness() {
         "present artifacts must be healthy, got: {status}"
     );
     assert!(String::from_utf8_lossy(&body).contains("healthy"));
+}
+
+async fn http_get_with_host(port: u16, path: &str, host_header: &str) -> (String, String) {
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    let (status, _, body) = parse_http_response(&response);
+    (status, String::from_utf8_lossy(&body).to_string())
+}
+
+#[tokio::test]
+async fn test_spoofed_host_header_not_reflected_in_boot_urls() {
+    // Issue 069: a client-supplied Host header must not control the
+    // kernel/initrd/chain URLs in generated boot scripts — behind a
+    // path-keyed caching proxy that would let an attacker poison the boot
+    // script other PXE clients receive.
+    let port: u16 = 26110;
+    let (config, _state_store) = spawn_test_server(port).await;
+    {
+        let mut guard = config.write();
+        guard.server.allowed_hosts = vec!["127.0.0.1".to_string()];
+    }
+
+    // An allowlisted Host (port stripped before validation) is still honoured.
+    {
+        let (status, body) = http_get_with_host(
+            port,
+            "/poll/aa-bb-cc-dd-ee-ff",
+            &format!("127.0.0.1:{port}"),
+        )
+        .await;
+        assert!(status.contains("200 OK"), "got: {status}");
+        assert!(
+            body.contains(&format!(
+                "kernel http://127.0.0.1:{port}/cache/aa:bb:cc:dd:ee:ff/kernel"
+            )),
+            "allowlisted Host must be reflected, got: {body}"
+        );
+    }
+
+    // A spoofed Host must be replaced by the first allowed host + http_bind
+    // port and must not appear anywhere in the rendered script.
+    {
+        let (status, body) =
+            http_get_with_host(port, "/poll/aa-bb-cc-dd-ee-ff", "attacker.example:8080").await;
+        assert!(status.contains("200 OK"), "got: {status}");
+        assert!(
+            !body.contains("attacker.example"),
+            "spoofed Host must not be reflected into boot URLs, got: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "kernel http://127.0.0.1:{port}/cache/aa:bb:cc:dd:ee:ff/kernel"
+            )),
+            "kernel URL must use the trusted fallback host, got: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "initrd http://127.0.0.1:{port}/cache/aa:bb:cc:dd:ee:ff/initrd"
+            )),
+            "initrd URL must use the trusted fallback host, got: {body}"
+        );
+    }
+
+    // /start builds its chain URL the same way.
+    {
+        let (status, body) = http_get_with_host(port, "/start", "attacker.example:8080").await;
+        assert!(status.contains("200 OK"), "got: {status}");
+        assert!(!body.contains("attacker.example"));
+        assert!(body.contains(&format!("http://127.0.0.1:{port}/poll/")));
+    }
+
+    // advertised_host is authoritative: it overrides both the Host header
+    // and the allowlist reflection.
+    let advertised = "boot.internal:9090";
+    {
+        let mut guard = config.write();
+        guard.server.advertised_host = Some(advertised.to_string());
+    }
+    {
+        let (status, body) =
+            http_get_with_host(port, "/poll/aa-bb-cc-dd-ee-ff", "attacker.example:8080").await;
+        assert!(status.contains("200 OK"), "got: {status}");
+        assert!(!body.contains("attacker.example"));
+        assert!(
+            body.contains(&format!(
+                "kernel http://{advertised}/cache/aa:bb:cc:dd:ee:ff/kernel"
+            )),
+            "kernel URL must use advertised_host, got: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "initrd http://{advertised}/cache/aa:bb:cc:dd:ee:ff/initrd"
+            )),
+            "initrd URL must use advertised_host, got: {body}"
+        );
+    }
 }
 
 #[tokio::test]

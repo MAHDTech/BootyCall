@@ -67,6 +67,8 @@ async fn test_tftp_server_negotiation_and_transfer() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let host = HostConfig {
@@ -207,6 +209,8 @@ async fn test_tftp_file_not_found() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let config = Config {
@@ -276,6 +280,8 @@ async fn assert_tftp_traversal_rejected(bind_port: u16, client_port: u16, reques
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let config = Config {
@@ -371,6 +377,8 @@ async fn test_tftp_transfer_non_multiple_blksize_intact() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -478,6 +486,8 @@ async fn test_tftp_timeout_marks_host_failed() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -568,6 +578,8 @@ fn base_server_config(bind: &str, tftp_root: &std::path::Path) -> ServerConfig {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     }
 }
 

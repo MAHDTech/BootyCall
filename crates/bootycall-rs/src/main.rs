@@ -65,9 +65,15 @@ async fn main() -> Result<(), anyhow::Error> {
     // 1. Initialise logging
     bootycall_log::init();
 
-    // Register panic hook to turn LED Solid White on panic
+    // Register panic hook to turn LED Solid White on panic. The supervised
+    // OLED render thread is excluded from the LED latch: its panics are
+    // caught, logged, and restarted by the OLED manager, so they must not
+    // signal a whole-box "service stopped" white LED.
     std::panic::set_hook(Box::new(|info| {
         bootycall_log::error!("Panic occurred: {:?}", info);
+        if std::thread::current().name() == Some(bootycall_oled::OLED_THREAD_NAME) {
+            return;
+        }
         bootycall_led::activate_white_led();
     }));
 

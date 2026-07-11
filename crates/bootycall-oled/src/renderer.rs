@@ -1,5 +1,6 @@
 use crate::framebuffer::{Framebuffer, HEIGHT, WIDTH};
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
+use bootycall_log::error;
 use std::sync::OnceLock;
 
 /// Font point size for regular (Lato) labels drawn on the OLED. Shared
@@ -19,18 +20,37 @@ pub struct FontSet {
     pub bold: FontRef<'static>,
 }
 
-pub static FONTS: OnceLock<FontSet> = OnceLock::new();
+/// Lazily-parsed embedded fonts. `None` records that at least one embedded
+/// TTF failed to parse — a permanent condition for a compiled-in asset, so it
+/// is decided once and text rendering degrades instead of panicking.
+pub static FONTS: OnceLock<Option<FontSet>> = OnceLock::new();
 
-pub fn get_fonts() -> &'static FontSet {
-    FONTS.get_or_init(|| {
-        let regular_bytes = include_bytes!("../assets/Lato-Regular.ttf");
-        let bold_bytes = include_bytes!("../assets/Rajdhani-Bold.ttf");
-        FontSet {
-            regular: FontRef::try_from_slice(regular_bytes)
-                .expect("Failed to load Lato-Regular.ttf"),
-            bold: FontRef::try_from_slice(bold_bytes).expect("Failed to load Rajdhani-Bold.ttf"),
-        }
-    })
+/// Parse the embedded TTFs on first use. Returns `None` when either font
+/// fails to parse (logged once, at ERROR); callers degrade to a no-text mode
+/// — draws become no-ops and measurements return 0 — rather than panic, so a
+/// bad font asset can never kill the OLED render thread (issue 073).
+pub fn get_fonts() -> Option<&'static FontSet> {
+    FONTS
+        .get_or_init(|| {
+            let regular_bytes = include_bytes!("../assets/Lato-Regular.ttf");
+            let bold_bytes = include_bytes!("../assets/Rajdhani-Bold.ttf");
+            let regular = FontRef::try_from_slice(regular_bytes);
+            let bold = FontRef::try_from_slice(bold_bytes);
+            match (regular, bold) {
+                (Ok(regular), Ok(bold)) => Some(FontSet { regular, bold }),
+                (regular, bold) => {
+                    if regular.is_err() {
+                        error!("Failed to parse embedded Lato-Regular.ttf");
+                    }
+                    if bold.is_err() {
+                        error!("Failed to parse embedded Rajdhani-Bold.ttf");
+                    }
+                    error!("OLED text rendering disabled (degraded no-text mode)");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 pub struct Renderer<'a> {
@@ -115,10 +135,15 @@ impl<'a> Renderer<'a> {
         use_large_font: bool,
         scale_px: f32,
     ) {
+        // Degraded no-text mode: the embedded font failed to parse (logged
+        // once in `get_fonts`); skip text so the render thread keeps running.
+        let Some(fonts) = get_fonts() else {
+            return;
+        };
         let font = if use_large_font {
-            &get_fonts().bold
+            &fonts.bold
         } else {
-            &get_fonts().regular
+            &fonts.regular
         };
         let scale = PxScale::from(scale_px);
         let scaled = font.as_scaled(scale);
@@ -163,10 +188,15 @@ impl<'a> Renderer<'a> {
     /// so `oled-test` can align text drawn via
     /// [`draw_text_scaled`](Self::draw_text_scaled).
     pub fn measure_text_scaled(text: &str, use_large_font: bool, scale_px: f32) -> usize {
+        // Degraded no-text mode (see `get_fonts`): nothing will be drawn, so
+        // measure zero rather than panic.
+        let Some(fonts) = get_fonts() else {
+            return 0;
+        };
         let font = if use_large_font {
-            &get_fonts().bold
+            &fonts.bold
         } else {
-            &get_fonts().regular
+            &fonts.regular
         };
         let scaled = font.as_scaled(PxScale::from(scale_px));
         let width: f32 = text
@@ -247,6 +277,13 @@ mod tests {
         for i in 0..=5 {
             assert_eq!(fb.buffer[i * WIDTH + i], 255, "diagonal ({i},{i}) missing");
         }
+    }
+
+    #[test]
+    fn embedded_fonts_parse_successfully() {
+        // The degraded no-text mode must stay a safety net, not the shipped
+        // behaviour: the bundled TTFs are expected to parse.
+        assert!(get_fonts().is_some(), "embedded TTF assets failed to parse");
     }
 
     #[test]

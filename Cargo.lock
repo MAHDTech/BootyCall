@@ -270,6 +270,7 @@ dependencies = [
  "libc",
  "sysinfo",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

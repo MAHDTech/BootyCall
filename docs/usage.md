@@ -136,10 +136,14 @@ nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.y
 ### Health / readiness probe
 
 `GET /api/health` is an unauthenticated readiness endpoint. It returns `200`
-with `{"status":"healthy", ...}` when every configured host has non-empty cached
-`kernel` + `initrd` artifacts ready to serve, and `503` with
-`{"status":"degraded","hosts_not_ready":[...]}` otherwise. Poll it from a load
-balancer or systemd watchdog to catch silent degradation:
+with `{"status":"healthy","hosts_total":N,"hosts_not_ready_count":0}` when
+every configured host has non-empty cached `kernel` + `initrd` artifacts ready
+to serve, and `503` with
+`{"status":"degraded","hosts_total":N,"hosts_not_ready_count":M}` otherwise.
+The list of not-ready host names (`hosts_not_ready`) is fleet inventory, so it
+is only included when the request carries a valid `X-API-Token` header — or
+when no `api_token` is configured at all, matching the `/api/status` posture.
+Poll it from a load balancer or systemd watchdog to catch silent degradation:
 
 ```bash
 curl -fsS http://localhost:8080/api/health

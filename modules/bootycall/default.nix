@@ -480,9 +480,12 @@ in
         Restart = "always";
         # Readiness probe: `GET http://<http_bind>/api/health` returns 200 when
         # every configured host has cached boot artifacts ready to serve and 503
-        # (JSON `{status: "degraded", hosts_not_ready: [...]}`) otherwise. An
-        # external monitor — or a future sd_notify-based `WatchdogSec` — can poll
-        # it to catch silent degradation.
+        # (JSON `{status: "degraded", hosts_total: N, hosts_not_ready_count: M}`)
+        # otherwise. The not-ready host-name list (`hosts_not_ready`) is fleet
+        # inventory, so it only appears when the request carries a valid
+        # `X-API-Token` header (or when no apiToken is configured). An external
+        # monitor — or a future sd_notify-based `WatchdogSec` — can poll it to
+        # catch silent degradation.
         DynamicUser = true;
         # Derived from dataDir (see the let binding and the dataDir assertion)
         # so a custom dataDir gets created with the right ownership instead of

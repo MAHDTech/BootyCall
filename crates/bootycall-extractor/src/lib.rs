@@ -10,17 +10,56 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// Copy `reader` into a freshly created file at `out_path`, refusing to write
-/// more than `max_bytes` when a cap is configured. Returns
+/// Copy `reader` into the artifact at `out_path`, refusing to write more than
+/// `max_bytes` when a cap is configured. Returns
 /// [`ExtractorError::ArtifactTooLarge`] once the source exceeds the cap — this
 /// is what keeps a hostile or genuinely huge initrd from filling the
 /// appliance's small eMMC (issue 006). `None` means unbounded.
+///
+/// The bytes are staged into a `.tmp` sibling (e.g. `kernel.tmp`) and then
+/// atomically renamed over `out_path` (same directory, so same filesystem).
+/// Concurrent readers — `serve_cache_file` streaming to a booting client, or
+/// the `host_cache_ready` health probe — therefore only ever observe either
+/// the previous complete artifact or the new complete one, never a truncated
+/// in-progress write (issue 085). On failure the staging file is removed and
+/// `out_path` is left untouched.
 pub(crate) fn copy_capped<R: Read>(
     reader: &mut R,
     out_path: &Path,
     max_bytes: Option<u64>,
 ) -> Result<(), ExtractorError> {
-    let mut out = fs::File::create(out_path)?;
+    let tmp_path = tmp_artifact_path(out_path);
+    // `File::create` inside `stage_capped` truncates, so a stale `.tmp` left
+    // behind by a crashed earlier extraction is simply overwritten here.
+    if let Err(e) = stage_capped(reader, &tmp_path, max_bytes) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp_path, out_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Staging path for an artifact write: `cache/<mac>/kernel` ->
+/// `cache/<mac>/kernel.tmp`. Always a sibling in the same directory so the
+/// final `fs::rename` never crosses a filesystem boundary.
+pub(crate) fn tmp_artifact_path(out_path: &Path) -> PathBuf {
+    let mut tmp = out_path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+
+/// Stream `reader` into a freshly created file at `tmp_path`, enforcing the
+/// optional `max_bytes` cap, then flush it to disk. Callers are responsible
+/// for cleaning up `tmp_path` on failure.
+fn stage_capped<R: Read>(
+    reader: &mut R,
+    tmp_path: &Path,
+    max_bytes: Option<u64>,
+) -> Result<(), ExtractorError> {
+    let mut out = fs::File::create(tmp_path)?;
     match max_bytes {
         None => {
             std::io::copy(reader, &mut out)?;
@@ -41,6 +80,11 @@ pub(crate) fn copy_capped<R: Read>(
             }
         }
     }
+    // Flush the staged bytes to disk before the rename publishes them: a
+    // power loss shortly after the rename must not surface a truncated
+    // artifact at the final path — that is exactly what the staging dance
+    // exists to prevent.
+    out.sync_all()?;
     Ok(())
 }
 
@@ -166,8 +210,6 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
     Ok(summary)
 }
 
-/// Synchronises the cache directory for a single host. `max_artifact_bytes`
-/// caps the size of each extracted kernel/initrd (`None` = unbounded).
 /// Read-only readiness check for a host's cache: are non-empty `kernel` and
 /// `initrd` artifacts present under `cache_dir/<mac>/`?
 ///
@@ -185,6 +227,8 @@ pub fn host_cache_ready(mac: &str, cache_dir: &Path) -> bool {
     nonempty("kernel") && nonempty("initrd")
 }
 
+/// Synchronises the cache directory for a single host. `max_artifact_bytes`
+/// caps the size of each extracted kernel/initrd (`None` = unbounded).
 pub fn sync_host_cache(
     host: &HostConfig,
     cache_dir: &Path,
@@ -237,6 +281,17 @@ pub fn sync_host_cache(
     // one — it's ignored by the new reader and would confuse manual audits.
     if legacy_metadata_path.exists() {
         let _ = fs::remove_file(&legacy_metadata_path);
+    }
+
+    // Sweep `.tmp` staging files left behind by a crash mid-extraction. A
+    // fresh extraction would overwrite them anyway, but a cache hit below
+    // would otherwise leave the crash debris lingering forever. `NotFound`
+    // (the common case) is deliberately ignored.
+    for tmp in [
+        tmp_artifact_path(&kernel_path),
+        tmp_artifact_path(&initrd_path),
+    ] {
+        let _ = fs::remove_file(&tmp);
     }
 
     if cache_valid {
@@ -329,10 +384,17 @@ pub fn sync_host_cache(
                 image = %host.image_path.display(),
                 error = %e,
             );
-            // Clean up potentially incomplete cache files
+            // Clean up. `copy_capped` never leaves a torn final artifact,
+            // but a mixed outcome (new kernel already renamed into place,
+            // initrd failed) would leave a mismatched pair — remove the
+            // final artifacts and metadata so the cache reads as plainly
+            // absent rather than falsely ready. Also drop any staging file
+            // stranded by a failed rename.
             let _ = fs::remove_file(&kernel_path);
             let _ = fs::remove_file(&initrd_path);
             let _ = fs::remove_file(&metadata_path);
+            let _ = fs::remove_file(tmp_artifact_path(&kernel_path));
+            let _ = fs::remove_file(tmp_artifact_path(&initrd_path));
             Err(e)
         }
     }
@@ -340,7 +402,118 @@ pub fn sync_host_cache(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_initrd_name, is_kernel_name};
+    use super::{copy_capped, is_initrd_name, is_kernel_name, tmp_artifact_path};
+    use crate::error::ExtractorError;
+    use std::fs;
+    use std::io::Read as _;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn tmp_artifact_path_appends_tmp_suffix() {
+        assert_eq!(
+            tmp_artifact_path(Path::new("/cache/aa:bb:cc:dd:ee:ff/kernel")),
+            PathBuf::from("/cache/aa:bb:cc:dd:ee:ff/kernel.tmp")
+        );
+        assert_eq!(
+            tmp_artifact_path(Path::new("initrd")),
+            PathBuf::from("initrd.tmp")
+        );
+    }
+
+    #[test]
+    fn copy_capped_publishes_complete_artifact_and_removes_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("kernel");
+        fs::write(&out, b"old_complete_artifact").unwrap();
+
+        let mut src: &[u8] = b"new_artifact_bytes";
+        copy_capped(&mut src, &out, None).unwrap();
+
+        assert_eq!(fs::read(&out).unwrap(), b"new_artifact_bytes");
+        assert!(
+            !tmp_artifact_path(&out).exists(),
+            "staging file must not survive a successful copy"
+        );
+
+        // Same behaviour with a (generous) cap configured.
+        let mut src: &[u8] = b"capped_artifact_bytes";
+        copy_capped(&mut src, &out, Some(1024)).unwrap();
+        assert_eq!(fs::read(&out).unwrap(), b"capped_artifact_bytes");
+        assert!(!tmp_artifact_path(&out).exists());
+    }
+
+    #[test]
+    fn copy_capped_over_cap_leaves_existing_artifact_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("initrd");
+        fs::write(&out, b"old_complete_artifact").unwrap();
+
+        let mut src = std::io::repeat(0u8).take(20);
+        let err = copy_capped(&mut src, &out, Some(10)).unwrap_err();
+        assert!(matches!(
+            err,
+            ExtractorError::ArtifactTooLarge { limit: 10 }
+        ));
+
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            b"old_complete_artifact",
+            "a failed re-extraction must not touch the live artifact"
+        );
+        assert!(
+            !tmp_artifact_path(&out).exists(),
+            "failed staging file must be cleaned up"
+        );
+    }
+
+    #[test]
+    fn copy_capped_mid_copy_io_error_leaves_existing_artifact_untouched() {
+        /// Yields a few bytes, then fails — simulating a source image that
+        /// dies partway through extraction (the crash-mid-copy scenario).
+        struct FailAfterSome {
+            sent: bool,
+        }
+        impl std::io::Read for FailAfterSome {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.sent {
+                    return Err(std::io::Error::other("simulated mid-copy failure"));
+                }
+                self.sent = true;
+                let n = buf.len().min(7);
+                buf[..n].copy_from_slice(&b"partial"[..n]);
+                Ok(n)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("kernel");
+        fs::write(&out, b"old_complete_artifact").unwrap();
+
+        let err = copy_capped(&mut FailAfterSome { sent: false }, &out, Some(1024)).unwrap_err();
+        assert!(matches!(err, ExtractorError::Io(_)));
+
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            b"old_complete_artifact",
+            "the partial staging write must never reach the final path"
+        );
+        assert!(!tmp_artifact_path(&out).exists());
+    }
+
+    #[test]
+    fn copy_capped_overwrites_stale_tmp_from_previous_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("kernel");
+        // A crash between staging and rename leaves a `.tmp` behind; the next
+        // extraction must overwrite it, not append or fail.
+        fs::write(tmp_artifact_path(&out), b"stale crash leftover").unwrap();
+
+        let mut src: &[u8] = b"fresh";
+        copy_capped(&mut src, &out, None).unwrap();
+
+        assert_eq!(fs::read(&out).unwrap(), b"fresh");
+        assert!(!tmp_artifact_path(&out).exists());
+    }
 
     #[test]
     fn kernel_name_heuristic() {

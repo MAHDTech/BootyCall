@@ -57,7 +57,7 @@ runs:
       name: Cache Nix Store
       uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+        primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv/default.nix', 'flake.nix', 'flake.lock') }}
         restore-prefixes-first-match: ${{ runner.os }}-${{ runner.arch }}-nix-
         gc-max-store-size-linux: 5G
         purge: true

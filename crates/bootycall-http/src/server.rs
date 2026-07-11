@@ -880,6 +880,10 @@ pub async fn run_http_server(
         .route("/static/{*path}", get(serve_static_file))
         .route("/cache/{*path}", get(serve_cache_file))
         .route("/start", get(start_handler))
+        // Compatibility alias: firmware flashed before the embedded
+        // bootstrap targeted /start chainloads /ipxe/config.ipxe, so keep
+        // that path resolving to the same entry script (issue 081).
+        .route("/ipxe/config.ipxe", get(start_handler))
         .route("/poll/{mac}", get(poll_handler))
         .route("/ipxemenu", get(menu_handler))
         .route("/dynamic/wallpaper.ipxe", get(wallpaper_handler))

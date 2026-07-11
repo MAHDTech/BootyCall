@@ -46,10 +46,12 @@ let
 
       echo "Booting from BootyCall server: ${server}"
 
-      # Try loading config via TFTP, then standard HTTP, then custom HTTP port
+      # Try an optional operator-seeded TFTP override first, then the
+      # BootyCall HTTP entry point (GET /start) on the standard port,
+      # then on the custom HTTP port
       chain --autofree tftp://${server}/ipxe/config.ipxe || \
-      chain --autofree http://${server}/ipxe/config.ipxe || \
-      chain --autofree http://${server}:${portStr}/ipxe/config.ipxe || \
+      chain --autofree http://${server}/start || \
+      chain --autofree http://${server}:${portStr}/start || \
       goto fail
 
       :fail

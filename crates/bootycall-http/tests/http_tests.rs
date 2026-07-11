@@ -955,6 +955,36 @@ async fn test_spoofed_host_header_not_reflected_in_boot_urls() {
 }
 
 #[tokio::test]
+async fn test_firmware_boot_entry_paths_serve_start_script() {
+    // Issue 081: the embedded iPXE bootstrap (packages/ipxe/default.nix)
+    // chainloads http://<server>[:port]/start on first boot, and firmware
+    // flashed before that fix chainloads http://<server>/ipxe/config.ipxe.
+    // Both first-request paths must resolve to a real endpoint (no 404)
+    // that serves the /start entry script.
+    let port: u16 = 26112;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    for path in ["/start", "/ipxe/config.ipxe"] {
+        let (status, body) = http_get(port, path).await;
+        assert!(
+            status.contains("200 OK"),
+            "firmware boot entry {path} must serve, got: {status}"
+        );
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(
+            body_str.starts_with("#!ipxe"),
+            "{path} must serve an iPXE script, got: {body_str}"
+        );
+        assert!(
+            body_str.contains(&format!(
+                "chain --autofree --replace http://127.0.0.1:{port}/poll/${{mac:hexhyp}}"
+            )),
+            "{path} must chain to the poll endpoint, got: {body_str}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_read_apis_require_token_when_configured() {
     // With api_token set, /api/status and /api/logs must 401 without the header
     // and 200 with it (issue 037). The unauthenticated-open case is covered by

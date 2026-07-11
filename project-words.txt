@@ -34,6 +34,7 @@ cdrkit
 cdrtools
 chaddr
 chainload
+chainloads
 ciaddr
 clippy
 cmdline

@@ -40,8 +40,10 @@ The following options are enabled by default in our automated builds (defined in
 
 The embedded bootstrap script resolves the BootyCall server configuration dynamically:
 
-- **Dynamic DHCP Resolution**: If no hardcoded IP is provided, it tries to chainload using the DHCP-provided `next-server` variable over TFTP, standard HTTP (port 80), and then HTTP on port `8080` (BootyCall HTTP default).
+- **Dynamic DHCP Resolution**: If no hardcoded IP is provided, it resolves the server from the DHCP-provided `next-server` variable.
 - **Static Hardcoding**: Allows defining a custom server IP/hostname and custom HTTP port at build-time.
+- **Boot Entry Path**: The firmware first tries an **optional** operator-seeded TFTP override (`ipxe/config.ipxe` in the TFTP root — nothing ships this file by default, so it normally fails fast), then chainloads the BootyCall HTTP entry point `GET /start` on the standard HTTP port (80), and finally on the custom HTTP port (`8080`, the BootyCall default). This matches the boot flow described in [spec.md](./spec.md) and [architecture.md](./architecture.md).
+- **Legacy Compatibility**: Firmware flashed before the bootstrap targeted `/start` chainloads `http://<server>/ipxe/config.ipxe`; `bootycall-http` serves that path as an alias for the same `/start` entry script, so field units keep booting without a re-flash.
 
 ```ipxe
 #!ipxe
@@ -52,10 +54,12 @@ dhcp || goto fail
 
 echo "Booting from BootyCall server: ${server}"
 
-# Try loading config via TFTP, then standard HTTP, then custom HTTP port
+# Try an optional operator-seeded TFTP override first, then the
+# BootyCall HTTP entry point (GET /start) on the standard port,
+# then on the custom HTTP port
 chain --autofree tftp://${server}/ipxe/config.ipxe || \
-chain --autofree http://${server}/ipxe/config.ipxe || \
-chain --autofree http://${server}:${portStr}/ipxe/config.ipxe || \
+chain --autofree http://${server}/start || \
+chain --autofree http://${server}:${portStr}/start || \
 goto fail
 
 :fail

@@ -32,6 +32,24 @@ let
     in
     if port == null then 0 else port;
 
+  # The unit runs with DynamicUser and ProtectSystem=strict, so systemd's
+  # StateDirectory is the only mechanism that creates the data directory
+  # with ownership the dynamic user can write to (the preStart mkdir runs
+  # inside the read-only sandbox). StateDirectory can only manage paths
+  # below /var/lib, so derive the (possibly nested) directory name from
+  # dataDir and pin dataDir under /var/lib via the assertion below.
+  stateDirectoryName = lib.removePrefix "/var/lib/" cfg.dataDir;
+  dataDirValid =
+    lib.hasPrefix "/var/lib/" cfg.dataDir
+    && !(lib.any (
+      component:
+      lib.elem component [
+        ""
+        "."
+        ".."
+      ]
+    ) (lib.splitString "/" stateDirectoryName));
+
   # Bind options that must carry a ":port", checked by assertions below.
   portBinds = [
     {
@@ -129,7 +147,13 @@ in
     dataDir = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/bootycall";
-      description = "Directory for BootyCall state and assets.";
+      description = ''
+        Directory for BootyCall state and assets. Must be an absolute path
+        below `/var/lib` (e.g. `/var/lib/bootycall`): the service runs with
+        `DynamicUser` and `ProtectSystem=strict`, so the directory is
+        created via systemd's `StateDirectory`, which only manages paths
+        under `/var/lib`.
+      '';
     };
 
     configFile = lib.mkOption {
@@ -294,6 +318,22 @@ in
         '';
       }) portBinds)
       ++ [
+        # StateDirectory (derived from dataDir above) is what creates the data
+        # directory with ownership the DynamicUser can write to, and it only
+        # manages paths below /var/lib. Reject anything else at eval time —
+        # at runtime it would surface as an opaque unit start failure, because
+        # nothing inside the ProtectSystem=strict sandbox can create the
+        # directory.
+        {
+          assertion = dataDirValid;
+          message = ''
+            services.bootycall.dataDir: "${cfg.dataDir}" must be an absolute
+            path below /var/lib (e.g. "/var/lib/bootycall"), without trailing
+            slashes or "." / ".." components. The service runs with DynamicUser
+            and ProtectSystem=strict, so its data directory is created via
+            systemd's StateDirectory, which only manages paths under /var/lib.
+          '';
+        }
         # configFile fully replaces the generated config, so declaring hosts
         # alongside it silently drops them. Make the operator pick one source.
         {
@@ -359,7 +399,10 @@ in
         # external monitor — or a future sd_notify-based `WatchdogSec` — can poll
         # it to catch silent degradation.
         DynamicUser = true;
-        StateDirectory = "bootycall";
+        # Derived from dataDir (see the let binding and the dataDir assertion)
+        # so a custom dataDir gets created with the right ownership instead of
+        # silently keeping the default /var/lib/bootycall.
+        StateDirectory = stateDirectoryName;
         WorkingDirectory = cfg.dataDir;
         Environment = [
           "TFTP_ROOT=${cfg.server.tftpRoot}"

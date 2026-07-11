@@ -113,8 +113,9 @@ impl SystemMetrics {
     pub fn get_cpu_temp(&self) -> String {
         let mut max_temp = 0.0;
         for component in &self.components {
-            if component.temperature().unwrap_or(0.0) > max_temp {
-                max_temp = component.temperature().unwrap_or(0.0);
+            let temperature = component.temperature().unwrap_or(0.0);
+            if temperature > max_temp {
+                max_temp = temperature;
             }
         }
         if max_temp == 0.0 {

@@ -10,7 +10,7 @@ sysinfo = { workspace = true }
 bootycall-core = { path = "../bootycall-core" }
 bootycall-log = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
+thiserror = { workspace = true }
 libc = { workspace = true }
 ab_glyph = { workspace = true }
 gpiocdev = "0.8.0"

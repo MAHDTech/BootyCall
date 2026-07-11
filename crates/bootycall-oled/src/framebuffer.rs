@@ -137,11 +137,10 @@ impl Framebuffer {
     /// open fd. A failed write drops the fd so the next [`ensure_open`]
     /// re-opens it.
     pub fn write_packed(&mut self) -> std::io::Result<bool> {
-        if self.file.is_none() {
+        let Some(file) = self.file.as_mut() else {
             return Ok(false);
-        }
+        };
         let packed = pack_buffer(&self.buffer, &self.lut, self.rotation);
-        let file = self.file.as_mut().expect("fd present (checked above)");
         if let Err(e) = file
             .seek(SeekFrom::Start(0))
             .and_then(|_| file.write_all(&packed))

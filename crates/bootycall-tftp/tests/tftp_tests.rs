@@ -730,6 +730,129 @@ async fn test_tftp_server_busy_marks_known_host_failed() {
 }
 
 #[tokio::test]
+async fn test_tftp_server_ipv6_negotiation_and_transfer() {
+    // An IPv6 client against a `[::]`-bound listener must complete a full
+    // transfer. The per-transfer socket used to be hard-bound to IPv4
+    // `0.0.0.0:0`, so `connect(src_addr)` failed on the address-family
+    // mismatch and the client never even received the OACK — it just timed
+    // out. The transfer socket must instead bind `[::]:0` for IPv6 peers.
+    //
+    // Probe for IPv6 support first: some sandboxes/CI runners have no IPv6
+    // stack at all, in which case this test skips instead of failing.
+    if UdpSocket::bind("[::1]:0").await.is_err() {
+        eprintln!(
+            "skipping test_tftp_server_ipv6_negotiation_and_transfer: IPv6 unavailable in this environment"
+        );
+        return;
+    }
+
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    let file_content = b"This is the IPv6-served EFI payload!";
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), file_content).unwrap();
+
+    let config = Config {
+        server: base_server_config("[::]:25180", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Map ::1 -> a known MAC so the transfer exercises the SocketAddr::V6
+    // branch of the client-IP host lookup and the status transitions.
+    let mac = "00:aa:bb:cc:dd:60";
+    state_store.update_host_status(
+        mac,
+        HostStatus::Polling,
+        Some("ipv6-client".to_string()),
+        None,
+        Some("::1".to_string()),
+        Some("x86_64".to_string()),
+    );
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("[::]:25180", server_config_clone, server_store).await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // IPv6 client over loopback.
+    let client_socket = UdpSocket::bind("[::1]:25181").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+    client_socket.send_to(&rrq, "[::1]:25180").await.unwrap();
+
+    // Receive the OACK — before the fix this timed out because the IPv4
+    // transfer socket could not connect to the IPv6 peer.
+    let mut response_buf = [0u8; 1024];
+    let (len, server_tid_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("IPv6 client should receive an OACK from the transfer socket")
+    .unwrap();
+    assert!(
+        server_tid_addr.is_ipv6(),
+        "transfer socket must answer from an IPv6 address, got {server_tid_addr}"
+    );
+
+    let negotiated_options = parse_oack(&response_buf[..len]);
+    assert!(negotiated_options.contains(&("blksize".to_string(), "512".to_string())));
+    assert!(negotiated_options.contains(&("timeout".to_string(), "1".to_string())));
+    assert!(negotiated_options.contains(&("tsize".to_string(), file_content.len().to_string())));
+
+    // The V6 client IP must have mapped to the known host.
+    assert_eq!(
+        state_store.get_host(mac).map(|h| h.status),
+        Some(HostStatus::Booting),
+        "host mapped by its IPv6 client IP should be Booting"
+    );
+
+    // ACK block 0, receive DATA block 1, ACK it.
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid_addr)
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("IPv6 client should receive DATA block 1")
+    .unwrap();
+    let (block_num, data) = parse_data(&response_buf[..len]);
+    assert_eq!(block_num, 1);
+    assert_eq!(data, file_content.to_vec());
+    client_socket
+        .send_to(&make_ack_packet(1), server_tid_addr)
+        .await
+        .unwrap();
+
+    // The completion update is asynchronous; poll until the host completes.
+    let mut completed = false;
+    for _ in 0..40 {
+        if let Some(hs) = state_store.get_host(mac)
+            && hs.status == HostStatus::Completed
+        {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        completed,
+        "host should be Completed after the IPv6 transfer, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}
+
+#[tokio::test]
 async fn test_tftp_wrq_rejected_with_error() {
     // A WRQ (opcode 2) is not supported: the listener must reply with an
     // ERROR packet (RFC 1350 code 4, illegal operation) rather than ignore it.

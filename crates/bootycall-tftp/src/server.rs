@@ -590,6 +590,21 @@ const DEFAULT_TIMEOUT_SECS: u64 = 3;
 const MIN_TIMEOUT_SECS: u64 = 1;
 const MAX_TIMEOUT_SECS: u64 = 10;
 
+/// Wildcard bind address matching the peer's address family.
+///
+/// The per-transfer and reject sockets must share the client's address
+/// family: a socket bound to IPv4 `0.0.0.0:0` cannot `connect` to an IPv6
+/// peer (address-family mismatch), which previously broke IPv6 clients
+/// accepted by a `[::]`-bound listener — the RRQ never transferred and the
+/// client timed out.
+fn wildcard_bind_addr(peer: &SocketAddr) -> &'static str {
+    if peer.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    }
+}
+
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 ///
 /// Concurrent transfers are bounded by [`MAX_CONCURRENT_TRANSFERS`]. Use
@@ -705,7 +720,7 @@ pub async fn run_tftp_server_with_limit(
                     "Rejected TFTP path traversal request: {} from {}",
                     filename, src_addr
                 );
-                let transfer_socket = match UdpSocket::bind("0.0.0.0:0").await {
+                let transfer_socket = match UdpSocket::bind(wildcard_bind_addr(&src_addr)).await {
                     Ok(s) => s,
                     Err(e) => {
                         error!("Failed to bind transfer socket: {:?}", e);
@@ -736,7 +751,7 @@ pub async fn run_tftp_server_with_limit(
         // failure path must go through `mark_tftp_failed` — otherwise the
         // host is left in `Booting` forever and the dashboard/status API
         // misreport an aborted boot as still in progress.
-        let transfer_socket = match UdpSocket::bind("0.0.0.0:0").await {
+        let transfer_socket = match UdpSocket::bind(wildcard_bind_addr(&src_addr)).await {
             Ok(s) => s,
             Err(e) => {
                 error!(

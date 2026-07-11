@@ -519,10 +519,12 @@ async fn send_and_await_ack(
 
 /// Mark a host's boot as failed and emit a `tftp_transfer_failed` event.
 ///
-/// Called from every TFTP failure path (retry/deadline give-up, a client-sent
-/// ERROR packet, or a send/recv I/O error) so a stalled host moves out of
-/// `Booting` into `Failed` instead of being stuck there forever, and the
-/// status API / dashboard can surface the failed boot.
+/// Called from every TFTP failure path — retry/deadline give-up, a client-sent
+/// ERROR packet, a send/recv I/O error, and the transfer setup failures in the
+/// server loop (socket bind/connect errors and the "Server busy" semaphore
+/// rejection) — so a stalled or rejected host moves out of `Booting` into
+/// `Failed` instead of being stuck there forever, and the status API /
+/// dashboard can surface the failed boot.
 fn mark_tftp_failed(
     state_store: &StateStore,
     mac_addr: &Option<String>,
@@ -730,12 +732,22 @@ pub async fn run_tftp_server_with_limit(
             );
         }
 
+        // From here on the host is already marked `Booting`, so every setup
+        // failure path must go through `mark_tftp_failed` — otherwise the
+        // host is left in `Booting` forever and the dashboard/status API
+        // misreport an aborted boot as still in progress.
         let transfer_socket = match UdpSocket::bind("0.0.0.0:0").await {
             Ok(s) => s,
             Err(e) => {
                 error!(
                     "Failed to bind transfer socket for client {}: {:?}",
                     src_addr, e
+                );
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "failed to bind transfer socket",
                 );
                 continue;
             }
@@ -745,6 +757,12 @@ pub async fn run_tftp_server_with_limit(
             error!(
                 "Failed to connect transfer socket to client {}: {:?}",
                 src_addr, e
+            );
+            mark_tftp_failed(
+                &state_store,
+                &mac_addr,
+                &file_path,
+                "failed to connect transfer socket",
             );
             continue;
         }
@@ -762,6 +780,12 @@ pub async fn run_tftp_server_with_limit(
                 );
                 let err = make_error_packet(0, "Server busy");
                 let _ = transfer_socket.send(&err).await;
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "transfer rejected: server busy",
+                );
                 continue;
             }
         };

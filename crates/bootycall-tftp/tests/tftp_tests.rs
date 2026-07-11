@@ -631,6 +631,105 @@ async fn test_tftp_server_busy_at_injected_limit() {
 }
 
 #[tokio::test]
+async fn test_tftp_server_busy_marks_known_host_failed() {
+    // A known host whose RRQ is rejected with "Server busy" (semaphore
+    // exhausted) must end up `Failed`, not stuck in `Booting` (issue 071):
+    // the server-loop reject path never reaches `handle_tftp_transfer`, so it
+    // has to invoke `mark_tftp_failed` itself.
+    //
+    // Loopback caveat: hosts are looked up by client IP only, so both client
+    // sockets (127.0.0.1, differing ports) map to the same host entry —
+    // client B's reject updates the state that client A's request set to
+    // `Booting`. That is expected in this environment; the assertion is that
+    // the host's final state is `Failed`.
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), b"busy-failed-payload").unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25170", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Map 127.0.0.1 -> a known MAC so the RRQs associate a host.
+    let mac = "00:aa:bb:cc:dd:71";
+    state_store.update_host_status(
+        mac,
+        HostStatus::Polling,
+        Some("busy-client".to_string()),
+        None,
+        Some("127.0.0.1".to_string()),
+        Some("x86_64".to_string()),
+    );
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server_with_limit(
+            "127.0.0.1:25170",
+            server_config_clone,
+            server_store,
+            1,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+
+    // First client: start a transfer and hold the single permit by receiving
+    // the OACK but never sending an ACK. The host is now `Booting`.
+    let client_a = UdpSocket::bind("127.0.0.1:25171").await.unwrap();
+    client_a.send_to(&rrq, "127.0.0.1:25170").await.unwrap();
+    let mut buf = [0u8; 1024];
+    let (_n, _tid) = tokio::time::timeout(Duration::from_secs(2), client_a.recv_from(&mut buf))
+        .await
+        .expect("first client should receive an OACK")
+        .unwrap();
+    assert_eq!(
+        state_store.get_host(mac).map(|h| h.status),
+        Some(HostStatus::Booting),
+        "host should be Booting while the first transfer holds the permit"
+    );
+
+    // Second client (semaphore exhausted): its RRQ must be rejected with
+    // "Server busy" ...
+    let client_b = UdpSocket::bind("127.0.0.1:25172").await.unwrap();
+    client_b.send_to(&rrq, "127.0.0.1:25170").await.unwrap();
+    let (n, _from) = tokio::time::timeout(Duration::from_secs(2), client_b.recv_from(&mut buf))
+        .await
+        .expect("second client should receive a Server busy ERROR")
+        .unwrap();
+    let (opcode, code, msg) = parse_error_packet(&buf[..n]);
+    assert_eq!(opcode, 5, "expected a TFTP ERROR packet (opcode 5)");
+    assert_eq!(code, 0, "Server busy uses error code 0");
+    assert_eq!(msg, "Server busy");
+
+    // ... and the known host must end `Failed`, not linger in `Booting`.
+    let mut failed = false;
+    for _ in 0..40 {
+        if let Some(hs) = state_store.get_host(mac)
+            && hs.status == HostStatus::Failed
+        {
+            failed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        failed,
+        "host should be marked Failed after the Server busy reject, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}
+
+#[tokio::test]
 async fn test_tftp_wrq_rejected_with_error() {
     // A WRQ (opcode 2) is not supported: the listener must reply with an
     // ERROR packet (RFC 1350 code 4, illegal operation) rather than ignore it.

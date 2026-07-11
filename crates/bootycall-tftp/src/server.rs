@@ -57,8 +57,19 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
 
     let mut i = 2;
     while i + 1 < parts.len() {
-        let key = String::from_utf8(parts[i].clone()).ok()?.to_lowercase();
-        let val = String::from_utf8(parts[i + 1].clone()).ok()?;
+        // RFC 2347: options the server cannot parse are ignored, not fatal.
+        // A single non-UTF-8 key/value pair used to `?`-fail the whole RRQ,
+        // silently dropping an otherwise-valid request — skip the pair and
+        // keep negotiating the rest instead.
+        let (Ok(key), Ok(val)) = (
+            std::str::from_utf8(&parts[i]),
+            std::str::from_utf8(&parts[i + 1]),
+        ) else {
+            debug!("Ignoring non-UTF-8 TFTP option pair at index {}", i);
+            i += 2;
+            continue;
+        };
+        let key = key.to_lowercase();
         match key.as_str() {
             "blksize" => {
                 if let Ok(val_parsed) = val.parse::<usize>() {
@@ -668,6 +679,20 @@ pub async fn run_tftp_server_with_limit(
         let request = match parse_rrq(packet) {
             Some(req) => req,
             None => {
+                // Reaching here with >= 2 bytes means the opcode was OP_RRQ
+                // (WRQ/unknown opcodes were answered above) but the body is
+                // genuinely unparseable — a malformed RRQ. Answer with ERROR
+                // code 4 so the client fails fast instead of timing out.
+                // Anything shorter than an opcode is random non-TFTP garbage:
+                // stay silent rather than reply to arbitrary traffic.
+                if packet.len() >= 2 {
+                    warn!(
+                        "Malformed TFTP RRQ from {} ({} bytes), sending ERROR",
+                        src_addr, len
+                    );
+                    let err = make_error_packet(4, "Illegal TFTP operation (malformed RRQ)");
+                    let _ = socket.send_to(&err, src_addr).await;
+                }
                 continue;
             }
         };

@@ -180,3 +180,10 @@ Tunables
 getaddrinfo
 ioctls
 nscd
+BOOTREQUEST
+DHCPDISCOVER
+hlen
+htype
+siaddr
+sname
+yiaddr

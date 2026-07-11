@@ -23,6 +23,8 @@ async fn test_dhcp_server_redirection() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
 
     let host = HostConfig {
@@ -139,6 +141,8 @@ async fn test_dhcp_server_ignores_non_pxe_client() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -202,6 +206,8 @@ async fn test_dhcp_server_handles_arm64_arch() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -284,6 +290,8 @@ async fn test_dhcp_arch0_serves_bios_bootloader() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,
@@ -366,6 +374,8 @@ async fn test_dhcp_ignores_release_message() {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     };
     let config = Config {
         server: server_config,

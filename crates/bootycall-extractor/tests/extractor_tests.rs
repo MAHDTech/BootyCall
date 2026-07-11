@@ -326,6 +326,8 @@ fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
         oled_brightness: 255,
         api_token: None,
         max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
     }
 }
 

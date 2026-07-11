@@ -61,6 +61,22 @@ pub struct ServerConfig {
     /// every service (single binary) — see issue 006.
     #[serde(default)]
     pub max_artifact_bytes: Option<u64>,
+    /// Authoritative `host[:port]` advertised to PXE clients inside generated
+    /// iPXE boot scripts (the kernel/initrd/chain URLs). When set, generated
+    /// URLs always use this value and the client-supplied `Host:` header is
+    /// ignored — reflecting that header lets an attacker behind a path-keyed
+    /// caching proxy poison the boot script served to *other* clients
+    /// (issue 069). Unset by default so existing configs keep working.
+    #[serde(default)]
+    pub advertised_host: Option<String>,
+    /// Allowlist of hostnames/IP addresses (compared with any `:port`
+    /// stripped) that the client-supplied `Host:` header may reflect into
+    /// generated boot-script URLs when `advertised_host` is unset. A header
+    /// whose host part is not listed is replaced by the first entry plus the
+    /// `http_bind` port. Empty (the default) preserves the legacy
+    /// reflect-the-header behaviour for existing deployments.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,7 +123,10 @@ impl Config {
     /// - each host MAC is a valid normalised MAC;
     /// - host MACs and host names are unique;
     /// - `api_token`, when set, is non-empty (an empty token would
-    ///   authenticate a caller sending an empty `X-API-Token` header).
+    ///   authenticate a caller sending an empty `X-API-Token` header);
+    /// - `advertised_host`, when set, and every `allowed_hosts` entry are
+    ///   non-empty and whitespace-free (they are interpolated into iPXE
+    ///   scripts, so an embedded newline would inject script lines).
     pub fn validate(&self) -> Result<(), CoreError> {
         use std::collections::HashSet;
         use std::net::SocketAddr;
@@ -156,6 +175,24 @@ impl Config {
                 "server.api_token is set but empty; unset it to disable auth or provide a real secret"
                     .to_string(),
             ));
+        }
+
+        // advertised_host and allowed_hosts entries are interpolated into
+        // generated iPXE scripts: reject empties (would render URLs with an
+        // empty host) and whitespace (a newline would inject script lines).
+        if let Some(advertised) = &self.server.advertised_host
+            && (advertised.is_empty() || advertised.chars().any(char::is_whitespace))
+        {
+            return Err(invalid(format!(
+                "server.advertised_host = {advertised:?} must be a non-empty host[:port] without whitespace"
+            )));
+        }
+        for host in &self.server.allowed_hosts {
+            if host.is_empty() || host.chars().any(char::is_whitespace) {
+                return Err(invalid(format!(
+                    "server.allowed_hosts entry {host:?} must be a non-empty hostname/IP without whitespace"
+                )));
+            }
         }
 
         // A zero artifact ceiling would reject every extraction — almost
@@ -641,6 +678,8 @@ hosts:
             oled_brightness: 255,
             api_token: None,
             max_artifact_bytes: None,
+            advertised_host: None,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -747,5 +786,38 @@ hosts:
         let mut cfg = valid_config();
         cfg.hosts[0].name = String::new();
         assert_invalid(&cfg, "empty name");
+    }
+
+    #[test]
+    fn validate_rejects_bad_advertised_host() {
+        let mut cfg = valid_config();
+        cfg.server.advertised_host = Some(String::new());
+        assert_invalid(&cfg, "advertised_host");
+
+        // Whitespace would let the value inject extra iPXE script lines.
+        let mut cfg = valid_config();
+        cfg.server.advertised_host = Some("boot.example\nchain evil".to_string());
+        assert_invalid(&cfg, "advertised_host");
+
+        // A real host:port is accepted.
+        let mut cfg = valid_config();
+        cfg.server.advertised_host = Some("boot.example.internal:8080".to_string());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bad_allowed_hosts_entry() {
+        let mut cfg = valid_config();
+        cfg.server.allowed_hosts = vec!["192.168.1.10".to_string(), String::new()];
+        assert_invalid(&cfg, "allowed_hosts");
+
+        let mut cfg = valid_config();
+        cfg.server.allowed_hosts = vec!["boot example".to_string()];
+        assert_invalid(&cfg, "allowed_hosts");
+
+        // Plain hostnames/IPs are accepted.
+        let mut cfg = valid_config();
+        cfg.server.allowed_hosts = vec!["192.168.1.10".to_string(), "boot.internal".to_string()];
+        assert!(cfg.validate().is_ok());
     }
 }

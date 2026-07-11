@@ -158,14 +158,16 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let config_path = PathBuf::from(&args.config);
     if !config_path.exists() {
-        return Err(anyhow::anyhow!(
+        return Err(fail_startup(anyhow::anyhow!(
             "Configuration file not found: {}",
             args.config
-        ));
+        )));
     }
 
     // 3. Load configuration
-    let config = Config::load(&config_path).context("Failed to load configuration file")?;
+    let config = Config::load(&config_path)
+        .context("Failed to load configuration file")
+        .map_err(fail_startup)?;
 
     // 4. Initialise extractor cache sync. Extraction can take minutes on
     //    large ISOs and is fully synchronous, so run it on a blocking pool
@@ -199,7 +201,8 @@ async fn main() -> Result<(), anyhow::Error> {
         let mut guard = shared_config_clone.write();
         *guard = new_config;
     })
-    .context("Failed to start configuration file watcher")?;
+    .context("Failed to start configuration file watcher")
+    .map_err(fail_startup)?;
 
     // Check for systemd socket activation environment variables (informational)
     if std::env::var("LISTEN_FDS").is_ok() {
@@ -399,6 +402,23 @@ async fn graceful_shutdown(
     if let Some(handle) = oled_manager_handle {
         let _ = handle.await;
     }
+}
+
+/// Mark a startup failure on the rack LED before an early `Err` return
+/// (issue 075).
+///
+/// The boot-blink task is already running on the config-missing/load/watch
+/// failure paths, but returning from `main` tears the runtime down, so that
+/// task cannot be relied on to record the failure — it may be cancelled
+/// mid-blink, and before issue 075 its closed stop channel even turned the
+/// LED solid blue ("Service Running") on a box that failed to start. Write
+/// the white "Service Stopped" state synchronously here so the hardware
+/// reflects the failure before the process exits; `run_boot_blink` now also
+/// maps a dropped stop channel to white, so a racing blink tick can never
+/// overwrite this with blue.
+fn fail_startup(err: anyhow::Error) -> anyhow::Error {
+    bootycall_led::activate_white_led();
+    err
 }
 
 /// Apply the cache-sync restart policy (issue 020) and log the outcome.

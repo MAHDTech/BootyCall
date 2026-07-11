@@ -9,6 +9,7 @@ tokio = { workspace = true }
 sysinfo = { workspace = true }
 bootycall-core = { path = "../bootycall-core" }
 bootycall-log = { workspace = true }
+tracing = { workspace = true }
 anyhow = { workspace = true }
 libc = { workspace = true }
 ab_glyph = { workspace = true }

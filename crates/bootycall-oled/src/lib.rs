@@ -9,6 +9,7 @@ use crate::metrics::SystemMetrics;
 use crate::renderer::Renderer;
 use bootycall_core::state::StateStore;
 use bootycall_log::{error, info, warn};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -39,7 +40,113 @@ const OPTIONAL_HW_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 /// The GPIO character device the rackmount detect/power lines live on.
 const GPIOCHIP_PATH: &str = "/dev/gpiochip0";
 
+/// Name of the dedicated OS thread the render loop runs on. The global panic
+/// hook in `bootycall-rs` matches on this name so a supervised (restarting)
+/// OLED panic does not latch the status LED to the "service stopped" white —
+/// keep the two in sync.
+pub const OLED_THREAD_NAME: &str = "bootycall-oled";
+
 use gpiocdev::line::Value;
+
+/// Restart policy for the supervised render loop: how long to back off
+/// between restarts, when a run counts as healthy, and how often the backoff
+/// sleep re-checks the shutdown flag. A struct (rather than loose consts) so
+/// tests can drive [`supervise`] with millisecond timings.
+#[derive(Clone, Copy, Debug)]
+struct RestartPolicy {
+    /// Delay before the first restart, and after any healthy run.
+    initial_backoff: Duration,
+    /// Ceiling for the exponential backoff.
+    max_backoff: Duration,
+    /// A run surviving at least this long resets the backoff to
+    /// `initial_backoff`.
+    healthy_run: Duration,
+    /// Granularity at which the backoff sleep re-checks the shutdown flag,
+    /// so shutdown stays responsive mid-backoff.
+    shutdown_poll: Duration,
+}
+
+/// Production restart policy: 1 s initial backoff doubling to a 60 s ceiling,
+/// reset by a run that survives 60 s.
+const RENDER_RESTART_POLICY: RestartPolicy = RestartPolicy {
+    initial_backoff: Duration::from_secs(1),
+    max_backoff: Duration::from_secs(60),
+    healthy_run: Duration::from_secs(60),
+    shutdown_poll: Duration::from_millis(200),
+};
+
+/// Next restart delay after sleeping `current`: doubled, capped at `max`.
+/// Pure so the backoff progression is unit-testable.
+fn next_backoff(current: Duration, max: Duration) -> Duration {
+    current.saturating_mul(2).min(max)
+}
+
+/// Best-effort extraction of a human-readable message from a panic payload.
+/// Panics raised via the `panic!` macro carry `&str` or `String`; anything
+/// else (`panic_any`) falls back to a placeholder.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        "<non-string panic payload>"
+    }
+}
+
+/// Sleep for `total`, waking every `poll` to check the shutdown flag.
+/// Returns `false` when shutdown was requested (whether it cut the sleep
+/// short or arrived during the final interval), `true` otherwise.
+fn sleep_unless_shutdown(shutdown: &AtomicBool, total: Duration, poll: Duration) -> bool {
+    let deadline = Instant::now() + total;
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(poll));
+    }
+}
+
+/// Run `run_once` under panic supervision until it exits cleanly or shutdown
+/// is requested. A panic or `Err` from the body is logged **immediately** and
+/// the body is restarted after an exponential backoff (reset by a healthy
+/// run), so a render failure degrades to a brief display gap instead of a
+/// permanently dark panel for the process lifetime (issue 073).
+///
+/// `AssertUnwindSafe` is sound here because a failed run's state is discarded
+/// wholesale — every restart rebuilds its framebuffer, metrics, and sink from
+/// scratch — and the shared `StateStore` uses non-poisoning locks.
+#[tracing::instrument(skip_all)]
+fn supervise<F>(shutdown: &AtomicBool, policy: RestartPolicy, mut run_once: F)
+where
+    F: FnMut() -> Result<(), anyhow::Error>,
+{
+    let mut backoff = policy.initial_backoff;
+    loop {
+        let started = Instant::now();
+        let failure = match std::panic::catch_unwind(AssertUnwindSafe(&mut run_once)) {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("failed: {e:?}"),
+            Err(payload) => format!("panicked: {}", panic_message(payload.as_ref())),
+        };
+        if started.elapsed() >= policy.healthy_run {
+            backoff = policy.initial_backoff;
+        }
+        error!(
+            "OLED render loop {failure}; restarting in {:.1}s",
+            backoff.as_secs_f32()
+        );
+        if !sleep_unless_shutdown(shutdown, backoff, policy.shutdown_poll) {
+            info!("OLED render supervision stopping: shutdown requested during restart backoff");
+            return;
+        }
+        backoff = next_backoff(backoff, policy.max_backoff);
+    }
+}
 
 /// Whether enough time has elapsed since the last optional-hardware acquisition
 /// attempt to try again. Pulled out as a pure fn so the retry cadence is
@@ -439,6 +546,11 @@ const PAGES: &[PageSpec] = &[
 /// starves the reactor. A dedicated std::thread is cleaner than per-tick
 /// spawn_blocking churn — and keeps this function's async signature, so the
 /// caller in `main.rs` doesn't have to know.
+///
+/// The thread runs [`render_loop`] under [`supervise`], so a panic or error
+/// in the loop is logged immediately and the loop restarted with backoff
+/// rather than leaving the display dark for the process lifetime.
+#[tracing::instrument(skip(state_store, shutdown_rx))]
 pub async fn run_oled_manager(
     state_store: StateStore,
     brightness: u8,
@@ -451,14 +563,17 @@ pub async fn run_oled_manager(
     let state_for_thread = state_store.clone();
 
     let render_thread = std::thread::Builder::new()
-        .name("bootycall-oled".to_string())
+        .name(OLED_THREAD_NAME.to_string())
         .spawn(move || {
-            render_loop(
-                state_for_thread,
-                brightness,
-                flag_for_thread,
-                PanelSink::new(),
-            )
+            let flag_for_runs = flag_for_thread.clone();
+            supervise(&flag_for_thread, RENDER_RESTART_POLICY, move || {
+                render_loop(
+                    state_for_thread.clone(),
+                    brightness,
+                    flag_for_runs.clone(),
+                    PanelSink::new(),
+                )
+            });
         })?;
 
     // Bridge the async shutdown channel to the sync loop.
@@ -467,13 +582,16 @@ pub async fn run_oled_manager(
 
     // Wait for the render thread to finish. Join is blocking; wrap it so we
     // don't stall the reactor while the last frame drains + screen blanks.
+    // Render-loop panics are already caught, logged, and retried inside
+    // `supervise`; a join `Err` here means the supervisor itself died.
     match tokio::task::spawn_blocking(move || render_thread.join()).await {
-        Ok(Ok(inner)) => inner,
-        Ok(Err(_panic)) => Err(anyhow::anyhow!("OLED render thread panicked")),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_panic)) => Err(anyhow::anyhow!("OLED render supervisor thread panicked")),
         Err(join_err) => Err(anyhow::anyhow!("OLED shutdown join error: {join_err}")),
     }
 }
 
+#[tracing::instrument(skip(state_store, shutdown, sink))]
 fn render_loop<S: FrameSink>(
     state_store: StateStore,
     brightness: u8,
@@ -894,6 +1012,87 @@ mod tests {
         let (x, _y, dx, _dy) = step_bounce(0, 10, -1, 1, b);
         assert_eq!(x, 0, "x must not underflow past the left wall");
         assert_eq!(dx, 1, "dx must flip to move right");
+    }
+
+    /// Millisecond-scale policy so supervision tests finish instantly.
+    const TEST_POLICY: RestartPolicy = RestartPolicy {
+        initial_backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(4),
+        healthy_run: Duration::from_secs(3600),
+        shutdown_poll: Duration::from_millis(1),
+    };
+
+    #[test]
+    fn supervise_restarts_after_panic_until_clean_exit() {
+        let shutdown = AtomicBool::new(false);
+        let mut runs = 0;
+        supervise(&shutdown, TEST_POLICY, || {
+            runs += 1;
+            if runs < 3 {
+                panic!("render loop test panic {runs}");
+            }
+            Ok(())
+        });
+        assert_eq!(runs, 3, "the body must be restarted after each panic");
+    }
+
+    #[test]
+    fn supervise_restarts_after_error_and_stops_on_shutdown() {
+        let shutdown = AtomicBool::new(false);
+        let mut runs = 0;
+        supervise(&shutdown, TEST_POLICY, || {
+            runs += 1;
+            if runs == 2 {
+                // Request shutdown mid-failure: the backoff sleep must
+                // observe it and stop restarting.
+                shutdown.store(true, Ordering::Relaxed);
+            }
+            Err(anyhow::anyhow!("render loop test error"))
+        });
+        assert_eq!(runs, 2, "no further restarts once shutdown is requested");
+    }
+
+    #[test]
+    fn next_backoff_doubles_and_caps() {
+        let max = Duration::from_secs(60);
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), max),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(40), max),
+            Duration::from_secs(60)
+        );
+        assert_eq!(next_backoff(max, max), max);
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads() {
+        let p = std::panic::catch_unwind(|| panic!("static payload")).unwrap_err();
+        assert_eq!(panic_message(p.as_ref()), "static payload");
+
+        let p = std::panic::catch_unwind(|| panic!("formatted {}", 42)).unwrap_err();
+        assert_eq!(panic_message(p.as_ref()), "formatted 42");
+
+        let p = std::panic::catch_unwind(|| std::panic::panic_any(7u32)).unwrap_err();
+        assert_eq!(panic_message(p.as_ref()), "<non-string panic payload>");
+    }
+
+    #[test]
+    fn sleep_unless_shutdown_reports_pre_set_flag() {
+        let shutdown = AtomicBool::new(true);
+        assert!(!sleep_unless_shutdown(
+            &shutdown,
+            Duration::from_millis(50),
+            Duration::from_millis(1)
+        ));
+
+        let shutdown = AtomicBool::new(false);
+        assert!(sleep_unless_shutdown(
+            &shutdown,
+            Duration::from_millis(1),
+            Duration::from_millis(1)
+        ));
     }
 
     #[test]

@@ -21,6 +21,19 @@ impl<F> PartitionSlice<F> {
             pos: 0,
         }
     }
+
+    /// Absolute file offset for the current slice position.
+    ///
+    /// `start` derives from untrusted GPT geometry (`first_lba * lb_size`)
+    /// and can sit near `u64::MAX` on a crafted image, so the add must be
+    /// checked: a raw `start + pos` panics with an arithmetic overflow in
+    /// debug builds and silently wraps to a bogus offset (feeding the FAT
+    /// parser a garbage read) in release builds.
+    fn absolute_offset(&self) -> io::Result<u64> {
+        self.start
+            .checked_add(self.pos)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset overflow"))
+    }
 }
 
 impl<F: Read + Seek> Read for PartitionSlice<F> {
@@ -30,7 +43,7 @@ impl<F: Read + Seek> Read for PartitionSlice<F> {
         }
         let max_read = (self.len - self.pos) as usize;
         let to_read = std::cmp::min(buf.len(), max_read);
-        self.file.seek(SeekFrom::Start(self.start + self.pos))?;
+        self.file.seek(SeekFrom::Start(self.absolute_offset()?))?;
         let bytes_read = self.file.read(&mut buf[..to_read])?;
         self.pos += bytes_read as u64;
         Ok(bytes_read)
@@ -90,7 +103,7 @@ impl<F: Write + Seek> Write for PartitionSlice<F> {
         }
         let max_write = (self.len - self.pos) as usize;
         let to_write = std::cmp::min(buf.len(), max_write);
-        self.file.seek(SeekFrom::Start(self.start + self.pos))?;
+        self.file.seek(SeekFrom::Start(self.absolute_offset()?))?;
         let bytes_written = self.file.write(&buf[..to_write])?;
         self.pos += bytes_written as u64;
         Ok(bytes_written)
@@ -249,4 +262,51 @@ fn find_file_recursive_fat_bounded<'a, T: ReadWriteSeek>(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Geometry from the ticket: a crafted GPT with `first_lba = 2^55 - 1`
+    /// (512-byte sectors) survives the `checked_mul` in the gpt crate and
+    /// yields `start = 2^64 - 512`. A later FAT-driver seek to `pos = 512`
+    /// then pushes `start + pos` past `u64::MAX`.
+    const OVERFLOWING_START: u64 = u64::MAX - 511;
+
+    #[test]
+    fn read_near_u64_max_start_errors_instead_of_overflowing() {
+        let mut slice = PartitionSlice::new(Cursor::new(vec![0u8; 4096]), OVERFLOWING_START, 1024);
+        slice
+            .seek(SeekFrom::Start(512))
+            .expect("seek within the slice's own bounds must succeed");
+        let mut buf = [0u8; 16];
+        let err = slice
+            .read(&mut buf)
+            .expect_err("read must surface the offset overflow, not panic or wrap");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn write_near_u64_max_start_errors_instead_of_overflowing() {
+        let mut slice = PartitionSlice::new(Cursor::new(vec![0u8; 4096]), OVERFLOWING_START, 1024);
+        slice
+            .seek(SeekFrom::Start(512))
+            .expect("seek within the slice's own bounds must succeed");
+        let err = slice
+            .write(&[0xAA; 16])
+            .expect_err("write must surface the offset overflow, not panic or wrap");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn read_write_round_trip_at_sane_offsets_still_works() {
+        let mut slice = PartitionSlice::new(Cursor::new(vec![0u8; 4096]), 1024, 1024);
+        slice.write_all(&[0xAB; 8]).expect("in-bounds write");
+        slice.seek(SeekFrom::Start(0)).expect("rewind");
+        let mut buf = [0u8; 8];
+        slice.read_exact(&mut buf).expect("in-bounds read");
+        assert_eq!(buf, [0xAB; 8]);
+    }
 }

@@ -175,4 +175,5 @@ To maintain rich custom console aesthetics, the iPXE boot menus support dynamic 
 - **Resource Constraints**:
   - Target memory footprint: `< 30MB` RAM at idle.
   - User-space execution only (except binding privileged ports like 67/69, which is handled via systemd socket activation or Capabilities `CAP_NET_BIND_SERVICE`).
-- **UEFI First, Legacy BIOS Supported**: UEFI loaders (`ipxe.efi`) are the primary target. Legacy BIOS PXE clients (DHCP Option 93 architecture 0) are also supported: they cannot execute an EFI image, so the proxy DHCP server hands them the real-mode NBP configured via `default_bootloader_bios` (default `boot/x64/undionly.kpxe`). `memdisk`-style whole-image boots are not targeted.
+- **UEFI First, Legacy BIOS Supported**: UEFI loaders (`ipxe.efi`) are the primary target. Legacy BIOS PXE clients (DHCP Option 93 architecture 0) are also supported: they cannot execute an EFI image, so the proxy DHCP server hands them the real-mode NBP configured via `default_bootloader_bios` (default `boot/x64/undionly.kpxe`).
+  Clients advertising any other architecture (e.g. IA32 EFI, ARM32 EFI, or the UEFI HTTP-boot classes) are refused with a logged warning — no offer is sent — rather than being served an amd64 image they cannot execute, unless a per-host `bootloader` override is configured for them. `memdisk`-style whole-image boots are not targeted.

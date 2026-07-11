@@ -695,9 +695,13 @@ pub async fn run_tftp_server_with_limit(
                     .find_host(&hs.mac)
                     .and_then(|h| h.bootloader.as_ref())
                 {
+                    // A request for *any* of the configured defaults — the
+                    // legacy-BIOS NBP included, which this check used to
+                    // omit — is redirected to the host's per-MAC override.
                     let is_default_request = filename
                         == config_guard.server.default_bootloader_amd64
-                        || filename == config_guard.server.default_bootloader_arm64;
+                        || filename == config_guard.server.default_bootloader_arm64
+                        || filename == config_guard.server.default_bootloader_bios;
                     if is_default_request {
                         info!(
                             "Redirecting default bootloader request to custom override: {} for host {}",

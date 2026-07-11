@@ -48,6 +48,25 @@ pub const OLED_THREAD_NAME: &str = "bootycall-oled";
 
 use gpiocdev::line::Value;
 
+/// Errors returned by the OLED entry points ([`run_oled_manager`],
+/// [`run_sim`], and [`oled_test`]).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OledError {
+    /// An I/O operation failed: spawning the render thread, creating the sim
+    /// output directory, or flushing the framebuffer.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The supervisor thread itself panicked. Render-loop panics are caught,
+    /// logged, and restarted inside the supervisor, so this indicates a bug
+    /// in the supervision plumbing rather than a render failure.
+    #[error("OLED render supervisor thread panicked")]
+    SupervisorPanicked,
+    /// Joining the render thread during shutdown failed.
+    #[error("OLED shutdown join error: {0}")]
+    ShutdownJoin(#[source] tokio::task::JoinError),
+}
+
 /// Restart policy for the supervised render loop: how long to back off
 /// between restarts, when a run counts as healthy, and how often the backoff
 /// sleep re-checks the shutdown flag. A struct (rather than loose consts) so
@@ -123,7 +142,7 @@ fn sleep_unless_shutdown(shutdown: &AtomicBool, total: Duration, poll: Duration)
 #[tracing::instrument(skip_all)]
 fn supervise<F>(shutdown: &AtomicBool, policy: RestartPolicy, mut run_once: F)
 where
-    F: FnMut() -> Result<(), anyhow::Error>,
+    F: FnMut() -> Result<(), OledError>,
 {
     let mut backoff = policy.initial_backoff;
     loop {
@@ -555,7 +574,7 @@ pub async fn run_oled_manager(
     state_store: StateStore,
     brightness: u8,
     mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), OledError> {
     info!("Starting OLED Manager Task...");
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -586,8 +605,8 @@ pub async fn run_oled_manager(
     // `supervise`; a join `Err` here means the supervisor itself died.
     match tokio::task::spawn_blocking(move || render_thread.join()).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(_panic)) => Err(anyhow::anyhow!("OLED render supervisor thread panicked")),
-        Err(join_err) => Err(anyhow::anyhow!("OLED shutdown join error: {join_err}")),
+        Ok(Err(_panic)) => Err(OledError::SupervisorPanicked),
+        Err(join_err) => Err(OledError::ShutdownJoin(join_err)),
     }
 }
 
@@ -597,7 +616,7 @@ fn render_loop<S: FrameSink>(
     brightness: u8,
     shutdown: Arc<AtomicBool>,
     mut sink: S,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), OledError> {
     // Hardware-absent (headless) short-circuit: the panel sink returns false
     // when neither the framebuffer nor the GPIO chip is present (a dev laptop,
     // or a CloudKey mid-boot), so we log once and idle instead of spinning the
@@ -707,7 +726,7 @@ fn render_loop<S: FrameSink>(
                     renderer.draw_braille(draw_x + 3, draw_y + 13, 3, 3, 8);
                 }
                 DisplayMode::Metrics => {
-                    let page = &PAGES[page_index % PAGES.len()];
+                    let page = &PAGES[page_index];
                     let value = (page.value)(&sys_metrics);
                     draw_metrics_page(
                         &mut renderer,
@@ -753,7 +772,7 @@ fn render_loop<S: FrameSink>(
 /// `max_frames`. Lets page rotation, the screensaver bounce, and mode
 /// transitions be inspected on a dev host without touching `/dev/fb0` or GPIO.
 #[cfg(feature = "sim")]
-pub fn run_sim(out_dir: &str, brightness: u8, max_frames: usize) -> Result<(), anyhow::Error> {
+pub fn run_sim(out_dir: &str, brightness: u8, max_frames: usize) -> Result<(), OledError> {
     std::fs::create_dir_all(out_dir)?;
     let state_store = StateStore::new();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -862,7 +881,7 @@ fn align_y(vert: &str, text_h: usize) -> usize {
 }
 
 /// Dynamic OLED rendering test for testing font size and alignment using premium TrueType fonts.
-pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), anyhow::Error> {
+pub fn oled_test(size: usize, alignment: &str, text: &str) -> Result<(), OledError> {
     // Parse alignment parts (e.g., "center-top", "left-bottom", "center")
     let parts: Vec<&str> = alignment.split('-').collect();
     let horiz = parts.first().copied().unwrap_or("left");
@@ -1047,7 +1066,7 @@ mod tests {
                 // observe it and stop restarting.
                 shutdown.store(true, Ordering::Relaxed);
             }
-            Err(anyhow::anyhow!("render loop test error"))
+            Err(std::io::Error::other("render loop test error").into())
         });
         assert_eq!(runs, 2, "no further restarts once shutdown is requested");
     }

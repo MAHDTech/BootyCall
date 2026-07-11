@@ -263,12 +263,12 @@ name = "bootycall-oled"
 version = "0.1.3"
 dependencies = [
  "ab_glyph",
- "anyhow",
  "bootycall-core",
  "bootycall-log",
  "gpiocdev",
  "libc",
  "sysinfo",
+ "thiserror",
  "tokio",
  "tracing",
 ]

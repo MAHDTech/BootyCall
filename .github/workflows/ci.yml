@@ -233,7 +233,7 @@ jobs:
     name: Cargo Test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - arch: amd64

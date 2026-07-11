@@ -251,6 +251,7 @@ name = "bootycall-log"
 version = "0.1.3"
 dependencies = [
  "serde_json",
+ "thiserror",
  "tracing",
  "tracing-subscriber",
 ]

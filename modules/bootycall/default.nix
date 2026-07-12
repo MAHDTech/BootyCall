@@ -32,6 +32,14 @@ let
     in
     if port == null then 0 else port;
 
+  # Check if a bind address is a loopback address.
+  isLoopback =
+    bind:
+    lib.hasPrefix "127.0.0.1:" bind
+    || lib.hasPrefix "localhost:" bind
+    || lib.hasPrefix "[::1]:" bind
+    || lib.hasPrefix "::1:" bind;
+
   # The unit runs with DynamicUser and ProtectSystem=strict, so systemd's
   # StateDirectory is the only mechanism that creates the data directory
   # with ownership the dynamic user can write to (the preStart mkdir runs
@@ -92,7 +100,10 @@ let
       }
       # The service rejects an empty api_token at startup and treats an absent
       # key as "no auth", so only emit the key when a token is configured.
-      // lib.optionalAttrs (cfg.server.apiToken != null) { api_token = cfg.server.apiToken; };
+      // lib.optionalAttrs (cfg.server.apiToken != null) { api_token = cfg.server.apiToken; }
+      // lib.optionalAttrs (cfg.server.maxArtifactBytes != null) {
+        max_artifact_bytes = cfg.server.maxArtifactBytes;
+      };
       hosts = map (
         h:
         {
@@ -109,6 +120,10 @@ let
 
   # The config file to use: either user-provided or generated from options
   configFile = if cfg.configFile != null then cfg.configFile else generatedConfigFile;
+
+  # The actual config file passed to the binary at runtime
+  runtimeConfigFile =
+    if cfg.server.apiTokenFile != null then "/run/bootycall/bootycall.yaml" else configFile;
 
   # Host entry submodule type
   hostEntryType = lib.types.submodule {
@@ -234,7 +249,7 @@ in
     server = {
       httpBind = lib.mkOption {
         type = lib.types.str;
-        default = "0.0.0.0:8080";
+        default = "127.0.0.1:8080";
         description = "HTTP server listen address.";
       };
 
@@ -345,6 +360,25 @@ in
           an externally-managed `configFile` instead.
         '';
       };
+
+      apiTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Path to a file containing the shared secret (API token) required
+          via the `X-API-Token` header. This avoids storing the token in
+          the world-readable Nix store.
+        '';
+      };
+
+      maxArtifactBytes = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.unsigned;
+        default = null;
+        description = ''
+          Upper bound, in bytes, on a single extracted kernel/initrd artifact.
+          When null (default), it is unbounded.
+        '';
+      };
     };
 
     hosts = lib.mkOption {
@@ -431,6 +465,40 @@ in
             provide a real secret.
           '';
         }
+        # Prevent setting both apiToken and apiTokenFile.
+        {
+          assertion = !(cfg.server.apiToken != null && cfg.server.apiTokenFile != null);
+          message = ''
+            services.bootycall: `apiToken` and `apiTokenFile` cannot be set at the same time.
+            Please configure only one of them.
+          '';
+        }
+        # Prevent setting apiTokenFile with an external configFile.
+        {
+          assertion = !(cfg.configFile != null && cfg.server.apiTokenFile != null);
+          message = ''
+            services.bootycall: `apiTokenFile` cannot be used when an external
+            `configFile` is configured.
+          '';
+        }
+        # Assert that if httpBind is non-loopback with openFirewall, a token or token file must be set.
+        {
+          assertion =
+            !(
+              cfg.openFirewall
+              && cfg.configFile == null
+              && cfg.server.apiToken == null
+              && cfg.server.apiTokenFile == null
+              && !isLoopback cfg.server.httpBind
+            );
+          message = ''
+            services.bootycall: httpBind binds to a non-loopback address "${cfg.server.httpBind}"
+            with openFirewall enabled, but no apiToken or apiTokenFile is configured.
+            This would expose the mutating API endpoints unauthenticated on the network.
+            Please set services.bootycall.server.apiToken or services.bootycall.server.apiTokenFile,
+            or bind httpBind to a loopback address (e.g., "127.0.0.1:8080").
+          '';
+        }
       ];
 
     networking.firewall = lib.mkIf cfg.openFirewall {
@@ -458,25 +526,40 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
 
-      preStart = lib.mkIf cfg.seedDefaultAssets ''
-        # Create directories if they don't exist
-        mkdir -p ${cfg.dataDir}/tftpboot ${cfg.dataDir}/static ${cfg.server.cacheDir}
+      preStart =
+        lib.optionalString cfg.seedDefaultAssets ''
+          # Create directories if they don't exist
+          mkdir -p ${cfg.dataDir}/tftpboot ${cfg.dataDir}/static ${cfg.server.cacheDir}
 
-        # Copy default TFTP assets, preserving user additions
-        if [ -d "${assetsPkg}/tftpboot" ] && [ "$(ls -A ${assetsPkg}/tftpboot)" ]; then
-          cp -rn ${assetsPkg}/tftpboot/* ${cfg.dataDir}/tftpboot/ || true
-          chmod -R u+w ${cfg.dataDir}/tftpboot
-        fi
+          # Copy default TFTP assets, preserving user additions
+          if [ -d "${assetsPkg}/tftpboot" ] && [ "$(ls -A ${assetsPkg}/tftpboot)" ]; then
+            cp -rn ${assetsPkg}/tftpboot/* ${cfg.dataDir}/tftpboot/ || true
+            chmod -R u+w ${cfg.dataDir}/tftpboot
+          fi
 
-        # Copy default static assets, preserving user additions
-        if [ -d "${assetsPkg}/static" ] && [ "$(ls -A ${assetsPkg}/static)" ]; then
-          cp -rn ${assetsPkg}/static/* ${cfg.dataDir}/static/ || true
-          chmod -R u+w ${cfg.dataDir}/static
-        fi
-      '';
+          # Copy default static assets, preserving user additions
+          if [ -d "${assetsPkg}/static" ] && [ "$(ls -A ${assetsPkg}/static)" ]; then
+            cp -rn ${assetsPkg}/static/* ${cfg.dataDir}/static/ || true
+            chmod -R u+w ${cfg.dataDir}/static
+          fi
+        ''
+        + lib.optionalString (cfg.server.apiTokenFile != null) ''
+          if [ -f "${cfg.server.apiTokenFile}" ]; then
+            token=$(cat "${cfg.server.apiTokenFile}")
+            if [ -z "$token" ]; then
+              echo "Error: apiTokenFile is empty" >&2
+              exit 1
+            fi
+            ${pkgs.jq}/bin/jq --arg token "$token" '.server.api_token = $token' "${generatedConfigFile}" > /run/bootycall/bootycall.yaml
+            chmod 0600 /run/bootycall/bootycall.yaml
+          else
+            echo "Error: apiTokenFile '${cfg.server.apiTokenFile}' does not exist" >&2
+            exit 1
+          fi
+        '';
 
       serviceConfig = {
-        ExecStart = "${bootycallPkg}/bin/bootycall-rs --config ${configFile}";
+        ExecStart = "${bootycallPkg}/bin/bootycall-rs --config ${runtimeConfigFile}";
         Restart = "always";
         # Readiness probe: `GET http://<http_bind>/api/health` returns 200 when
         # every configured host has cached boot artifacts ready to serve and 503
@@ -491,6 +574,8 @@ in
         # so a custom dataDir gets created with the right ownership instead of
         # silently keeping the default /var/lib/bootycall.
         StateDirectory = stateDirectoryName;
+        RuntimeDirectory = "bootycall";
+        RuntimeDirectoryMode = "0700";
         WorkingDirectory = cfg.dataDir;
         Environment = [
           "TFTP_ROOT=${cfg.server.tftpRoot}"
@@ -525,7 +610,8 @@ in
         ReadWritePaths = [
           cfg.dataDir
           cfg.server.cacheDir
-        ];
+        ]
+        ++ lib.optional (cfg.server.apiTokenFile != null) "/run/bootycall";
         # Defence-in-depth hardening for a daemon parsing untrusted
         # DHCP/TFTP/HTTP input. The address-family allowlist matches actual
         # socket usage: AF_INET/AF_INET6 for the UDP (DHCP/TFTP) and TCP

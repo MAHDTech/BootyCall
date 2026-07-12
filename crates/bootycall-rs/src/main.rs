@@ -92,32 +92,7 @@ async fn main() -> Result<(), anyhow::Error> {
                     "Running OLED text preview test... (Note: stop the bootycall service to prevent overwriting)"
                 );
 
-                // Validate size based on built-in font
-                if !(6..=40).contains(&size) {
-                    return Err(anyhow::anyhow!(
-                        "Error: Built-in font size {} is out of range. Must be between 6 and 40.",
-                        size
-                    ));
-                }
-
-                // Validate alignment format
-                let valid_aligns = [
-                    "left",
-                    "center",
-                    "right",
-                    "left-top",
-                    "left-bottom",
-                    "center-top",
-                    "center-bottom",
-                    "right-top",
-                    "right-bottom",
-                ];
-                if !valid_aligns.contains(&alignment.as_str()) {
-                    return Err(anyhow::anyhow!(
-                        "Error: Invalid alignment '{}'. Valid options are: left, center, right, left-top, left-bottom, center-top, center-bottom, right-top, right-bottom",
-                        alignment
-                    ));
-                }
+                validate_oled_params(size, &alignment)?;
 
                 bootycall_oled::oled_test(size, &alignment, &text)?;
                 return Ok(());
@@ -601,5 +576,122 @@ fn join_result_to_error(
         Ok(Ok(())) => anyhow::anyhow!("{name} server exited unexpectedly with Ok"),
         Ok(Err(e)) => e.context(format!("{name} server fatal error")),
         Err(join_err) => anyhow::anyhow!("{name} server task join error: {join_err}"),
+    }
+}
+
+fn validate_oled_params(size: usize, alignment: &str) -> anyhow::Result<()> {
+    if !(6..=40).contains(&size) {
+        return Err(anyhow::anyhow!(
+            "Error: Built-in font size {} is out of range. Must be between 6 and 40.",
+            size
+        ));
+    }
+
+    let valid_aligns = [
+        "left",
+        "center",
+        "right",
+        "left-top",
+        "left-bottom",
+        "center-top",
+        "center-bottom",
+        "right-top",
+        "right-bottom",
+    ];
+    if !valid_aligns.contains(&alignment) {
+        return Err(anyhow::anyhow!(
+            "Error: Invalid alignment '{}'. Valid options are: left, center, right, left-top, left-bottom, center-top, center-bottom, right-top, right-bottom",
+            alignment
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_oled_params() {
+        // Valid params
+        assert!(validate_oled_params(12, "center").is_ok());
+        assert!(validate_oled_params(6, "left-top").is_ok());
+        assert!(validate_oled_params(40, "right-bottom").is_ok());
+
+        // Invalid sizes
+        assert!(validate_oled_params(5, "center").is_err());
+        assert!(validate_oled_params(41, "center").is_err());
+
+        // Invalid alignments
+        assert!(validate_oled_params(12, "invalid-align").is_err());
+        assert!(validate_oled_params(12, "").is_err());
+    }
+
+    #[test]
+    fn test_join_result_to_error() {
+        // 1. Success case
+        let err_ok = join_result_to_error("Test", Ok(Ok(())));
+        assert_eq!(
+            err_ok.to_string(),
+            "Test server exited unexpectedly with Ok"
+        );
+
+        // 2. Fatal error case
+        let inner_err = anyhow::anyhow!("database lookup failed");
+        let err_fatal = join_result_to_error("Test", Ok(Err(inner_err)));
+        assert!(err_fatal.to_string().contains("Test server fatal error"));
+    }
+
+    #[tokio::test]
+    async fn test_join_result_to_error_panic() {
+        // 3. Panic / task join error case
+        let handle = tokio::spawn(async {
+            panic!("intended panic");
+        });
+        let res = handle.await;
+        assert!(res.is_err());
+        let err_panic = join_result_to_error("Test", res);
+        assert!(
+            err_panic
+                .to_string()
+                .contains("Test server task join error")
+        );
+    }
+
+    #[test]
+    fn test_log_sync_summary_branches() {
+        use bootycall_extractor::SyncSummary;
+        use bootycall_extractor::error::ExtractorError;
+
+        // 1. Success (all hosts OK)
+        let summary_ok = SyncSummary {
+            succeeded: 2,
+            failed: vec![],
+        };
+        log_sync_summary(&summary_ok);
+
+        // 2. Partial failure
+        let summary_partial = SyncSummary {
+            succeeded: 1,
+            failed: vec![(
+                "host_failed".to_string(),
+                ExtractorError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk full")),
+            )],
+        };
+        log_sync_summary(&summary_partial);
+
+        // 3. All failed
+        let summary_all_failed = SyncSummary {
+            succeeded: 0,
+            failed: vec![(
+                "host_failed_1".to_string(),
+                ExtractorError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "network timeout",
+                )),
+            )],
+        };
+        log_sync_summary(&summary_all_failed);
     }
 }

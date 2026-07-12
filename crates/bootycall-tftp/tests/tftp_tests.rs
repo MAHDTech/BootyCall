@@ -180,16 +180,10 @@ async fn test_tftp_server_negotiation_and_transfer() {
 }
 
 fn parse_error_packet(pkt: &[u8]) -> (u16, u16, String) {
-    assert!(pkt.len() >= 5, "ERROR packet too short");
     let opcode = u16::from_be_bytes([pkt[0], pkt[1]]);
-    let error_code = u16::from_be_bytes([pkt[2], pkt[3]]);
-    // Message runs from byte 4 to the trailing null (or end)
-    let msg_end = pkt[4..]
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(pkt.len() - 4);
-    let msg = String::from_utf8_lossy(&pkt[4..4 + msg_end]).to_string();
-    (opcode, error_code, msg)
+    let (code, msg) =
+        bootycall_tftp::wire::parse_error_packet(pkt).expect("expected an ERROR packet");
+    (opcode, code, msg)
 }
 
 #[tokio::test]

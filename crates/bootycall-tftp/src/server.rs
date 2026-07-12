@@ -15,7 +15,7 @@ use crate::wire::{
     parse_ack_packet,
 };
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct RrqRequest {
     filename: String,
     mode: String,
@@ -898,5 +898,66 @@ pub async fn run_tftp_server_with_limit(
             }
             drop(permit);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_rrq_too_short() {
+        assert!(parse_rrq(&[0, 1]).is_none());
+        assert!(parse_rrq(&[0, 1, 0]).is_none());
+    }
+
+    #[test]
+    fn test_parse_rrq_wrong_opcode() {
+        let packet = [
+            0, 2, b'f', b'i', b'l', b'e', 0, b'o', b'c', b't', b'e', b't', 0,
+        ];
+        assert!(parse_rrq(&packet).is_none());
+    }
+
+    #[test]
+    fn test_parse_rrq_only_filename() {
+        let packet = [0, 1, b't', b'e', b's', b't', b'.', b't', b'x', b't', 0];
+        assert!(parse_rrq(&packet).is_none());
+    }
+
+    #[test]
+    fn test_parse_rrq_non_utf8() {
+        let packet_bad_file = [0, 1, 0xff, 0xfe, 0, b'o', b'c', b't', b'e', b't', 0];
+        assert!(parse_rrq(&packet_bad_file).is_none());
+
+        let packet_bad_mode = [0, 1, b't', b'e', b's', b't', 0, 0xff, 0xfe, 0];
+        assert!(parse_rrq(&packet_bad_mode).is_none());
+    }
+
+    #[test]
+    fn test_parse_rrq_blksize_garbage() {
+        let mut packet = vec![0, 1];
+        packet.extend_from_slice(b"test.txt\0octet\0");
+        packet.extend_from_slice(b"blksize\0abc\0");
+        packet.extend_from_slice(b"timeout\05\0");
+
+        let req = parse_rrq(&packet).expect("Expected Some RrqRequest");
+        assert_eq!(req.filename, "test.txt");
+        assert_eq!(req.mode, "octet");
+        assert_eq!(req.blksize, None);
+        assert_eq!(req.timeout, Some(5));
+    }
+
+    #[test]
+    fn test_parse_rrq_netascii_mail_modes() {
+        let mut packet = vec![0, 1];
+        packet.extend_from_slice(b"test.txt\0netascii\0");
+        let req = parse_rrq(&packet).expect("Expected RrqRequest for netascii");
+        assert_eq!(req.mode, "netascii");
+
+        let mut packet2 = vec![0, 1];
+        packet2.extend_from_slice(b"test.txt\0mail\0");
+        let req2 = parse_rrq(&packet2).expect("Expected RrqRequest for mail");
+        assert_eq!(req2.mode, "mail");
     }
 }

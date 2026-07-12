@@ -40,9 +40,10 @@ server:
   # option ROM cannot execute an EFI image, so it needs a real-mode NBP such as
   # iPXE's undionly.kpxe. Optional; defaults to "boot/x64/undionly.kpxe".
   default_bootloader_bios: "boot/x64/undionly.kpxe"
-  # Whether to spawn the OLED render task at all. Set false on hardware without
-  # the rackmount OLED panel. Optional; defaults to true.
-  oled_enabled: true
+  # Whether to spawn the OLED render task. Optional; defaults to false.
+  oled_enabled: false
+  # Whether to spawn the status LED manager task. Optional; defaults to false.
+  led_enabled: false
   # OLED panel brightness (0–255). Scales the grayscale→RGB565 LUT; lower values
   # dim the display (and reduce burn-in/power). Optional; defaults to 255 (full).
   # The panel dims further automatically while the screensaver is active.

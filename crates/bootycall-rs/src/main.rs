@@ -151,23 +151,26 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("BootyCall starting up...");
 
-    let (led_stop_tx, led_stop_rx) = tokio::sync::mpsc::channel(1);
-    let mut boot_blink_handle = Some(tokio::spawn(async move {
-        bootycall_led::run_boot_blink(led_stop_rx).await;
-    }));
-
     let config_path = PathBuf::from(&args.config);
     if !config_path.exists() {
-        return Err(fail_startup(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "Configuration file not found: {}",
             args.config
-        )));
+        ));
     }
 
     // 3. Load configuration
-    let config = Config::load(&config_path)
-        .context("Failed to load configuration file")
-        .map_err(fail_startup)?;
+    let config = Config::load(&config_path).context("Failed to load configuration file")?;
+
+    let led_enabled = config.server.led_enabled;
+
+    let (led_stop_tx, led_stop_rx) = tokio::sync::mpsc::channel(1);
+    let mut boot_blink_handle = None;
+    if led_enabled {
+        boot_blink_handle = Some(tokio::spawn(async move {
+            bootycall_led::run_boot_blink(led_stop_rx).await;
+        }));
+    }
 
     // 4. Initialise extractor cache sync. Extraction can take minutes on
     //    large ISOs and is fully synchronous, so run it on a blocking pool
@@ -202,7 +205,7 @@ async fn main() -> Result<(), anyhow::Error> {
         *guard = new_config;
     })
     .context("Failed to start configuration file watcher")
-    .map_err(fail_startup)?;
+    .map_err(|e| fail_startup(e, led_enabled))?;
 
     // Check for systemd socket activation environment variables (informational)
     if std::env::var("LISTEN_FDS").is_ok() {
@@ -341,7 +344,7 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
 
-        return Err(fail_startup(err));
+        return Err(fail_startup(err, led_enabled));
     }
 
     // Stop the boot-blink task and confirm it has completed before spawning led_manager
@@ -357,9 +360,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Spawn regular LED manager task after boot blink stops
     let led_store = state_store.clone();
-    let mut led_manager_handle = Some(tokio::spawn(async move {
-        bootycall_led::run_led_manager(led_store, led_shutdown_rx).await;
-    }));
+    let mut led_manager_handle = None;
+    if led_enabled {
+        led_manager_handle = Some(tokio::spawn(async move {
+            bootycall_led::run_led_manager(led_store, led_shutdown_rx).await;
+        }));
+    }
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -545,8 +551,10 @@ async fn graceful_shutdown(
 /// reflects the failure before the process exits; `run_boot_blink` now also
 /// maps a dropped stop channel to white, so a racing blink tick can never
 /// overwrite this with blue.
-fn fail_startup(err: anyhow::Error) -> anyhow::Error {
-    bootycall_led::activate_white_led();
+fn fail_startup(err: anyhow::Error, led_enabled: bool) -> anyhow::Error {
+    if led_enabled {
+        bootycall_led::activate_white_led();
+    }
     err
 }
 

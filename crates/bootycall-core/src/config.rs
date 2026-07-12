@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 const CONFIG_DEBOUNCE_DURATION: std::time::Duration = std::time::Duration::from_millis(200);
 
 fn default_oled_enabled() -> bool {
-    true
+    false
+}
+
+fn default_led_enabled() -> bool {
+    false
 }
 
 fn default_oled_brightness() -> u8 {
@@ -60,6 +64,8 @@ pub struct ServerConfig {
     /// LUT; lower values dim the display (and reduce burn-in/power).
     #[serde(default = "default_oled_brightness")]
     pub oled_brightness: u8,
+    #[serde(default = "default_led_enabled")]
+    pub led_enabled: bool,
     /// Shared secret required on mutating dashboard endpoints
     /// (POST /api/override). When absent, mutating endpoints run
     /// unauthenticated — same behaviour as before P1-7. Populate this
@@ -719,6 +725,7 @@ hosts:
             default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
             oled_enabled: true,
             oled_brightness: 255,
+            led_enabled: false,
             api_token: None,
             max_artifact_bytes: None,
             advertised_host: None,

@@ -113,7 +113,8 @@ server:
   default_bootloader_amd64: "boot/x64/ipxe.efi"
   default_bootloader_arm64: "boot/arm64/ipxe.efi"
   default_bootloader_bios: "boot/x64/undionly.kpxe" # Legacy BIOS PXE (arch 0)
-  oled_enabled: true # Optional; set false to skip the OLED render task (default true)
+  oled_enabled: false # Optional; set true to run the OLED render task (default false)
+  led_enabled: false # Optional; set true to run the status LED manager task (default false)
   oled_brightness: 255 # Optional; OLED panel brightness 0-255 (default 255)
   api_token: "a-long-random-secret" # Optional; when set, gates the /api endpoints
   max_artifact_bytes: 1073741824 # Optional; per-artifact extraction cap in bytes (default unbounded)

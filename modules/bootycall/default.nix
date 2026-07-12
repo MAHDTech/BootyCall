@@ -96,6 +96,7 @@ let
         default_bootloader_bios = cfg.server.defaultBootloaderBios;
         oled_enabled = cfg.server.oledEnabled;
         oled_brightness = cfg.server.oledBrightness;
+        led_enabled = cfg.server.ledEnabled;
       }
       // lib.optionalAttrs (cfg.server.advertisedHost != null) {
         advertised_host = cfg.server.advertisedHost;
@@ -335,12 +336,23 @@ in
 
       oledEnabled = lib.mkOption {
         type = lib.types.bool;
-        default = true;
+        default = false;
         description = ''
           Whether the service spawns the OLED render task
           (`server.oled_enabled`). Set to false on hardware without the
           rackmount OLED panel. Note that driving the real panel additionally
           requires `hardware.enable` to relax the unit hardening.
+        '';
+      };
+
+      ledEnabled = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether the service spawns the status LED manager task
+          (`server.led_enabled`). Set to true on hardware with the status LED.
+          Note that driving the real LED additionally requires `hardware.enable`
+          to relax the unit hardening.
         '';
       };
 

@@ -33,6 +33,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["rt", "io"] }
 notify = "8.2.0"
 # `attributes` (a default feature, pinned explicitly) provides the
 # `#[tracing::instrument]` proc-macro used across the server crates.

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::error::HttpError;
 use bootycall_core::config::{Config, HostConfig, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
+use tokio_util::sync::CancellationToken;
 
 #[derive(RustEmbed)]
 #[folder = "src/assets/"]
@@ -1049,11 +1050,12 @@ async fn api_override_handler(
 /// Span layout: one process-lifetime `run_http_server{bind_addr}` span for
 /// the listener (axum's serve loop never returns); per-request context comes
 /// from the `#[tracing::instrument]` spans on the individual handlers.
-#[tracing::instrument(skip(config, state_store))]
+#[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_http_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
+    shutdown: CancellationToken,
 ) -> Result<(), HttpError> {
     // Initialise minijinja environment. A template that fails to compile (e.g.
     // after a bad edit to MENU_TEMPLATE/BOOT_TEMPLATE) surfaces as a clean
@@ -1104,6 +1106,9 @@ pub async fn run_http_server(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        shutdown.cancelled().await;
+    })
     .await?;
 
     Ok(())

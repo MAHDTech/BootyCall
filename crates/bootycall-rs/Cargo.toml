@@ -13,6 +13,7 @@ bootycall-http = { path = "../bootycall-http" }
 bootycall-oled = { path = "../bootycall-oled" }
 bootycall-led = { path = "../bootycall-led" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 bootycall-log = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -14,6 +14,7 @@ use crate::wire::{
     OP_RRQ, OP_WRQ, is_error_packet, make_data_packet, make_error_packet, make_oack_packet,
     parse_ack_packet,
 };
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, PartialEq)]
 struct RrqRequest {
@@ -649,24 +650,33 @@ fn wildcard_bind_addr(peer: &SocketAddr) -> &'static str {
 /// `run_tftp_server_with_limit{bind_addr}` span (a span per loop iteration
 /// would be meaningless for an accept loop); per-transfer context comes from
 /// the [`handle_tftp_transfer`] span on each spawned transfer task.
-#[tracing::instrument(skip(config, state_store))]
+#[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_tftp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
+    shutdown: CancellationToken,
 ) -> Result<(), TftpError> {
-    run_tftp_server_with_limit(bind_addr, config, state_store, MAX_CONCURRENT_TRANSFERS).await
+    run_tftp_server_with_limit(
+        bind_addr,
+        config,
+        state_store,
+        MAX_CONCURRENT_TRANSFERS,
+        shutdown,
+    )
+    .await
 }
 
 /// Like [`run_tftp_server`] but with an explicit concurrent-transfer bound so
 /// tests can drive the semaphore-rejection ("Server busy") path at a small
 /// limit instead of the production default of 128.
-#[tracing::instrument(skip(config, state_store))]
+#[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_tftp_server_with_limit(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
     max_concurrent_transfers: usize,
+    shutdown: CancellationToken,
 ) -> Result<(), TftpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
@@ -674,11 +684,19 @@ pub async fn run_tftp_server_with_limit(
 
     let mut buf = [0u8; 1500];
     loop {
-        let (len, src_addr) = match socket.recv_from(&mut buf).await {
-            Ok(res) => res,
-            Err(e) => {
-                error!("Failed to receive UDP packet on TFTP port: {:?}", e);
-                continue;
+        let (len, src_addr) = tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("TFTP server listener shutting down gracefully");
+                break;
+            }
+            res = socket.recv_from(&mut buf) => {
+                match res {
+                    Ok(val) => val,
+                    Err(e) => {
+                        error!("Failed to receive UDP packet on TFTP port: {:?}", e);
+                        continue;
+                    }
+                }
             }
         };
 
@@ -899,6 +917,21 @@ pub async fn run_tftp_server_with_limit(
             drop(permit);
         });
     }
+
+    if max_concurrent_transfers > 0 {
+        match transfer_slots
+            .acquire_many(max_concurrent_transfers as u32)
+            .await
+        {
+            Ok(_permits) => {
+                info!("All TFTP transfers completed, shutdown complete");
+            }
+            Err(e) => {
+                error!("Semaphore closed while draining TFTP transfers: {:?}", e);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

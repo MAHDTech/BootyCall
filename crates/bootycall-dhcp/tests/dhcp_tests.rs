@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_dhcp_server_redirection() {
@@ -50,9 +51,13 @@ async fn test_dhcp_server_redirection() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24011", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24011",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -171,9 +176,13 @@ async fn test_dhcp_server_ignores_non_pxe_client() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24021", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24021",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let client_socket = UdpSocket::bind("127.0.0.1:24022").await.unwrap();
@@ -237,9 +246,13 @@ async fn test_dhcp_server_handles_arm64_arch() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24031", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24031",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let client_socket = UdpSocket::bind("127.0.0.1:24032").await.unwrap();
@@ -322,9 +335,13 @@ async fn test_dhcp_arch0_serves_bios_bootloader() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24041", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24041",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let client_socket = UdpSocket::bind("127.0.0.1:24042").await.unwrap();
@@ -408,9 +425,13 @@ async fn test_dhcp_unsupported_arch_gets_no_response() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24061", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24061",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let client_socket = UdpSocket::bind("127.0.0.1:24062").await.unwrap();
@@ -483,9 +504,13 @@ async fn test_dhcp_ignores_release_message() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_dhcp::run_dhcp_server("127.0.0.1:24051", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_dhcp::run_dhcp_server(
+            "127.0.0.1:24051",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     let client_socket = UdpSocket::bind("127.0.0.1:24052").await.unwrap();

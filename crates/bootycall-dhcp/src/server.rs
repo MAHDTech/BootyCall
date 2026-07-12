@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use tokio::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 /// PXE client system architecture (DHCP Option 93 / RFC 5970) values we route
 /// on explicitly. `X64`/`BC` are matched via `dhcproto`'s named variants.
@@ -313,11 +314,12 @@ fn choose_reply_dest(
 /// context comes from [`respond_to_pxe_request`] instead — the loop itself
 /// carries one long-lived `run_dhcp_server{bind_addr}` span that groups every
 /// nested record under the DHCP subsystem.
-#[tracing::instrument(skip(config, state_store))]
+#[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_dhcp_server(
     bind_addr: &str,
     config: Arc<parking_lot::RwLock<Config>>,
     state_store: StateStore,
+    shutdown: CancellationToken,
 ) -> Result<(), DhcpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     socket.set_broadcast(true)?;
@@ -325,11 +327,19 @@ pub async fn run_dhcp_server(
 
     let mut buf = [0u8; 1500];
     loop {
-        let (len, src_addr) = match socket.recv_from(&mut buf).await {
-            Ok(res) => res,
-            Err(e) => {
-                error!("Failed to receive UDP packet: {:?}", e);
-                continue;
+        let (len, src_addr) = tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("Proxy DHCP server shutting down gracefully");
+                break;
+            }
+            res = socket.recv_from(&mut buf) => {
+                match res {
+                    Ok(val) => val,
+                    Err(e) => {
+                        error!("Failed to receive UDP packet: {:?}", e);
+                        continue;
+                    }
+                }
             }
         };
 
@@ -341,6 +351,7 @@ pub async fn run_dhcp_server(
         };
         respond_to_pxe_request(&socket, &config, &state_store, parsed, src_addr).await;
     }
+    Ok(())
 }
 
 /// Answer one validated PXE request: pick the bootloader, update the state

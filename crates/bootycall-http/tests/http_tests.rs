@@ -7,6 +7,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 fn parse_http_response(bytes: &[u8]) -> (String, Vec<(String, String)>, Vec<u8>) {
     let mut split_idx = 0;
@@ -103,9 +104,13 @@ async fn test_http_server_endpoints() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_http::run_http_server("127.0.0.1:26080", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_http::run_http_server(
+            "127.0.0.1:26080",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -278,8 +283,13 @@ async fn spawn_test_server(port: u16) -> (Arc<parking_lot::RwLock<Config>>, Stat
     let _leaked = Box::leak(Box::new(tmp_dir));
 
     tokio::spawn(async move {
-        let _ =
-            bootycall_http::run_http_server(&bind_addr, server_config_clone, server_store).await;
+        let _ = bootycall_http::run_http_server(
+            &bind_addr,
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -724,6 +734,7 @@ async fn test_static_served_from_configured_dir() {
             &format!("127.0.0.1:{port}"),
             server_config_clone,
             server_store,
+            CancellationToken::new(),
         )
         .await;
     });
@@ -1243,6 +1254,7 @@ async fn test_http_range_requests() {
             &format!("127.0.0.1:{port}"),
             server_config_clone,
             server_store,
+            CancellationToken::new(),
         )
         .await;
     });
@@ -1479,6 +1491,7 @@ async fn test_wallpaper_resolution_matching() {
             &format!("127.0.0.1:{port}"),
             server_config_clone,
             server_store,
+            CancellationToken::new(),
         )
         .await;
     });
@@ -1553,6 +1566,7 @@ async fn test_wallpaper_filename_sanitization() {
             &format!("127.0.0.1:{port}"),
             server_config_clone,
             server_store,
+            CancellationToken::new(),
         )
         .await;
     });

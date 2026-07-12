@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use bootycall_core::config::{Config, watch_config};
 use bootycall_core::state::StateStore;
@@ -203,33 +204,38 @@ async fn main() -> Result<(), anyhow::Error> {
     //    (bind failure, socket error) propagates through the JoinHandle and
     //    turns into a non-zero exit below — systemd Restart=on-failure then
     //    kicks the unit back to life instead of silently succeeding.
+    let shutdown_token = CancellationToken::new();
+
     let dhcp_config = shared_config.clone();
     let dhcp_store = state_store.clone();
+    let dhcp_token = shutdown_token.clone();
     let mut dhcp_handle = tokio::spawn(async move {
-        bootycall_dhcp::run_dhcp_server(&dhcp_bind, dhcp_config, dhcp_store)
+        bootycall_dhcp::run_dhcp_server(&dhcp_bind, dhcp_config, dhcp_store, dhcp_token)
             .await
             .map_err(anyhow::Error::from)
     });
 
     let tftp_config = shared_config.clone();
     let tftp_store = state_store.clone();
+    let tftp_token = shutdown_token.clone();
     let mut tftp_handle = tokio::spawn(async move {
-        bootycall_tftp::run_tftp_server(&tftp_bind, tftp_config, tftp_store)
+        bootycall_tftp::run_tftp_server(&tftp_bind, tftp_config, tftp_store, tftp_token)
             .await
             .map_err(anyhow::Error::from)
     });
 
     let http_config = shared_config.clone();
     let http_store = state_store.clone();
+    let http_token = shutdown_token.clone();
     let mut http_handle = tokio::spawn(async move {
-        bootycall_http::run_http_server(&http_bind, http_config, http_store)
+        bootycall_http::run_http_server(&http_bind, http_config, http_store, http_token)
             .await
             .map_err(anyhow::Error::from)
     });
 
     // 9. Clean up stale hosts periodically
     let cleaner_store = state_store.clone();
-    let cleaner_handle = tokio::spawn(async move {
+    let mut cleaner_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(
                 STALE_HOST_SWEEP_INTERVAL_SECS,
@@ -304,10 +310,14 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Some(Err(err)) = early_exit {
         // Shutdown OLED manager if it was started
         graceful_shutdown(
+            &shutdown_token,
             &led_shutdown_tx,
             &oled_shutdown_tx,
             None,
             oled_manager_handle.take(),
+            Some(dhcp_handle),
+            Some(tftp_handle),
+            Some(http_handle),
         )
         .await;
 
@@ -351,13 +361,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let outcome: anyhow::Result<()> = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutdown signal received (SIGINT). Cleaning up services...");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Ok(())
         }
         _ = async {
@@ -372,61 +375,26 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         } => {
             info!("Shutdown signal received (SIGTERM). Cleaning up services...");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Ok(())
         }
-        res = dhcp_handle => {
+        res = &mut dhcp_handle => {
             let err = join_result_to_error("Proxy DHCP", res);
             error!("Proxy DHCP Server exited: {err:?}");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
-        res = tftp_handle => {
+        res = &mut tftp_handle => {
             let err = join_result_to_error("TFTP", res);
             error!("TFTP Server exited: {err:?}");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
-        res = http_handle => {
+        res = &mut http_handle => {
             let err = join_result_to_error("HTTP", res);
             error!("HTTP Server exited: {err:?}");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
-        _ = cleaner_handle => {
+        _ = &mut cleaner_handle => {
             let err = anyhow::anyhow!("Host state cleaner task exited unexpectedly");
             error!("{err}");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
         res = async {
@@ -441,14 +409,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 Err(join_err) => anyhow::anyhow!("LED manager task panicked or failed: {:?}", join_err),
             };
             error!("{err}");
-            let active_led_handle = led_manager_handle.take();
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                active_led_handle,
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
         res = async {
@@ -463,16 +423,21 @@ async fn main() -> Result<(), anyhow::Error> {
                 Err(join_err) => anyhow::anyhow!("OLED manager task panicked or failed: {:?}", join_err),
             };
             error!("{err}");
-            graceful_shutdown(
-                &led_shutdown_tx,
-                &oled_shutdown_tx,
-                led_manager_handle.take(),
-                oled_manager_handle.take(),
-            )
-            .await;
             Err(err)
         }
     };
+
+    graceful_shutdown(
+        &shutdown_token,
+        &led_shutdown_tx,
+        &oled_shutdown_tx,
+        led_manager_handle.take(),
+        oled_manager_handle.take(),
+        Some(dhcp_handle),
+        Some(tftp_handle),
+        Some(http_handle),
+    )
+    .await;
 
     info!("BootyCall shutdown complete.");
     outcome
@@ -484,14 +449,21 @@ async fn main() -> Result<(), anyhow::Error> {
 /// Shared by every shutdown path — the SIGINT/SIGTERM arms and the fatal
 /// server-exit arms (issue 007) — so hardware is always blanked before the
 /// process exits, whether that exit is clean or fatal.
+#[allow(clippy::too_many_arguments)]
 async fn graceful_shutdown(
+    shutdown_token: &CancellationToken,
     led_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
     oled_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
     led_manager_handle: Option<tokio::task::JoinHandle<()>>,
     oled_manager_handle: Option<tokio::task::JoinHandle<()>>,
+    dhcp_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    tftp_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    http_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
 ) {
     let _ = led_shutdown_tx.send(()).await;
     let _ = oled_shutdown_tx.send(()).await;
+    shutdown_token.cancel();
+
     if let Some(handle) = led_manager_handle {
         match handle.await {
             Ok(()) => {}
@@ -509,6 +481,54 @@ async fn graceful_shutdown(
             }
             Err(_) => {
                 warn!("OLED manager shutdown timed out");
+            }
+        }
+    }
+
+    if let Some(handle) = dhcp_handle {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        match timed_out {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => {
+                error!("Proxy DHCP server task exited with error: {:?}", e);
+            }
+            Ok(Err(e)) => {
+                error!("Proxy DHCP server task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("Proxy DHCP server shutdown timed out");
+            }
+        }
+    }
+
+    if let Some(handle) = tftp_handle {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        match timed_out {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => {
+                error!("TFTP server task exited with error: {:?}", e);
+            }
+            Ok(Err(e)) => {
+                error!("TFTP server task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("TFTP server shutdown timed out");
+            }
+        }
+    }
+
+    if let Some(handle) = http_handle {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        match timed_out {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => {
+                error!("HTTP server task exited with error: {:?}", e);
+            }
+            Ok(Err(e)) => {
+                error!("HTTP server task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("HTTP server shutdown timed out");
             }
         }
     }

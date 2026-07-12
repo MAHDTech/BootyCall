@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 // Thin adapters over the shared `bootycall_tftp::wire` helpers, so the tests
 // no longer keep a parallel copy of the packet layout (issue 027).
@@ -106,9 +107,13 @@ async fn test_tftp_server_negotiation_and_transfer() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25069", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25069",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -223,9 +228,13 @@ async fn test_tftp_file_not_found() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25074", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25074",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -295,7 +304,13 @@ async fn assert_tftp_traversal_rejected(bind_port: u16, client_port: u16, reques
     let server_config_clone = shared_config.clone();
     let bind = format!("127.0.0.1:{bind_port}");
     tokio::spawn(async move {
-        let _ = bootycall_tftp::run_tftp_server(&bind, server_config_clone, server_store).await;
+        let _ = bootycall_tftp::run_tftp_server(
+            &bind,
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -390,9 +405,13 @@ async fn test_tftp_transfer_non_multiple_blksize_intact() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25106", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25106",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -513,9 +532,13 @@ async fn test_tftp_timeout_marks_host_failed() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25120", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25120",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -612,6 +635,7 @@ async fn test_tftp_server_busy_at_injected_limit() {
             server_config_clone,
             server_store,
             1,
+            CancellationToken::new(),
         )
         .await;
     });
@@ -691,6 +715,7 @@ async fn test_tftp_server_busy_marks_known_host_failed() {
             server_config_clone,
             server_store,
             1,
+            CancellationToken::new(),
         )
         .await;
     });
@@ -794,8 +819,13 @@ async fn test_tftp_server_ipv6_negotiation_and_transfer() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("[::]:25180", server_config_clone, server_store).await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "[::]:25180",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -921,9 +951,13 @@ async fn test_tftp_bios_default_redirected_to_override() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25190", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25190",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1000,9 +1034,13 @@ async fn test_tftp_wrq_rejected_with_error() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25140", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25140",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1112,9 +1150,13 @@ async fn test_tftp_windowsize_multi_window_transfer() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25150", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25150",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1167,9 +1209,13 @@ async fn test_tftp_windowsize_recovers_lost_block() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25160", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25160",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1227,9 +1273,13 @@ async fn test_tftp_non_utf8_option_ignored_transfer_proceeds() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25200", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25200",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1303,9 +1353,13 @@ async fn test_tftp_malformed_rrq_draws_error_code_4() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25210", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25210",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1352,9 +1406,13 @@ async fn test_tftp_blksize_negotiation_clamps_downward() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25220", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25220",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     // Wait for server to bind
@@ -1431,9 +1489,13 @@ async fn test_tftp_blksize_negotiation_defaults_to_512() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25230", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25230",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1505,9 +1567,13 @@ async fn test_tftp_windowsize_5_packet_loss_recovery() {
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
     tokio::spawn(async move {
-        let _ =
-            bootycall_tftp::run_tftp_server("127.0.0.1:25240", server_config_clone, server_store)
-                .await;
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25240",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;

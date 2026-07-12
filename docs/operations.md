@@ -71,6 +71,36 @@ power mid-copy) and left a truncated `kernel`/`initrd` that still looks
 Clearing the cache is always safe: anything removed is re-derived from the
 source image on the next sync.
 
+## Secure Deployment Defaults & Secrets
+
+By default, BootyCall implements secure defaults:
+
+- `services.bootycall.server.httpBind` defaults to `127.0.0.1:8080`, binding to loopback only.
+- If `services.bootycall.openFirewall` is enabled and `httpBind` is set to a non-loopback address, you must define either `apiToken` or `apiTokenFile` to authenticate the mutating endpoints. An assertion prevents exposing the API unauthenticated on the network.
+
+### API Authentication with apiTokenFile
+
+To keep credentials out of the world-readable `/nix/store`, use `services.bootycall.server.apiTokenFile` to specify a path to the secret token:
+
+```nix
+services.bootycall = {
+  enable = true;
+  openFirewall = true;
+  server.httpBind = "0.0.0.0:8080";
+  server.apiTokenFile = "/run/secrets/bootycall-api-token";
+};
+```
+
+At service start, the token is dynamically injected into a temporary configuration file `/run/bootycall/bootycall.yaml` which is restricted to the service user (permissions `0600` within `0700` directory).
+
+### Preventing Denial of Service (maxArtifactBytes)
+
+To guard the appliance against disk space exhaustion from huge or malformed extraction targets, set the maximum allowed size for any single extracted artifact:
+
+```nix
+services.bootycall.server.maxArtifactBytes = 1073741824; # 1 GiB limit
+```
+
 ## Hardware: the OLED, status LED, and `udev`
 
 The OLED display and status LED are off by default. The hardened unit runs with
@@ -168,6 +198,6 @@ journalctl -u bootycall -o cat | jq -c 'select(.target == "bootycall::events")'
 ```
 
 The most recent events are also available over HTTP at `GET /api/logs` (gated by
-`server.apiToken` when one is configured). For the full event schema, field
+`server.apiToken` or `server.apiTokenFile` when configured). For the full event schema, field
 reference, and how to ship these lines into ClickHouse, see
 [observability.md](observability.md).

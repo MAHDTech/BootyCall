@@ -120,6 +120,9 @@ in
       cargo-check = {
         enable = true;
         package = config.languages.rust.toolchainPackage;
+        args = [
+          "--all-features"
+        ];
       };
       clippy = {
         enable = true;

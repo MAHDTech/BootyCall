@@ -140,6 +140,7 @@ rsplit
 rustc
 rustsec
 rusttype
+Rustup
 SARIF
 scanline
 secretspec

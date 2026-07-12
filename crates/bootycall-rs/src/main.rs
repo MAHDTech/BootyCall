@@ -152,9 +152,9 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("BootyCall starting up...");
 
     let (led_stop_tx, led_stop_rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
+    let mut boot_blink_handle = Some(tokio::spawn(async move {
         bootycall_led::run_boot_blink(led_stop_rx).await;
-    });
+    }));
 
     let config_path = PathBuf::from(&args.config);
     if !config_path.exists() {
@@ -227,7 +227,7 @@ async fn main() -> Result<(), anyhow::Error> {
     //    kicks the unit back to life instead of silently succeeding.
     let dhcp_config = shared_config.clone();
     let dhcp_store = state_store.clone();
-    let dhcp_handle = tokio::spawn(async move {
+    let mut dhcp_handle = tokio::spawn(async move {
         bootycall_dhcp::run_dhcp_server(&dhcp_bind, dhcp_config, dhcp_store)
             .await
             .map_err(anyhow::Error::from)
@@ -235,7 +235,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let tftp_config = shared_config.clone();
     let tftp_store = state_store.clone();
-    let tftp_handle = tokio::spawn(async move {
+    let mut tftp_handle = tokio::spawn(async move {
         bootycall_tftp::run_tftp_server(&tftp_bind, tftp_config, tftp_store)
             .await
             .map_err(anyhow::Error::from)
@@ -243,7 +243,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let http_config = shared_config.clone();
     let http_store = state_store.clone();
-    let http_handle = tokio::spawn(async move {
+    let mut http_handle = tokio::spawn(async move {
         bootycall_http::run_http_server(&http_bind, http_config, http_store)
             .await
             .map_err(anyhow::Error::from)
@@ -281,15 +281,85 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // 10. Wait for interrupt or termination signal
     // Keep boot blink running briefly so the transition pattern is visible.
-    tokio::time::sleep(tokio::time::Duration::from_secs(BOOT_BLINK_MIN_SECS)).await;
+    let (led_shutdown_tx, led_shutdown_rx) = tokio::sync::mpsc::channel(1);
+
+    let boot_blink_timeout =
+        tokio::time::sleep(tokio::time::Duration::from_secs(BOOT_BLINK_MIN_SECS));
+    tokio::pin!(boot_blink_timeout);
+
+    let early_exit: Option<anyhow::Result<()>> = tokio::select! {
+        _ = &mut boot_blink_timeout => {
+            None
+        }
+        res = &mut dhcp_handle => {
+            let err = join_result_to_error("Proxy DHCP", res);
+            error!("Proxy DHCP Server exited early: {err:?}");
+            Some(Err(err))
+        }
+        res = &mut tftp_handle => {
+            let err = join_result_to_error("TFTP", res);
+            error!("TFTP Server exited early: {err:?}");
+            Some(Err(err))
+        }
+        res = &mut http_handle => {
+            let err = join_result_to_error("HTTP", res);
+            error!("HTTP Server exited early: {err:?}");
+            Some(Err(err))
+        }
+        res = async {
+            if let Some(ref mut h) = boot_blink_handle {
+                h.await
+            } else {
+                std::future::pending().await
+            }
+        } => {
+            boot_blink_handle = None;
+            let err = match res {
+                Ok(()) => anyhow::anyhow!("Boot blink task exited prematurely"),
+                Err(join_err) => anyhow::anyhow!("Boot blink task panicked or failed: {:?}", join_err),
+            };
+            error!("Boot blink task exited early: {err:?}");
+            Some(Err(err))
+        }
+    };
+
+    if let Some(Err(err)) = early_exit {
+        // Shutdown OLED manager if it was started
+        graceful_shutdown(
+            &led_shutdown_tx,
+            &oled_shutdown_tx,
+            None,
+            oled_manager_handle.take(),
+        )
+        .await;
+
+        // If boot_blink_handle is still running, signal it to stop and await it
+        if let Some(handle) = boot_blink_handle.take() {
+            let _ = led_stop_tx.send(()).await;
+            if let Err(e) = handle.await {
+                error!("Boot blink task join error on early exit: {:?}", e);
+            }
+        }
+
+        return Err(fail_startup(err));
+    }
+
+    // Stop the boot-blink task and confirm it has completed before spawning led_manager
     let _ = led_stop_tx.send(()).await;
+    if let Some(handle) = boot_blink_handle.take() {
+        match handle.await {
+            Ok(()) => {}
+            Err(e) => {
+                error!("Boot-blink task join error/panic: {:?}", e);
+            }
+        }
+    }
 
     // Spawn regular LED manager task after boot blink stops
     let led_store = state_store.clone();
-    let (led_shutdown_tx, led_shutdown_rx) = tokio::sync::mpsc::channel(1);
-    let led_manager_handle = tokio::spawn(async move {
+    let mut led_manager_handle = Some(tokio::spawn(async move {
         bootycall_led::run_led_manager(led_store, led_shutdown_rx).await;
-    });
+    }));
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -303,8 +373,8 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Ok(())
@@ -324,8 +394,8 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Ok(())
@@ -336,8 +406,8 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Err(err)
@@ -348,8 +418,8 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Err(err)
@@ -360,8 +430,8 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Err(err)
@@ -372,8 +442,51 @@ async fn main() -> Result<(), anyhow::Error> {
             graceful_shutdown(
                 &led_shutdown_tx,
                 &oled_shutdown_tx,
-                led_manager_handle,
-                oled_manager_handle,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
+            )
+            .await;
+            Err(err)
+        }
+        res = async {
+            if let Some(ref mut h) = led_manager_handle {
+                h.await
+            } else {
+                std::future::pending().await
+            }
+        } => {
+            let err = match res {
+                Ok(()) => anyhow::anyhow!("LED manager task exited prematurely"),
+                Err(join_err) => anyhow::anyhow!("LED manager task panicked or failed: {:?}", join_err),
+            };
+            error!("{err}");
+            let active_led_handle = led_manager_handle.take();
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                active_led_handle,
+                oled_manager_handle.take(),
+            )
+            .await;
+            Err(err)
+        }
+        res = async {
+            if let Some(ref mut h) = oled_manager_handle {
+                h.await
+            } else {
+                std::future::pending().await
+            }
+        } => {
+            let err = match res {
+                Ok(()) => anyhow::anyhow!("OLED manager task exited prematurely"),
+                Err(join_err) => anyhow::anyhow!("OLED manager task panicked or failed: {:?}", join_err),
+            };
+            error!("{err}");
+            graceful_shutdown(
+                &led_shutdown_tx,
+                &oled_shutdown_tx,
+                led_manager_handle.take(),
+                oled_manager_handle.take(),
             )
             .await;
             Err(err)
@@ -393,18 +506,29 @@ async fn main() -> Result<(), anyhow::Error> {
 async fn graceful_shutdown(
     led_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
     oled_shutdown_tx: &tokio::sync::mpsc::Sender<()>,
-    led_manager_handle: tokio::task::JoinHandle<()>,
+    led_manager_handle: Option<tokio::task::JoinHandle<()>>,
     oled_manager_handle: Option<tokio::task::JoinHandle<()>>,
 ) {
     let _ = led_shutdown_tx.send(()).await;
     let _ = oled_shutdown_tx.send(()).await;
-    let _ = led_manager_handle.await;
+    if let Some(handle) = led_manager_handle {
+        match handle.await {
+            Ok(()) => {}
+            Err(e) => {
+                error!("LED manager task panicked or had join error: {:?}", e);
+            }
+        }
+    }
     if let Some(handle) = oled_manager_handle {
-        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(6), handle)
-            .await
-            .is_err();
-        if timed_out {
-            warn!("OLED manager shutdown timed out");
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(6), handle).await;
+        match timed_out {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("OLED manager task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("OLED manager shutdown timed out");
+            }
         }
     }
 }

@@ -325,8 +325,22 @@ async fn handle_tftp_transfer(
         // receive that isn't a window-advancing ACK (timeout, old/dup ACK, or
         // garbage) counts against the retry budget so a broken/malicious client
         // cannot wedge us in a busy loop.
-        if retries >= retry_policy.max_retries || std::time::Instant::now() >= retry_policy.deadline
-        {
+        //
+        // Mitigation for optionless RRQ amplification/reflection attack (B5):
+        // If the OACK handshake was skipped (meaning options list was empty),
+        // we have not yet established that the client's source IP is not spoofed.
+        // To prevent amplification, we limit the retransmissions of the first block
+        // (before any ACK from the client is received, i.e., base == 1) to at most
+        // 1 retry instead of the standard max_retries (5). Once any ACK is received
+        // (base > 1), the client's address is verified to be responsive, and we
+        // can use the full retry budget.
+        let max_allowed_retries = if options.is_empty() && base == 1 {
+            1
+        } else {
+            retry_policy.max_retries
+        };
+
+        if retries >= max_allowed_retries || std::time::Instant::now() >= retry_policy.deadline {
             error!(
                 "TFTP transfer to {} timed out waiting for ACK (base block {})",
                 client_addr, base
@@ -790,16 +804,8 @@ pub async fn run_tftp_server_with_limit(
                     "Rejected TFTP path traversal request: {} from {}",
                     filename, src_addr
                 );
-                let transfer_socket = match UdpSocket::bind(wildcard_bind_addr(&src_addr)).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to bind transfer socket: {:?}", e);
-                        continue;
-                    }
-                };
-                let _ = transfer_socket.connect(src_addr).await;
                 let err_pkt = make_error_packet(2, "Access violation (path traversal)");
-                let _ = transfer_socket.send(&err_pkt).await;
+                let _ = socket.send_to(&err_pkt, src_addr).await;
                 continue;
             }
         };
@@ -817,10 +823,32 @@ pub async fn run_tftp_server_with_limit(
             );
         }
 
-        // From here on the host is already marked `Booting`, so every setup
-        // failure path must go through `mark_tftp_failed` — otherwise the
-        // host is left in `Booting` forever and the dashboard/status API
-        // misreport an aborted boot as still in progress.
+        // Bound concurrent transfers via a semaphore permit held for the
+        // lifetime of the spawned task. A flood of RRQs then fails fast
+        // (client sees a TFTP ERROR "Server busy") instead of exhausting
+        // sockets and file descriptors.
+        // Acquire the permit *first* before binding/connecting the ephemeral transfer socket.
+        let permit = match transfer_slots.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(
+                    "Refusing TFTP transfer to {}: {} concurrent transfers already in flight",
+                    src_addr, max_concurrent_transfers
+                );
+                let err = make_error_packet(0, "Server busy");
+                let _ = socket.send_to(&err, src_addr).await;
+                mark_tftp_failed(
+                    &state_store,
+                    &mac_addr,
+                    &file_path,
+                    "transfer rejected: server busy",
+                );
+                continue;
+            }
+        };
+
+        // From here on the host is already marked `Booting`, and the permit is held,
+        // so every setup failure path must go through `mark_tftp_failed`.
         let transfer_socket = match UdpSocket::bind(wildcard_bind_addr(&src_addr)).await {
             Ok(s) => s,
             Err(e) => {
@@ -851,29 +879,6 @@ pub async fn run_tftp_server_with_limit(
             );
             continue;
         }
-
-        // Bound concurrent transfers via a semaphore permit held for the
-        // lifetime of the spawned task. A flood of RRQs then fails fast
-        // (client sees a TFTP ERROR "Server busy") instead of exhausting
-        // sockets and file descriptors.
-        let permit = match transfer_slots.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                warn!(
-                    "Refusing TFTP transfer to {}: {} concurrent transfers already in flight",
-                    src_addr, max_concurrent_transfers
-                );
-                let err = make_error_packet(0, "Server busy");
-                let _ = transfer_socket.send(&err).await;
-                mark_tftp_failed(
-                    &state_store,
-                    &mac_addr,
-                    &file_path,
-                    "transfer rejected: server busy",
-                );
-                continue;
-            }
-        };
 
         let transfer_state_store = state_store.clone();
         tokio::spawn(async move {

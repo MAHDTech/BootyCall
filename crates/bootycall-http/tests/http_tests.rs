@@ -1396,7 +1396,7 @@ async fn test_http_range_requests() {
 #[tokio::test]
 async fn test_wallpaper_and_menu_endpoints() {
     let port: u16 = 26200;
-    let (config, _state_store) = spawn_test_server(port).await;
+    let (_config, _state_store) = spawn_test_server(port).await;
 
     // 1. GET /dynamic/wallpaper.ipxe (Default/Fallback resolution)
     {
@@ -1506,4 +1506,97 @@ async fn test_wallpaper_resolution_matching() {
             body_str.contains("--picture http://127.0.0.1:26201/static/wallpapers/fallback.png")
         );
     }
+}
+#[tokio::test]
+async fn test_wallpaper_filename_sanitization() {
+    let tmp = tempdir().unwrap();
+    let static_dir = tmp.path().join("assets");
+    let wallpapers_dir = static_dir.join("wallpapers");
+    fs::create_dir_all(&wallpapers_dir).unwrap();
+
+    // Create wallpapers: one with space, one with newline, one valid
+    fs::write(wallpapers_dir.join("bad name.png"), b"PNG").unwrap();
+    fs::write(wallpapers_dir.join("bad\nnewline.png"), b"PNG").unwrap();
+    fs::write(wallpapers_dir.join("valid.png"), b"PNG").unwrap();
+
+    let port: u16 = 26202;
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: static_dir.clone(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let _leaked = Box::leak(Box::new(tmp));
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Check wallpaper script
+    let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe").await;
+    assert!(status.contains("200 OK"));
+    let body_str = String::from_utf8(body).unwrap();
+
+    // "valid.png" must be matched and served, the others must be skipped
+    assert!(
+        body_str.contains(
+            "console --x 1024 --y 768 --picture http://127.0.0.1:26202/static/wallpapers/valid.png"
+        ),
+        "Expected valid.png, got: {body_str}"
+    );
+    assert!(!body_str.contains("bad name.png"));
+    assert!(!body_str.contains("bad\nnewline.png"));
+}
+
+#[tokio::test]
+async fn test_secure_default_host_header_no_reflection() {
+    let port: u16 = 26203;
+    let (config, _state_store) = spawn_test_server(port).await;
+
+    // Ensure that by default allowed_hosts is empty and advertised_host is None
+    {
+        let guard = config.read();
+        assert!(guard.server.allowed_hosts.is_empty());
+        assert!(guard.server.advertised_host.is_none());
+    }
+
+    // A request with a crafted Host header must not have it reflected
+    let (status, body) =
+        http_get_with_host(port, "/poll/aa-bb-cc-dd-ee-ff", "attacker.example:9999").await;
+    assert!(status.contains("200 OK"));
+    assert!(
+        !body.contains("attacker.example"),
+        "Crafted host reflected: {body}"
+    );
+
+    // It should fall back to local binding address
+    assert!(
+        body.contains("127.0.0.1:26203"),
+        "Should use local bind fallback: {body}"
+    );
 }

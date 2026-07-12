@@ -383,7 +383,20 @@ fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
     let host_hdr = headers.get(header::HOST).and_then(|h| h.to_str().ok());
 
     if server.allowed_hosts.is_empty() {
-        return host_hdr.unwrap_or("localhost:8080").to_string();
+        let (host, port) = server
+            .http_bind
+            .rsplit_once(':')
+            .unwrap_or(("localhost", "8080"));
+        let host = if host == "0.0.0.0" || host == "[::]" || host == "::" || host.is_empty() {
+            "localhost"
+        } else {
+            host
+        };
+        return if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
     }
 
     if let Some(hdr) = host_hdr {
@@ -723,6 +736,12 @@ async fn collect_wallpaper_candidates(dir: &Path) -> Vec<String> {
             match entries.next_entry().await {
                 Ok(Some(entry)) => {
                     let file_name = entry.file_name().to_string_lossy().to_string();
+                    if file_name
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace())
+                    {
+                        continue;
+                    }
                     let lower = file_name.to_lowercase();
                     if lower.ends_with(".png")
                         || lower.ends_with(".jpg")
@@ -1314,11 +1333,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_reflection_only_without_advertised_or_allowlist() {
+    fn secure_default_without_advertised_or_allowlist() {
         let config = test_config(vec![]);
         let resolved =
             advertised_host_port(&config.server, &headers_with_host("anything.example:1234"));
-        assert_eq!(resolved, "anything.example:1234");
+        assert_eq!(resolved, "localhost:8080");
 
         let resolved = advertised_host_port(&config.server, &HeaderMap::new());
         assert_eq!(resolved, "localhost:8080");

@@ -23,6 +23,29 @@ function formatTime(timestampString) {
     }
 }
 
+// Helper to HTML-escape values
+function escapeHtml(str) {
+    if (str === null || str === undefined) {
+        return ""
+    }
+    return String(str).replace(/[&<>"']/g, function (m) {
+        switch (m) {
+            case "&":
+                return "&amp;"
+            case "<":
+                return "&lt;"
+            case ">":
+                return "&gt;"
+            case '"':
+                return "&quot;"
+            case "'":
+                return "&#39;"
+            default:
+                return m
+        }
+    })
+}
+
 // Fetch and update status
 async function updateStatus() {
     try {
@@ -64,13 +87,13 @@ async function updateStatus() {
 
         let html = ""
         hosts.forEach((host) => {
-            const mac = host.mac
-            const name = host.name || "Unrecognised Host"
-            const ip = host.client_ip || "No Lease IP"
-            const arch = host.architecture || "Unknown"
-            const status = (host.status || "polling").toLowerCase()
+            const mac = escapeHtml(host.mac)
+            const name = escapeHtml(host.name || "Unrecognised Host")
+            const ip = escapeHtml(host.client_ip || "No Lease IP")
+            const arch = escapeHtml(host.architecture || "Unknown")
+            const status = escapeHtml((host.status || "polling").toLowerCase())
             const target = host.assigned_target
-                ? ` &rarr; ${host.assigned_target}`
+                ? ` &rarr; ${escapeHtml(host.assigned_target)}`
                 : ""
 
             let statusClass = "polling"
@@ -123,12 +146,12 @@ async function updateLogs() {
         // Let's reverse them so the latest logs are right at the top!
         const reversedLogs = [...logs].reverse()
         reversedLogs.forEach((entry) => {
-            const time = formatTime(entry.timestamp)
-            const level = (entry.level || "info").toLowerCase()
+            const time = escapeHtml(formatTime(entry.timestamp))
+            const level = escapeHtml((entry.level || "info").toLowerCase())
             const mac = entry.mac
-                ? `<span class="log-mac">[${entry.mac}]</span>`
+                ? `<span class="log-mac">[${escapeHtml(entry.mac)}]</span>`
                 : ""
-            const msg = entry.message
+            const msg = escapeHtml(entry.message || "")
 
             html += `
                 <div class="log-entry ${level}">

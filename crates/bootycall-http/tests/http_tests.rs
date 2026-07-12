@@ -1085,3 +1085,107 @@ async fn test_poll_cache_not_ready_returns_retry_script() {
     let state2 = state_store.get_host("aa:bb:cc:dd:ee:ff").unwrap();
     assert_eq!(state2.status, HostStatus::Booting);
 }
+#[tokio::test]
+async fn test_ui_security_headers() {
+    let port: u16 = 26115;
+    let (_config, _state_store) = spawn_test_server(port).await;
+
+    // Test GET /
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                    port
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (_, headers, _) = parse_http_response(&response);
+
+        let csp = headers
+            .iter()
+            .find(|(k, _)| k == "content-security-policy")
+            .map(|(_, v)| v.as_str());
+        let nosniff = headers
+            .iter()
+            .find(|(k, _)| k == "x-content-type-options")
+            .map(|(_, v)| v.as_str());
+        let xframe = headers
+            .iter()
+            .find(|(k, _)| k == "x-frame-options")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(csp, Some("default-src 'self'"));
+        assert_eq!(nosniff, Some("nosniff"));
+        assert_eq!(xframe, Some("DENY"));
+    }
+
+    // Test GET /ui/index.html
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!("GET /ui/index.html HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port)
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (_, headers, _) = parse_http_response(&response);
+
+        let csp = headers
+            .iter()
+            .find(|(k, _)| k == "content-security-policy")
+            .map(|(_, v)| v.as_str());
+        let nosniff = headers
+            .iter()
+            .find(|(k, _)| k == "x-content-type-options")
+            .map(|(_, v)| v.as_str());
+        let xframe = headers
+            .iter()
+            .find(|(k, _)| k == "x-frame-options")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(csp, Some("default-src 'self'"));
+        assert_eq!(nosniff, Some("nosniff"));
+        assert_eq!(xframe, Some("DENY"));
+    }
+
+    // Test GET /start (should NOT have security headers, since it is not dashboard/UI response)
+    {
+        let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET /start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                    port
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let (_, headers, _) = parse_http_response(&response);
+
+        let csp = headers.iter().find(|(k, _)| k == "content-security-policy");
+        let nosniff = headers.iter().find(|(k, _)| k == "x-content-type-options");
+        let xframe = headers.iter().find(|(k, _)| k == "x-frame-options");
+
+        assert!(csp.is_none());
+        assert!(nosniff.is_none());
+        assert!(xframe.is_none());
+    }
+}

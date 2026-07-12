@@ -605,6 +605,7 @@ jobs:
   status:
     name: CI Status
     needs:
+      - setup-environment
       - validate-pr
       - ci-version
       - ci-commit-msg
@@ -659,6 +660,7 @@ jobs:
             if [ "${{ github.event_name }}" == "pull_request" ]; then
               echo "| PR Title | $(status_emoji '${{ needs.validate-pr.result }}') ${{ needs.validate-pr.result }} |"
             fi
+            echo "| Setup Environment | $(status_emoji '${{ needs.setup-environment.result }}') ${{ needs.setup-environment.result }} |"
             echo "| Version Check | $(status_emoji '${{ needs.ci-version.result }}') ${{ needs.ci-version.result }} |"
             echo "| Commit Messages | $(status_emoji '${{ needs.ci-commit-msg.result }}') ${{ needs.ci-commit-msg.result }} |"
             echo "| Devenv Test | $(status_emoji '${{ needs.ci-devenv-test.result }}') ${{ needs.ci-devenv-test.result }} |"
@@ -676,11 +678,52 @@ jobs:
       - id: check_failures
         name: Check for Failures
         run: |
-          ALL_JOBS="${{ needs.validate-pr.result }},${{ needs.ci-version.result }},${{ needs.ci-commit-msg.result }},${{ needs.ci-devenv-test.result }},${{ needs.ci-cargo-test.result }},${{ needs.ci-cargo-clippy.result }},${{ needs.ci-cargo-fmt.result }},${{ needs.ci-cargo-machete.result }},${{ needs.ci-cargo-deny.result }},${{ needs.ci-flake-check.result }},${{ needs.ci-statix.result }},${{ needs.ci-build-assets.result }},${{ needs.ci-nix-build-bootycall.result }}"
-          if echo "${ALL_JOBS}" | grep -qE "(failure|cancelled)"; then
-            echo "::error::One or more CI jobs failed"
+          # 1. Explicitly fail if setup-environment is not success
+          if [ "${{ needs.setup-environment.result }}" != "success" ]; then
+            echo "::error::setup-environment job did not succeed (result: ${{ needs.setup-environment.result }})"
             exit 1
           fi
+
+          # 2. Check validate-pr based on trigger context
+          VALIDATE_PR_RESULT="${{ needs.validate-pr.result }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "$VALIDATE_PR_RESULT" != "success" ]; then
+              echo "::error::validate-pr job is expected to succeed on pull requests, but result is: $VALIDATE_PR_RESULT"
+              exit 1
+            fi
+          else
+            # On non-pull-requests, validate-pr should be skipped or success (though usually skipped).
+            # But it definitely shouldn't be failure or cancelled.
+            if [ "$VALIDATE_PR_RESULT" = "failure" ] || [ "$VALIDATE_PR_RESULT" = "cancelled" ]; then
+              echo "::error::validate-pr job failed or cancelled (result: $VALIDATE_PR_RESULT)"
+              exit 1
+            fi
+          fi
+
+          # 3. For all other downstream checks, verify they succeeded
+          # Note: If any is failure, cancelled, or skipped, treat it as a failure.
+          DOWNSTREAM_RESULTS=(
+            "${{ needs.ci-version.result }}"
+            "${{ needs.ci-commit-msg.result }}"
+            "${{ needs.ci-devenv-test.result }}"
+            "${{ needs.ci-cargo-test.result }}"
+            "${{ needs.ci-cargo-clippy.result }}"
+            "${{ needs.ci-cargo-fmt.result }}"
+            "${{ needs.ci-cargo-machete.result }}"
+            "${{ needs.ci-cargo-deny.result }}"
+            "${{ needs.ci-flake-check.result }}"
+            "${{ needs.ci-statix.result }}"
+            "${{ needs.ci-build-assets.result }}"
+            "${{ needs.ci-nix-build-bootycall.result }}"
+          )
+
+          for res in "${DOWNSTREAM_RESULTS[@]}"; do
+            if [ "$res" != "success" ]; then
+              echo "::error::One or more downstream checks did not succeed (found result: $res)"
+              exit 1
+            fi
+          done
+
           echo "All CI checks passed!"
 
       - id: report_status

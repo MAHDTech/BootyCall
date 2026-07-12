@@ -47,7 +47,7 @@ in
   ];
 
   enterShell = ''
-    if [[ "${"CI:-false"}" == "true" ]]; then
+    if [[ "''${CI:-false}" == "true" ]]; then
       echo "devenv running in CI"
     else
       figlet -f slant -w 180 "$(echo "$PROJECT" | tr '[:lower:]-' '[:upper:] ')"

@@ -8,6 +8,7 @@ targetPkgs.callPackage ./default.nix { } {
   targets = [
     "bin-x86_64-efi/ipxe.efi"
     "bin-x86_64-efi/snp.efi"
+    "bin/undionly.kpxe"
   ];
   additionalConfig = [
     "CONSOLE_CMD"

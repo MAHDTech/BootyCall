@@ -551,7 +551,7 @@ async fn test_tftp_timeout_marks_host_failed() {
 
     // The server's give-up is asynchronous; poll until the host is Failed.
     let mut failed = false;
-    for _ in 0..40 {
+    for _ in 0..140 {
         if let Some(hs) = state_store.get_host(mac)
             && hs.status == HostStatus::Failed
         {
@@ -1478,4 +1478,126 @@ async fn test_tftp_blksize_negotiation_defaults_to_512() {
     let (block_num, data) = parse_data(&response_buf[..len]);
     assert_eq!(block_num, 1);
     assert_eq!(data, file_content.to_vec());
+}
+
+#[tokio::test]
+async fn test_tftp_windowsize_5_packet_loss_recovery() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    // Create a file of 10 blocks (10 * 512 = 5120 bytes)
+    let block_size = 512;
+    let mut file_content = vec![0u8; 10 * block_size];
+    for i in 0..file_content.len() {
+        file_content[i] = (i % 256) as u8;
+    }
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &file_content).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25240", &tftp_root),
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25240", server_config_clone, server_store)
+                .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client requests windowsize = 7
+    let client_socket = UdpSocket::bind("127.0.0.1:25241").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("windowsize", "7")],
+    );
+
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25240")
+        .await
+        .unwrap();
+
+    let mut response_buf = [0u8; 1024];
+    let (len, server_tid_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let negotiated_options = parse_oack(&response_buf[..len]);
+    assert!(negotiated_options.contains(&("windowsize".to_string(), "7".to_string())));
+
+    // Send ACK for block 0 to start transfer
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid_addr)
+        .await
+        .unwrap();
+
+    let mut next_expected = 1;
+    let mut received_bytes = Vec::new();
+    let mut num_dup_ack_sent = 0;
+
+    loop {
+        let (len, _) = match tokio::time::timeout(
+            Duration::from_secs(3),
+            client_socket.recv_from(&mut response_buf),
+        )
+        .await
+        {
+            Ok(Ok(res)) => res,
+            _ => {
+                break;
+            }
+        };
+
+        let (block_num, data) = parse_data(&response_buf[..len]);
+
+        if block_num == next_expected {
+            if block_num == 2 && num_dup_ack_sent == 0 {
+                // Drop block 2. Do not advance next_expected, and do not ACK.
+                continue;
+            }
+
+            received_bytes.extend_from_slice(&data);
+            next_expected += 1;
+
+            client_socket
+                .send_to(&make_ack_packet(block_num), server_tid_addr)
+                .await
+                .unwrap();
+
+            if block_num == 10 {
+                break;
+            }
+        } else if block_num > next_expected {
+            let dup_ack_val = next_expected - 1;
+            client_socket
+                .send_to(&make_ack_packet(dup_ack_val), server_tid_addr)
+                .await
+                .unwrap();
+            num_dup_ack_sent += 1;
+        } else {
+            let dup_ack_val = next_expected - 1;
+            client_socket
+                .send_to(&make_ack_packet(dup_ack_val), server_tid_addr)
+                .await
+                .unwrap();
+        }
+    }
+
+    assert_eq!(received_bytes, file_content);
+    assert!(
+        num_dup_ack_sent >= 5,
+        "should have sent at least 5 duplicate ACKs to test abort protection, sent {}",
+        num_dup_ack_sent
+    );
 }

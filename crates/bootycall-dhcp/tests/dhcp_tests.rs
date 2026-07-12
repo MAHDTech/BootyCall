@@ -80,6 +80,11 @@ async fn test_dhcp_server_redirection() {
     msg.opts_mut()
         .insert(v4::DhcpOption::ClassIdentifier(b"PXEClient".to_vec()));
 
+    // Option 97: Client Machine Identifier (RFC 4578 / RFC 4578)
+    let machine_id = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    msg.opts_mut()
+        .insert(v4::DhcpOption::ClientMachineIdentifier(machine_id.clone()));
+
     let mut request_buf = Vec::new();
     let mut encoder = Encoder::new(&mut request_buf);
     msg.encode(&mut encoder).unwrap();
@@ -116,6 +121,17 @@ async fn test_dhcp_server_redirection() {
         assert_eq!(path, "boot/special.efi");
     } else {
         panic!("Missing BootfileName option");
+    }
+
+    // Verify Option 97 Client Machine Identifier is copied back
+    let response_machine_id = response
+        .opts()
+        .get(v4::OptionCode::ClientMachineIdentifier)
+        .unwrap();
+    if let v4::DhcpOption::ClientMachineIdentifier(uuid) = response_machine_id {
+        assert_eq!(*uuid, machine_id);
+    } else {
+        panic!("Missing or mismatching ClientMachineIdentifier option");
     }
 
     // Verify state store was updated

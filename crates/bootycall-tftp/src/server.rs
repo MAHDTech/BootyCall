@@ -398,12 +398,12 @@ async fn handle_tftp_transfer(
                                 }
                             }
                             None => {
-                                // Old/duplicate ACK or garbage — retry budget.
+                                // Old/duplicate ACK or garbage.
                                 debug!(
                                     "Unexpected ACK block {} from {}, retrying...",
                                     acked_wire, client_addr
                                 );
-                                retries += 1;
+                                next_to_send = base;
                             }
                         }
                     }
@@ -412,7 +412,6 @@ async fn handle_tftp_transfer(
                             "Unexpected packet during data transfer from {}, retrying...",
                             client_addr
                         );
-                        retries += 1;
                     }
                 }
             }
@@ -529,12 +528,11 @@ async fn send_and_await_ack(
                     return Ok(AckOutcome::Acked);
                 }
                 // Anything else (wrong block, wrong opcode, garbage) —
-                // count it toward the retry bound, not just timeouts.
+                // do not count it toward the retry bound, not just timeouts.
                 debug!(
                     "Unexpected packet during {} from {}, retrying...",
                     what, client_addr
                 );
-                retries += 1;
             }
             Ok(Err(e)) => {
                 error!(

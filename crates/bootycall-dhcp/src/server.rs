@@ -491,6 +491,11 @@ async fn respond_to_pxe_request(
         reply.opts_mut().insert(client_id.clone());
     }
 
+    // Copy Client Machine Identifier (Option 97) if present
+    if let Some(machine_id) = request.opts().get(v4::OptionCode::ClientMachineIdentifier) {
+        reply.opts_mut().insert(machine_id.clone());
+    }
+
     // Encode reply
     let mut response_buf = Vec::new();
     let mut encoder = Encoder::new(&mut response_buf);

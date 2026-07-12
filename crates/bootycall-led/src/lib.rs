@@ -12,7 +12,7 @@ const LED_WHITE_PATH: &str = "/sys/class/leds/white/brightness";
 const LED_TEST_BLINK_CYCLES: usize = 10;
 /// Per-phase blink duration for `led-test --blinking` (on for this long, then
 /// off for this long).
-const LED_TEST_BLINK_MS: u64 = 500;
+const LED_BLINK_MS: u64 = 500;
 
 /// Errors returned by the public LED test entry point.
 #[derive(Debug, thiserror::Error)]
@@ -133,7 +133,7 @@ async fn blink_until_stopped(stop_rx: &mut tokio::sync::mpsc::Receiver<()>) -> b
             msg = stop_rx.recv() => {
                 return msg.is_some();
             }
-            _ = sleep(Duration::from_millis(500)) => {
+            _ = sleep(Duration::from_millis(LED_BLINK_MS)) => {
                 if state {
                     let _ = set_led(LED_WHITE_PATH, 255);
                     let _ = set_led(LED_BLUE_PATH, 0);
@@ -195,7 +195,7 @@ pub async fn run_led_manager(
             _ = shutdown_rx.recv() => {
                 break;
             }
-            _ = sleep(Duration::from_millis(500)) => {
+            _ = sleep(Duration::from_millis(LED_BLINK_MS)) => {
                 if active {
                     if state {
                         set_led_cached(LED_BLUE_PATH, 255, &mut last_blue);
@@ -246,10 +246,10 @@ pub fn led_test(color: &str, blinking: bool) -> Result<(), LedError> {
             for _ in 0..LED_TEST_BLINK_CYCLES {
                 let _ = set_led(on, 255);
                 let _ = set_led(off_path, 0);
-                std::thread::sleep(std::time::Duration::from_millis(LED_TEST_BLINK_MS));
+                std::thread::sleep(std::time::Duration::from_millis(LED_BLINK_MS));
                 let _ = set_led(on, 0);
                 let _ = set_led(off_path, 0);
-                std::thread::sleep(std::time::Duration::from_millis(LED_TEST_BLINK_MS));
+                std::thread::sleep(std::time::Duration::from_millis(LED_BLINK_MS));
             }
         }
         Some(on) => {

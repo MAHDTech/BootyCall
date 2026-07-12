@@ -65,6 +65,9 @@ pub enum OledError {
     /// Joining the render thread during shutdown failed.
     #[error("OLED shutdown join error: {0}")]
     ShutdownJoin(#[source] tokio::task::JoinError),
+    /// Joining the render thread during shutdown timed out.
+    #[error("OLED shutdown join timed out")]
+    ShutdownTimeout,
 }
 
 /// Restart policy for the supervised render loop: how long to back off
@@ -270,11 +273,15 @@ trait FrameSink {
 /// availability latch (BUG-C).
 struct PanelSink {
     fb_available: bool,
+    logged_headless: AtomicBool,
 }
 
 impl PanelSink {
     fn new() -> Self {
-        Self { fb_available: true }
+        Self {
+            fb_available: true,
+            logged_headless: AtomicBool::new(false),
+        }
     }
 }
 
@@ -283,11 +290,13 @@ impl FrameSink for PanelSink {
         if oled_hardware_present(framebuffer::FB_PATH, GPIOCHIP_PATH) {
             true
         } else {
-            info!(
-                "OLED/LED hardware not detected (no {} or {}) — running headless",
-                framebuffer::FB_PATH,
-                GPIOCHIP_PATH
-            );
+            if !self.logged_headless.swap(true, Ordering::Relaxed) {
+                info!(
+                    "OLED/LED hardware not detected (no {} or {}) — running headless",
+                    framebuffer::FB_PATH,
+                    GPIOCHIP_PATH
+                );
+            }
             false
         }
     }
@@ -603,10 +612,15 @@ pub async fn run_oled_manager(
     // don't stall the reactor while the last frame drains + screen blanks.
     // Render-loop panics are already caught, logged, and retried inside
     // `supervise`; a join `Err` here means the supervisor itself died.
-    match tokio::task::spawn_blocking(move || render_thread.join()).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_panic)) => Err(OledError::SupervisorPanicked),
-        Err(join_err) => Err(OledError::ShutdownJoin(join_err)),
+    let join_future = tokio::task::spawn_blocking(move || render_thread.join());
+    match tokio::time::timeout(Duration::from_secs(5), join_future).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(_panic))) => Err(OledError::SupervisorPanicked),
+        Ok(Err(join_err)) => Err(OledError::ShutdownJoin(join_err)),
+        Err(_) => {
+            warn!("OLED shutdown join timed out; thread is likely wedged");
+            Err(OledError::ShutdownTimeout)
+        }
     }
 }
 
@@ -621,8 +635,14 @@ fn render_loop<S: FrameSink>(
     // when neither the framebuffer nor the GPIO chip is present (a dev laptop,
     // or a CloudKey mid-boot), so we log once and idle instead of spinning the
     // loop to no-op. The sim sink always runs.
-    if !sink.should_run() {
-        return Ok(());
+    while !sink.should_run() {
+        if !sleep_unless_shutdown(
+            shutdown.as_ref(),
+            OPTIONAL_HW_RETRY_INTERVAL,
+            Duration::from_millis(200),
+        ) {
+            return Ok(());
+        }
     }
     sink.on_start();
 
@@ -762,7 +782,12 @@ fn render_loop<S: FrameSink>(
             let _ = fb.flush();
             break;
         }
-        std::thread::sleep(sink.tick());
+        if !sleep_unless_shutdown(shutdown.as_ref(), sink.tick(), Duration::from_millis(200)) {
+            info!("OLED Manager shutting down. Blanking screen...");
+            fb.clear();
+            let _ = fb.flush();
+            break;
+        }
     }
     Ok(())
 }

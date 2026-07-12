@@ -1,5 +1,5 @@
 use anyhow::Context;
-use bootycall_log::{error, info};
+use bootycall_log::{error, info, warn};
 use clap::{Parser, Subcommand};
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -400,7 +400,12 @@ async fn graceful_shutdown(
     let _ = oled_shutdown_tx.send(()).await;
     let _ = led_manager_handle.await;
     if let Some(handle) = oled_manager_handle {
-        let _ = handle.await;
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(6), handle)
+            .await
+            .is_err();
+        if timed_out {
+            warn!("OLED manager shutdown timed out");
+        }
     }
 }
 

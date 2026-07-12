@@ -161,7 +161,7 @@ impl SystemMetrics {
         for disk in &self.disks {
             if disk.mount_point().to_string_lossy() == "/" {
                 total = disk.total_space();
-                used = disk.total_space() - disk.available_space();
+                used = disk.total_space().saturating_sub(disk.available_space());
                 break;
             }
         }

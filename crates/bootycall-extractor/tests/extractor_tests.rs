@@ -697,9 +697,9 @@ fn test_fat_recursion_depth_cap() {
     assert!(
         matches!(
             err,
-            bootycall_extractor::error::ExtractorError::KernelNotFound
+            bootycall_extractor::error::ExtractorError::MaxDepthExceeded(64)
         ),
-        "deep walk should bail at the cap -> KernelNotFound, got {err:?}"
+        "deep walk should bail at the cap -> MaxDepthExceeded(64), got {err:?}"
     );
 
     // Control: the same structure at a shallow depth (10) IS found, proving it

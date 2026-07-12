@@ -334,18 +334,23 @@ pub fn sync_host_cache(
     );
     let extract_started = std::time::Instant::now();
 
-    // Ensure cache folder exists
-    if !host_cache_dir.exists() {
-        fs::create_dir_all(&host_cache_dir)?;
+    let host_cache_dir_tmp = cache_dir.join(format!("{}.tmp", host.mac));
+    if host_cache_dir_tmp.exists() {
+        let _ = fs::remove_dir_all(&host_cache_dir_tmp);
     }
+    fs::create_dir_all(&host_cache_dir_tmp)?;
+
+    let kernel_path_tmp = host_cache_dir_tmp.join("kernel");
+    let initrd_path_tmp = host_cache_dir_tmp.join("initrd");
+    let metadata_path_tmp = host_cache_dir_tmp.join("metadata.json");
 
     // Try extracting as ISO9660 first
     let extraction_result = iso::extract_from_iso(
         &host.image_path,
         host.kernel_path.as_deref(),
         host.initrd_path.as_deref(),
-        &kernel_path,
-        &initrd_path,
+        &kernel_path_tmp,
+        &initrd_path_tmp,
         max_artifact_bytes,
     );
 
@@ -362,8 +367,8 @@ pub fn sync_host_cache(
                 &host.image_path,
                 host.kernel_path.as_deref(),
                 host.initrd_path.as_deref(),
-                &kernel_path,
-                &initrd_path,
+                &kernel_path_tmp,
+                &initrd_path_tmp,
                 max_artifact_bytes,
             )
         }
@@ -379,7 +384,14 @@ pub fn sync_host_cache(
                 kernel_override: host.kernel_path.clone(),
                 initrd_override: host.initrd_path.clone(),
             };
-            meta.write_to_file(&metadata_path)?;
+            meta.write_to_file(&metadata_path_tmp)?;
+
+            // Atomic swap: remove old directory and rename tmp directory to target host_cache_dir
+            if host_cache_dir.exists() {
+                let _ = fs::remove_dir_all(&host_cache_dir);
+            }
+            fs::rename(&host_cache_dir_tmp, &host_cache_dir)?;
+
             info!(
                 "Successfully extracted kernel and initrd for host {} (MAC: {})",
                 host.name, host.mac
@@ -401,17 +413,8 @@ pub fn sync_host_cache(
                 image = %host.image_path.display(),
                 error = %e,
             );
-            // Clean up. `copy_capped` never leaves a torn final artifact,
-            // but a mixed outcome (new kernel already renamed into place,
-            // initrd failed) would leave a mismatched pair — remove the
-            // final artifacts and metadata so the cache reads as plainly
-            // absent rather than falsely ready. Also drop any staging file
-            // stranded by a failed rename.
-            let _ = fs::remove_file(&kernel_path);
-            let _ = fs::remove_file(&initrd_path);
-            let _ = fs::remove_file(&metadata_path);
-            let _ = fs::remove_file(tmp_artifact_path(&kernel_path));
-            let _ = fs::remove_file(tmp_artifact_path(&initrd_path));
+            // Clean up the temp directory
+            let _ = fs::remove_dir_all(&host_cache_dir_tmp);
             Err(e)
         }
     }

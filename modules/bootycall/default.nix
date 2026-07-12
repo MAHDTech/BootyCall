@@ -17,10 +17,15 @@ let
   bindPort =
     bind:
     let
-      parts = lib.splitString ":" bind;
-      portStr = lib.last parts;
+      ipv6Match = builtins.match "\\[.*]:([0-9]+)" bind;
+      ipv4Match = builtins.match "([^:]+):([0-9]+)" bind;
     in
-    if lib.length parts >= 2 && portStr != "" then lib.toInt portStr else null;
+    if ipv6Match != null then
+      lib.toInt (builtins.elemAt ipv6Match 0)
+    else if ipv4Match != null then
+      lib.toInt (builtins.elemAt ipv4Match 1)
+    else
+      null;
 
   # The firewall port defaults need a concrete port; fall back to a harmless
   # placeholder for a malformed bind. The matching assertion fails the build
@@ -529,31 +534,31 @@ in
       preStart =
         lib.optionalString cfg.seedDefaultAssets ''
           # Create directories if they don't exist
-          mkdir -p ${cfg.dataDir}/tftpboot ${cfg.dataDir}/static ${cfg.server.cacheDir}
+          mkdir -p "${cfg.dataDir}/tftpboot" "${cfg.dataDir}/static" "${cfg.server.cacheDir}"
 
           # Copy default TFTP assets, preserving user additions
-          if [ -d "${assetsPkg}/tftpboot" ] && [ "$(ls -A ${assetsPkg}/tftpboot)" ]; then
-            cp -rn ${assetsPkg}/tftpboot/* ${cfg.dataDir}/tftpboot/ || true
-            chmod -R u+w ${cfg.dataDir}/tftpboot
+          if [ -d "${assetsPkg}/tftpboot" ] && [ "$(ls -A "${assetsPkg}/tftpboot")" ]; then
+            cp -rn "${assetsPkg}/tftpboot/." "${cfg.dataDir}/tftpboot/" || true
+            chmod -R u+w "${cfg.dataDir}/tftpboot"
           fi
 
           # Copy default static assets, preserving user additions
-          if [ -d "${assetsPkg}/static" ] && [ "$(ls -A ${assetsPkg}/static)" ]; then
-            cp -rn ${assetsPkg}/static/* ${cfg.dataDir}/static/ || true
-            chmod -R u+w ${cfg.dataDir}/static
+          if [ -d "${assetsPkg}/static" ] && [ "$(ls -A "${assetsPkg}/static")" ]; then
+            cp -rn "${assetsPkg}/static/." "${cfg.dataDir}/static/" || true
+            chmod -R u+w "${cfg.dataDir}/static"
           fi
         ''
         + lib.optionalString (cfg.server.apiTokenFile != null) ''
-          if [ -f "${cfg.server.apiTokenFile}" ]; then
-            token=$(cat "${cfg.server.apiTokenFile}")
+          if [ -f "$CREDENTIALS_DIRECTORY/api_token" ]; then
+            token=$(cat "$CREDENTIALS_DIRECTORY/api_token")
             if [ -z "$token" ]; then
-              echo "Error: apiTokenFile is empty" >&2
+              echo "Error: apiToken credential is empty" >&2
               exit 1
             fi
             ${pkgs.jq}/bin/jq --arg token "$token" '.server.api_token = $token' "${generatedConfigFile}" > /run/bootycall/bootycall.yaml
             chmod 0600 /run/bootycall/bootycall.yaml
           else
-            echo "Error: apiTokenFile '${cfg.server.apiTokenFile}' does not exist" >&2
+            echo "Error: apiToken credential 'api_token' does not exist" >&2
             exit 1
           fi
         '';
@@ -595,6 +600,9 @@ in
         # the relaxation behind `hardware.enable` so the strict default
         # stands on boxes that don't have the rackmount accessory.
         PrivateDevices = !cfg.hardware.enable;
+      }
+      // lib.optionalAttrs (cfg.server.apiTokenFile != null) {
+        LoadCredential = "api_token:${cfg.server.apiTokenFile}";
       }
       // lib.optionalAttrs cfg.hardware.enable {
         DeviceAllow = map (d: "${d} rw") (cfg.hardware.gpioDevices ++ cfg.hardware.framebufferDevices);

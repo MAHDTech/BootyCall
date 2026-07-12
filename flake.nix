@@ -37,6 +37,29 @@
         import ./packages { inherit pkgs self system; }
       );
 
+      # VM tests / checks using runNixOSTest
+      checks = forEachSystem (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ inputs.rust-overlay.overlays.default ];
+          };
+        in
+        pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          vmTest = pkgs.testers.runNixOSTest {
+            name = "bootycall-init-test";
+            nodes.server = {
+              imports = [ self.nixosModules.default ];
+              services.bootycall.enable = true;
+            };
+            testScript = ''
+              server.wait_for_unit("bootycall.service")
+            '';
+          };
+        }
+      );
+
       # devShell setup for local developer environments
       devShells = forEachSystem (
         system:

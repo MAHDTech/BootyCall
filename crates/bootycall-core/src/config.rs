@@ -29,6 +29,7 @@ fn default_bootloader_bios() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub http_bind: String,
     pub tftp_bind: String,
@@ -86,6 +87,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HostConfig {
     pub mac: String,
     pub name: String,
@@ -97,6 +99,7 @@ pub struct HostConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub hosts: Vec<HostConfig>,
@@ -861,5 +864,93 @@ hosts:
         let mut cfg = valid_config();
         cfg.server.allowed_hosts = vec!["192.168.1.10".to_string(), "boot.internal".to_string()];
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_deny_unknown_fields() {
+        // cspell:ignore tokan
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("bootycall.yaml");
+
+        // Unknown top-level key
+        {
+            let mut file = File::create(&file_path).unwrap();
+            let yaml = r#"
+server:
+  http_bind: "0.0.0.0:8080"
+  tftp_bind: "0.0.0.0:69"
+  tftp_root: "./tftpboot"
+  proxy_dhcp_bind: "0.0.0.0:4011"
+  cache_dir: "./cache"
+  default_bootloader_amd64: "boot/x64/ipxe.efi"
+  default_bootloader_arm64: "boot/arm64/ipxe.efi"
+hosts: []
+unknown_top_level_field: "value"
+"#;
+            file.write_all(yaml.as_bytes()).unwrap();
+            let result = Config::load(&file_path);
+            assert!(result.is_err());
+            let err_msg = format!("{:?}", result.err().unwrap());
+            assert!(
+                err_msg.contains("unknown field") || err_msg.contains("unknown_top_level_field"),
+                "Expected unknown field error, got: {}",
+                err_msg
+            );
+        }
+
+        // Unknown server key (typo'd api_token)
+        {
+            let mut file = File::create(&file_path).unwrap();
+            let yaml = r#"
+server:
+  http_bind: "0.0.0.0:8080"
+  tftp_bind: "0.0.0.0:69"
+  tftp_root: "./tftpboot"
+  proxy_dhcp_bind: "0.0.0.0:4011"
+  cache_dir: "./cache"
+  default_bootloader_amd64: "boot/x64/ipxe.efi"
+  default_bootloader_arm64: "boot/arm64/ipxe.efi"
+  api_tokan: "should_fail"
+hosts: []
+"#;
+            file.write_all(yaml.as_bytes()).unwrap();
+            let result = Config::load(&file_path);
+            assert!(result.is_err());
+            let err_msg = format!("{:?}", result.err().unwrap());
+            assert!(
+                err_msg.contains("unknown field") || err_msg.contains("api_tokan"),
+                "Expected unknown field error, got: {}",
+                err_msg
+            );
+        }
+
+        // Unknown host key
+        {
+            let mut file = File::create(&file_path).unwrap();
+            let yaml = r#"
+server:
+  http_bind: "0.0.0.0:8080"
+  tftp_bind: "0.0.0.0:69"
+  tftp_root: "./tftpboot"
+  proxy_dhcp_bind: "0.0.0.0:4011"
+  cache_dir: "./cache"
+  default_bootloader_amd64: "boot/x64/ipxe.efi"
+  default_bootloader_arm64: "boot/arm64/ipxe.efi"
+hosts:
+  - mac: "11:22:33:44:55:01"
+    name: "host-alpha"
+    image_path: "/tmp/alpha.iso"
+    unknown_host_field: "value"
+"#;
+            file.write_all(yaml.as_bytes()).unwrap();
+            let result = Config::load(&file_path);
+            assert!(result.is_err());
+            let err_msg = format!("{:?}", result.err().unwrap());
+            assert!(
+                err_msg.contains("unknown field") || err_msg.contains("unknown_host_field"),
+                "Expected unknown field error, got: {}",
+                err_msg
+            );
+        }
     }
 }

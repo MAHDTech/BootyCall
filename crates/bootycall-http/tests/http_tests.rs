@@ -876,6 +876,10 @@ async fn test_spoofed_host_header_not_reflected_in_boot_urls() {
     {
         let mut guard = config.write();
         guard.server.allowed_hosts = vec!["127.0.0.1".to_string()];
+        let host_cache_dir = guard.server.cache_dir.join("aa:bb:cc:dd:ee:ff");
+        fs::create_dir_all(&host_cache_dir).unwrap();
+        fs::write(host_cache_dir.join("kernel"), b"KERNELBYTES").unwrap();
+        fs::write(host_cache_dir.join("initrd"), b"INITRDBYTES").unwrap();
     }
 
     // An allowlisted Host (port stripped before validation) is still honoured.
@@ -1039,4 +1043,45 @@ async fn test_read_apis_require_token_when_configured() {
             "{path} with correct token must be 200, got: {status}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_poll_cache_not_ready_returns_retry_script() {
+    // If the cache artifacts are missing or empty, /poll must return the retry script
+    // and not transition the host to Booting (must stay/go to Polling).
+    let port: u16 = 26114;
+    let (config, state_store) = spawn_test_server(port).await;
+
+    // 1. Initially, cache is empty. We poll /poll/aa-bb-cc-dd-ee-ff
+    let (status, body) = http_get(port, "/poll/aa-bb-cc-dd-ee-ff").await;
+    assert!(status.contains("200 OK"), "got: {status}");
+    let body_str = String::from_utf8(body).unwrap();
+
+    // Should get a retry/polling script, not a boot script
+    assert!(body_str.contains("BootyCall: Press Ctrl-B for manual override..."));
+    assert!(body_str.contains("poll/aa:bb:cc:dd:ee:ff"));
+
+    // Status must be Polling, not Booting
+    let state = state_store.get_host("aa:bb:cc:dd:ee:ff").unwrap();
+    assert_eq!(state.status, HostStatus::Polling);
+
+    // 2. Now provision the files, it should boot
+    let (cache_dir, host_mac) = {
+        let g = config.read();
+        (g.server.cache_dir.clone(), g.hosts[0].mac.clone())
+    };
+    let host_cache = cache_dir.join(&host_mac);
+    fs::create_dir_all(&host_cache).unwrap();
+    fs::write(host_cache.join("kernel"), b"KERNELBYTES").unwrap();
+    fs::write(host_cache.join("initrd"), b"INITRDBYTES").unwrap();
+
+    let (status2, body2) = http_get(port, "/poll/aa-bb-cc-dd-ee-ff").await;
+    assert!(status2.contains("200 OK"), "got: {status2}");
+    let body_str2 = String::from_utf8(body2).unwrap();
+    assert!(body_str2.contains("kernel http://127.0.0.1:26114/cache/aa:bb:cc:dd:ee:ff/kernel"));
+    assert!(body_str2.contains("initrd http://127.0.0.1:26114/cache/aa:bb:cc:dd:ee:ff/initrd"));
+
+    // Status must transition to Booting
+    let state2 = state_store.get_host("aa:bb:cc:dd:ee:ff").unwrap();
+    assert_eq!(state2.status, HostStatus::Booting);
 }

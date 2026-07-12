@@ -893,3 +893,51 @@ fn test_iso_missing_kernel_and_initrd() {
         Err(bootycall_extractor::error::ExtractorError::InitrdNotFound)
     ));
 }
+
+#[test]
+fn test_sync_all_hosts_cache_unbounded_warning() {
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buffer lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .finish();
+
+    let dir = tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+    let config = Config {
+        server: server_config(&cache_dir),
+        hosts: vec![],
+    };
+
+    tracing::subscriber::with_default(subscriber, || {
+        bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+    });
+
+    let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        out.contains("max_artifact_bytes") && out.contains("unbounded"),
+        "Warning log should contain max_artifact_bytes and warning of unbounded state. Got: {}",
+        out
+    );
+}

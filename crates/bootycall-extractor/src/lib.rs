@@ -179,6 +179,9 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
     }
 
     let max_artifact_bytes = config.server.max_artifact_bytes;
+    if max_artifact_bytes.is_none() {
+        warn!("No max_artifact_bytes configured; extraction is unbounded and could fill the eMMC!");
+    }
     let mut summary = SyncSummary::default();
     for host in &config.hosts {
         match sync_host_cache(host, cache_dir, max_artifact_bytes) {

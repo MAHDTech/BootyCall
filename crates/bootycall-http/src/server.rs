@@ -402,9 +402,12 @@ async fn poll_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     AxumPath(mac): AxumPath<String>,
 ) -> impl IntoResponse {
-    let server_host = {
+    let (server_host, cache_dir) = {
         let config_guard = state.config.read();
-        advertised_host_port(&config_guard.server, &headers)
+        (
+            advertised_host_port(&config_guard.server, &headers),
+            config_guard.server.cache_dir.clone(),
+        )
     };
 
     let mac_str = bootycall_core::normalize_mac(&mac);
@@ -439,28 +442,68 @@ async fn poll_handler(
 
     match outcome {
         PollOutcome::Boot { script, cache_mac } => {
-            state.state_store.update_host_status(
-                &mac_str,
-                HostStatus::Booting,
-                None,
-                None,
-                Some(client_ip.clone()),
-                None,
-            );
-            state.state_store.log_event(
-                "INFO",
-                Some(&mac_str),
-                &format!(
-                    "Serving boot execution script for target (mapped cache MAC: {cache_mac})"
-                ),
-            );
-            bootycall_log::event!(
-                "http_boot_served",
-                mac = %mac_str,
-                target_mac = %cache_mac,
-                client_ip = %client_ip,
-            );
-            ([(header::CONTENT_TYPE, "text/plain")], script).into_response()
+            let is_ready = {
+                let cache_mac_cloned = cache_mac.clone();
+                let cache_dir_cloned = cache_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    bootycall_extractor::host_cache_ready(&cache_mac_cloned, &cache_dir_cloned)
+                })
+                .await
+                .unwrap_or(false)
+            };
+
+            if is_ready {
+                state.state_store.update_host_status(
+                    &mac_str,
+                    HostStatus::Booting,
+                    None,
+                    None,
+                    Some(client_ip.clone()),
+                    None,
+                );
+                state.state_store.log_event(
+                    "INFO",
+                    Some(&mac_str),
+                    &format!(
+                        "Serving boot execution script for target (mapped cache MAC: {cache_mac})"
+                    ),
+                );
+                bootycall_log::event!(
+                    "http_boot_served",
+                    mac = %mac_str,
+                    target_mac = %cache_mac,
+                    client_ip = %client_ip,
+                );
+                ([(header::CONTENT_TYPE, "text/plain")], script).into_response()
+            } else {
+                state.state_store.update_host_status(
+                    &mac_str,
+                    HostStatus::Polling,
+                    None,
+                    None,
+                    Some(client_ip.clone()),
+                    None,
+                );
+                state.state_store.log_event(
+                    "WARN",
+                    Some(&mac_str),
+                    &format!(
+                        "Cache artifacts not ready for target (mapped cache MAC: {cache_mac}). Deferring boot."
+                    ),
+                );
+                bootycall_log::event!(
+                    "http_boot_cache_not_ready",
+                    mac = %mac_str,
+                    target_mac = %cache_mac,
+                    client_ip = %client_ip,
+                );
+                // Return the poll retry script (endless loop until target's cache is ready).
+                let retry_script = format!(
+                    "#!ipxe\nprompt --key 0x02 --timeout 4000 BootyCall: Press Ctrl-B for manual override... \\\n  && chain --autofree http://{}/ipxemenu \\\n  || chain --autofree http://{}/poll/{}\n",
+                    server_host, server_host, mac_str
+                );
+                ([(header::CONTENT_TYPE, "text/plain")], retry_script).into_response()
+            }
         }
         PollOutcome::RenderFailed => {
             // The boot template failed to render (a server-side data/template

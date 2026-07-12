@@ -157,7 +157,7 @@ not apply (device still `root:root`) or the process is not in the `gpio` group.
 
 ## Recovering a wedged unit
 
-The unit runs with `Restart = always`, so a crash normally self-heals. When it
+The unit runs with `Restart = on-failure`, so a crash normally self-heals. When it
 does not:
 
 ```bash

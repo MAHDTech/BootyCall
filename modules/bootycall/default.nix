@@ -560,7 +560,8 @@ in
 
       serviceConfig = {
         ExecStart = "${bootycallPkg}/bin/bootycall-rs --config ${runtimeConfigFile}";
-        Restart = "always";
+        Restart = "on-failure";
+        RestartSec = "2s";
         # Readiness probe: `GET http://<http_bind>/api/health` returns 200 when
         # every configured host has cached boot artifacts ready to serve and 503
         # (JSON `{status: "degraded", hosts_total: N, hosts_not_ready_count: M}`)
@@ -604,9 +605,15 @@ in
           "video"
         ];
       }
+      // lib.optionalAttrs (!cfg.hardware.enable) {
+        ProtectProc = "invisible";
+        ProcSubset = "pid";
+      }
       // {
         ProtectSystem = "strict";
         ProtectHome = true;
+        ProtectHostname = true;
+        PrivateTmp = true;
         ReadWritePaths = [
           cfg.dataDir
           cfg.server.cacheDir

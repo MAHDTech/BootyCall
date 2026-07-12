@@ -1319,3 +1319,153 @@ async fn test_tftp_malformed_rrq_draws_error_code_4() {
         "message should mention the illegal operation, got {msg:?}"
     );
 }
+
+#[tokio::test]
+async fn test_tftp_blksize_negotiation_clamps_downward() {
+    // 1. Setup temporary directory for tftp root and a test file
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    let file_content = b"This is the default EFI payload!";
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), file_content).unwrap();
+
+    // 2. Setup server configuration
+    let config = Config {
+        server: base_server_config("127.0.0.1:25220", &tftp_root),
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // 3. Spawn TFTP Server
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25220", server_config_clone, server_store)
+                .await;
+    });
+
+    // Wait for server to bind
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 4. Client socket to send request with blksize=128
+    let client_socket = UdpSocket::bind("127.0.0.1:25221").await.unwrap();
+
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "128"), ("timeout", "1"), ("tsize", "0")],
+    );
+
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25220")
+        .await
+        .unwrap();
+
+    // 5. Receive option acknowledgement (OACK)
+    let mut response_buf = [0u8; 1024];
+    let (len, server_tid_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let negotiated_options = parse_oack(&response_buf[..len]);
+
+    // Assert that the negotiated blksize is 128 (not 512, which is DEFAULT_BLKSIZE)
+    assert!(negotiated_options.contains(&("blksize".to_string(), "128".to_string())));
+
+    // Complete the transfer to verify it works with the custom block size
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid_addr)
+        .await
+        .unwrap();
+
+    let (len, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let (block_num, data) = parse_data(&response_buf[..len]);
+    assert_eq!(block_num, 1);
+    assert_eq!(data, file_content.to_vec());
+
+    client_socket
+        .send_to(&make_ack_packet(1), server_tid_addr)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_tftp_blksize_negotiation_defaults_to_512() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    let file_content = b"This is the default EFI payload!";
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), file_content).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25230", &tftp_root),
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ =
+            bootycall_tftp::run_tftp_server("127.0.0.1:25230", server_config_clone, server_store)
+                .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // No blksize option requested, only timeout & tsize
+    let client_socket = UdpSocket::bind("127.0.0.1:25231").await.unwrap();
+    let rrq = make_rrq_packet("boot/x64/ipxe.efi", &[("timeout", "1"), ("tsize", "0")]);
+
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25230")
+        .await
+        .unwrap();
+
+    let mut response_buf = [0u8; 1024];
+    let (len, server_tid_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let negotiated_options = parse_oack(&response_buf[..len]);
+
+    // Assert options
+    assert!(!negotiated_options.iter().any(|(k, _)| k == "blksize"));
+
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid_addr)
+        .await
+        .unwrap();
+
+    // The block size should default to 512, which means the DATA block will contain the whole payload.
+    let (len, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let (block_num, data) = parse_data(&response_buf[..len]);
+    assert_eq!(block_num, 1);
+    assert_eq!(data, file_content.to_vec());
+}

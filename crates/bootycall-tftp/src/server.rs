@@ -177,8 +177,9 @@ async fn handle_tftp_transfer(
     let mut negotiated_windowsize: u16 = 1;
 
     if let Some(blksize) = request.blksize {
-        // Clamp to a safe MTU range
-        negotiated_blksize = blksize.clamp(DEFAULT_BLKSIZE, MAX_BLKSIZE);
+        // Clamp to a safe MTU range and ensure we never exceed the requested size.
+        // Keep the RFC minimum of 8 as the floor.
+        negotiated_blksize = blksize.clamp(8, MAX_BLKSIZE);
         options.push(("blksize", negotiated_blksize.to_string()));
     }
 
@@ -596,8 +597,8 @@ const MAX_CONCURRENT_TRANSFERS: usize = 128;
 /// client's ability to force us to buffer unboundedly.
 const MAX_WINDOWSIZE: u16 = 32;
 
-/// RFC 1350 default TFTP block size, and the smallest `blksize` we negotiate
-/// down to (also the initial value before any `blksize` option is seen).
+/// RFC 1350 default TFTP block size (also the initial value before any `blksize`
+/// option is seen).
 const DEFAULT_BLKSIZE: usize = 512;
 /// Upper bound on a negotiated `blksize`. Kept under the common 1500-byte
 /// Ethernet MTU (less the 20-byte IP + 8-byte UDP + 4-byte TFTP headers) so a

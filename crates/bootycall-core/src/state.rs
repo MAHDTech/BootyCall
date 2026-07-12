@@ -2,7 +2,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 /// Upper bound on host entries kept in the state store. SEC-4: an unbounded
 /// map lets a MAC-injection flood balloon memory (the state store is fed by
@@ -26,6 +26,10 @@ pub enum HostStatus {
     Failed,
 }
 
+fn default_instant() -> Instant {
+    Instant::now()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostState {
     pub mac: String,
@@ -33,6 +37,8 @@ pub struct HostState {
     pub status: HostStatus,
     pub assigned_target: Option<String>,
     pub last_seen: SystemTime,
+    #[serde(skip, default = "default_instant")]
+    pub last_seen_monotonic: Instant,
     pub client_ip: Option<String>,
     pub architecture: Option<String>,
 }
@@ -46,9 +52,54 @@ pub struct LogEvent {
 }
 
 #[derive(Debug, Clone)]
+struct Clock {
+    mock: Option<Arc<MockClockState>>,
+}
+
+#[derive(Debug)]
+struct MockClockState {
+    system_time: RwLock<SystemTime>,
+    instant: RwLock<Instant>,
+}
+
+#[cfg(test)]
+impl MockClockState {
+    fn set_system_time(&self, time: SystemTime) {
+        *self.system_time.write() = time;
+    }
+
+    fn set_instant(&self, instant: Instant) {
+        *self.instant.write() = instant;
+    }
+}
+
+impl Clock {
+    fn real() -> Self {
+        Self { mock: None }
+    }
+
+    fn now_system(&self) -> SystemTime {
+        if let Some(ref mock) = self.mock {
+            *mock.system_time.read()
+        } else {
+            SystemTime::now()
+        }
+    }
+
+    fn now_instant(&self) -> Instant {
+        if let Some(ref mock) = self.mock {
+            *mock.instant.read()
+        } else {
+            Instant::now()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StateStore {
     hosts: Arc<RwLock<HashMap<String, HostState>>>,
     logs: Arc<RwLock<VecDeque<LogEvent>>>,
+    clock: Clock,
 }
 
 impl Default for StateStore {
@@ -62,7 +113,26 @@ impl StateStore {
         Self {
             hosts: Arc::new(RwLock::new(HashMap::new())),
             logs: Arc::new(RwLock::new(VecDeque::new())),
+            clock: Clock::real(),
         }
+    }
+
+    #[cfg(test)]
+    fn new_mocked(system_now: SystemTime, instant_now: Instant) -> (Self, Arc<MockClockState>) {
+        let state = Arc::new(MockClockState {
+            system_time: RwLock::new(system_now),
+            instant: RwLock::new(instant_now),
+        });
+        (
+            Self {
+                hosts: Arc::new(RwLock::new(HashMap::new())),
+                logs: Arc::new(RwLock::new(VecDeque::new())),
+                clock: Clock {
+                    mock: Some(state.clone()),
+                },
+            },
+            state,
+        )
     }
 
     pub fn update_host_status(
@@ -85,7 +155,7 @@ impl StateStore {
         if !hosts.contains_key(&normalized) && hosts.len() >= MAX_TRACKED_HOSTS {
             let oldest = hosts
                 .values()
-                .min_by_key(|state| state.last_seen)
+                .min_by_key(|state| state.last_seen_monotonic)
                 .map(|state| state.mac.clone());
             if let Some(oldest_mac) = oldest {
                 hosts.remove(&oldest_mac);
@@ -98,13 +168,15 @@ impl StateStore {
                 name: None,
                 status,
                 assigned_target: None,
-                last_seen: SystemTime::now(),
+                last_seen: self.clock.now_system(),
+                last_seen_monotonic: self.clock.now_instant(),
                 client_ip: None,
                 architecture: None,
             });
 
         entry.status = status;
-        entry.last_seen = SystemTime::now();
+        entry.last_seen = self.clock.now_system();
+        entry.last_seen_monotonic = self.clock.now_instant();
         if name.is_some() {
             entry.name = name;
         }
@@ -131,10 +203,10 @@ impl StateStore {
     }
 
     pub fn has_recent_activity(&self, max_age: std::time::Duration) -> bool {
-        let now = SystemTime::now();
+        let now = self.clock.now_instant();
         let hosts = self.hosts.read();
         hosts.values().any(|h| {
-            now.duration_since(h.last_seen)
+            now.checked_duration_since(h.last_seen_monotonic)
                 .map(|age| age <= max_age)
                 .unwrap_or(false)
         })
@@ -143,7 +215,7 @@ impl StateStore {
     pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
         let mut logs = self.logs.write();
         logs.push_back(LogEvent {
-            timestamp: SystemTime::now(),
+            timestamp: self.clock.now_system(),
             level: level.to_string(),
             mac: mac.map(crate::mac::normalize_mac),
             message: message.to_string(),
@@ -161,9 +233,9 @@ impl StateStore {
 
     pub fn clean_stale_hosts(&self, max_idle_secs: u64) {
         let mut hosts = self.hosts.write();
-        let now = SystemTime::now();
+        let now = self.clock.now_instant();
         hosts.retain(|_, state| {
-            if let Ok(duration) = now.duration_since(state.last_seen) {
+            if let Some(duration) = now.checked_duration_since(state.last_seen_monotonic) {
                 duration.as_secs() < max_idle_secs
             } else {
                 true
@@ -457,5 +529,56 @@ mod tests {
             MAX_TRACKED_HOSTS,
             "eviction must swap one entry, keeping the map at the ceiling"
         );
+    }
+
+    #[test]
+    fn test_monotonic_clock_step_resilience() {
+        let system_base = SystemTime::now();
+        let instant_base = Instant::now();
+
+        let (store, clock_state) = StateStore::new_mocked(system_base, instant_base);
+
+        // Insert a host
+        let mac = "00:11:22:33:44:55";
+        store.update_host_status(mac, HostStatus::Polling, None, None, None, None);
+
+        // 1. Simulate a backward clock step in SystemTime
+        // Subtract 1 hour from SystemTime, but advance Instant by only 5 seconds.
+        let backward_system = system_base - std::time::Duration::from_secs(3600);
+        let forward_instant = instant_base + std::time::Duration::from_secs(5);
+
+        clock_state.set_system_time(backward_system);
+        clock_state.set_instant(forward_instant);
+
+        // Host should still be considered active / recently seen because monotonic time only advanced by 5s.
+        assert!(store.has_recent_activity(std::time::Duration::from_secs(30)));
+
+        // clean_stale_hosts with 30s TTL should not remove the host.
+        store.clean_stale_hosts(30);
+        assert!(store.get_host(mac).is_some());
+
+        // 2. Simulate a forward clock step in SystemTime
+        // Add 1 hour to SystemTime, but advance Instant by only another 5 seconds (total 10 seconds).
+        let forward_system = system_base + std::time::Duration::from_secs(3600);
+        let forward_instant_2 = instant_base + std::time::Duration::from_secs(10);
+
+        clock_state.set_system_time(forward_system);
+        clock_state.set_instant(forward_instant_2);
+
+        // Host should still be active/recent
+        assert!(store.has_recent_activity(std::time::Duration::from_secs(30)));
+        store.clean_stale_hosts(30);
+        assert!(store.get_host(mac).is_some());
+
+        // 3. Monotonic time actually passes past the TTL (e.g. 40 seconds)
+        let forward_instant_3 = instant_base + std::time::Duration::from_secs(45);
+        clock_state.set_instant(forward_instant_3);
+
+        // Now it should NOT have recent activity within 30s
+        assert!(!store.has_recent_activity(std::time::Duration::from_secs(30)));
+
+        // clean_stale_hosts should evict it
+        store.clean_stale_hosts(30);
+        assert!(store.get_host(mac).is_none());
     }
 }

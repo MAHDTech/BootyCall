@@ -86,7 +86,7 @@ fn find_file_recursive_bounded<T: ISO9660Reader + 'static>(
             "ISO walker hit MAX_DIR_DEPTH={} — refusing to recurse further",
             MAX_DIR_DEPTH
         );
-        return Ok(None);
+        return Err(ExtractorError::MaxDepthExceeded(MAX_DIR_DEPTH));
     }
     for entry_res in dir.contents() {
         let entry = entry_res.map_err(|e| ExtractorError::Iso(format!("{:?}", e)))?;

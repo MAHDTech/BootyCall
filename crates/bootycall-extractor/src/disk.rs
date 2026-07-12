@@ -129,6 +129,7 @@ pub fn extract_from_disk(
         .map_err(|e| ExtractorError::Disk(format!("Failed to open GPT disk: {:?}", e)))?;
 
     let lb_size = *disk.logical_block_size();
+    let mut found_kernel = false;
 
     // Iterate through partitions and try to find FAT filesystem
     for partition in disk.partitions().values() {
@@ -185,10 +186,8 @@ pub fn extract_from_disk(
             if !kernel_extracted {
                 continue; // Try next partition
             }
-            // Once we've extracted a kernel we're committed to this
-            // partition — a missing initrd here is a genuine error, not
-            // a signal to keep hunting through other partitions and
-            // eventually claim the kernel is missing too (BUG-13).
+
+            found_kernel = true;
 
             let initrd_extracted = match initrd_override {
                 Some(ip) => {
@@ -215,17 +214,24 @@ pub fn extract_from_disk(
             if initrd_extracted {
                 return Ok(());
             }
-            return Err(ExtractorError::InitrdNotFound);
+
+            // Clean up the kernel we just extracted on this partition because the initrd is missing
+            let _ = std::fs::remove_file(out_kernel_path);
+            continue; // Try next partition
         }
     }
 
-    Err(ExtractorError::KernelNotFound)
+    if found_kernel {
+        Err(ExtractorError::InitrdNotFound)
+    } else {
+        Err(ExtractorError::KernelNotFound)
+    }
 }
 
 fn find_file_recursive_fat<'a, T: ReadWriteSeek>(
     dir: &FatDir<'a, T>,
     filter: &dyn Fn(&str) -> bool,
-) -> io::Result<Option<FatFile<'a, T>>> {
+) -> Result<Option<FatFile<'a, T>>, ExtractorError> {
     find_file_recursive_fat_bounded(dir, filter, 0)
 }
 
@@ -237,13 +243,13 @@ fn find_file_recursive_fat_bounded<'a, T: ReadWriteSeek>(
     dir: &FatDir<'a, T>,
     filter: &dyn Fn(&str) -> bool,
     depth: usize,
-) -> io::Result<Option<FatFile<'a, T>>> {
+) -> Result<Option<FatFile<'a, T>>, ExtractorError> {
     if crate::iso::depth_exceeded(depth) {
         bootycall_log::warn!(
             "FAT walker hit MAX_DIR_DEPTH={} — refusing to recurse further",
             crate::iso::MAX_DIR_DEPTH
         );
-        return Ok(None);
+        return Err(ExtractorError::MaxDepthExceeded(crate::iso::MAX_DIR_DEPTH));
     }
     for entry_res in dir.iter() {
         let entry = entry_res?;

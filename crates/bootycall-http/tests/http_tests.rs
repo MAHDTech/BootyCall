@@ -1388,3 +1388,117 @@ async fn test_http_range_requests() {
         assert_eq!(content_range, Some("bytes */20"));
     }
 }
+
+#[tokio::test]
+async fn test_wallpaper_and_menu_endpoints() {
+    let port: u16 = 26200;
+    let (config, _state_store) = spawn_test_server(port).await;
+
+    // 1. GET /dynamic/wallpaper.ipxe (Default/Fallback resolution)
+    {
+        let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("console --x 1024 --y 768"));
+        assert!(!body_str.contains("--picture"));
+    }
+
+    // 2. GET /dynamic/wallpaper.ipxe?width=1920&height=1080
+    {
+        let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe?width=1920&height=1080").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("console --x 1920 --y 1080"));
+    }
+
+    // 3. GET /dynamic/wallpaper.ipxe?hd_video=true
+    {
+        let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe?hd_video=true").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("console --x 1920 --y 1080"));
+    }
+
+    // 4. GET /ipxemenu
+    {
+        let (status, body) = http_get(port, "/ipxemenu").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("menu BootyCall Network Boot Menu"));
+        assert!(body_str.contains("item host_1 nixos-test"));
+        assert!(body_str.contains("item shell Enter iPXE shell"));
+        assert!(body_str.contains("item reboot Reboot system"));
+    }
+}
+
+#[tokio::test]
+async fn test_wallpaper_resolution_matching() {
+    let tmp = tempdir().unwrap();
+    let static_dir = tmp.path().join("assets");
+    let wallpapers_dir = static_dir.join("wallpapers");
+    let res_dir = wallpapers_dir.join("1920x1080");
+    fs::create_dir_all(&res_dir).unwrap();
+    fs::write(res_dir.join("bg.png"), b"PNGIMAGE").unwrap();
+    fs::write(wallpapers_dir.join("fallback.png"), b"PNGIMAGE").unwrap();
+
+    let port: u16 = 26201;
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: static_dir.clone(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let _leaked = Box::leak(Box::new(tmp));
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // 1. Query matching resolution
+    {
+        let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe?width=1920&height=1080").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("console --x 1920 --y 1080"));
+        assert!(
+            body_str
+                .contains("--picture http://127.0.0.1:26201/static/wallpapers/1920x1080/bg.png")
+        );
+    }
+
+    // 2. Query non-matching resolution -> should fallback to root wallpapers directory
+    {
+        let (status, body) = http_get(port, "/dynamic/wallpaper.ipxe?width=800&height=600").await;
+        assert!(status.contains("200 OK"));
+        let body_str = String::from_utf8(body).unwrap();
+        assert!(body_str.contains("console --x 800 --y 600"));
+        assert!(
+            body_str.contains("--picture http://127.0.0.1:26201/static/wallpapers/fallback.png")
+        );
+    }
+}

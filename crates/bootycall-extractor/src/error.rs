@@ -23,4 +23,7 @@ pub enum ExtractorError {
 
     #[error("Extracted artifact exceeds the configured max_artifact_bytes limit of {limit} bytes")]
     ArtifactTooLarge { limit: u64 },
+
+    #[error("Maximum directory depth ({0}) exceeded")]
+    MaxDepthExceeded(usize),
 }

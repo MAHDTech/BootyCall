@@ -72,6 +72,10 @@ impl Default for Framebuffer {
 }
 
 impl Framebuffer {
+    pub fn brightness(&self) -> u8 {
+        self.brightness
+    }
+
     pub fn new() -> Self {
         Self::with_brightness(FULL_BRIGHTNESS)
     }

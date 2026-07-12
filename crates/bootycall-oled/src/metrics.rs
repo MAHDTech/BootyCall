@@ -1,3 +1,4 @@
+// cspell:ignore iface Iface IRTT
 use sysinfo::{Components, Disks, ProcessesToUpdate, System};
 
 /// Bytes per GiB (1024³) — the divisor turning `sysinfo`'s byte counts into the
@@ -48,6 +49,7 @@ pub struct SystemMetrics {
     sys: System,
     components: Components,
     disks: Disks,
+    thermal_zones: Vec<std::path::PathBuf>,
 }
 
 impl Default for SystemMetrics {
@@ -58,10 +60,24 @@ impl Default for SystemMetrics {
 
 impl SystemMetrics {
     pub fn new() -> Self {
+        let mut thermal_zones = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/sys/class/thermal") {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with("thermal_zone"))
+                {
+                    thermal_zones.push(path);
+                }
+            }
+        }
         Self {
             sys: System::new_all(),
             components: Components::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
+            thermal_zones,
         }
     }
 
@@ -92,7 +108,18 @@ impl SystemMetrics {
     }
 
     pub fn get_ip_address(&self) -> String {
-        // Quick UDP probe
+        if let Some(gateway) = get_default_gateway()
+            && let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+                .ok()
+                .and_then(|s| {
+                    s.connect((gateway, 80)).ok()?;
+                    s.local_addr().ok()
+                })
+                .map(|addr| addr.ip().to_string())
+        {
+            return ip;
+        }
+
         if let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
             .ok()
             .and_then(|s| {
@@ -103,6 +130,14 @@ impl SystemMetrics {
         {
             return ip;
         }
+
+        if let Some(ip) = get_local_ips_from_fib_trie()
+            .first()
+            .map(|ip| ip.to_string())
+        {
+            return ip;
+        }
+
         "No IP".to_string()
     }
 
@@ -119,23 +154,13 @@ impl SystemMetrics {
             }
         }
         if max_temp == 0.0 {
-            let read_dir = std::fs::read_dir("/sys/class/thermal");
-            if let Ok(entries) = read_dir {
-                for entry in entries.filter_map(Result::ok) {
-                    let path = entry.path();
-                    if path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .is_some_and(|s| s.starts_with("thermal_zone"))
-                    {
-                        let temp_file = path.join("temp");
-                        if let Ok(content) = std::fs::read_to_string(temp_file)
-                            && let Some(temp_c) = parse_thermal_millidegrees(&content)
-                            && temp_c > max_temp
-                        {
-                            max_temp = temp_c;
-                        }
-                    }
+            for path in &self.thermal_zones {
+                let temp_file = path.join("temp");
+                if let Ok(content) = std::fs::read_to_string(temp_file)
+                    && let Some(temp_c) = parse_thermal_millidegrees(&content)
+                    && temp_c > max_temp
+                {
+                    max_temp = temp_c;
                 }
             }
         }
@@ -189,9 +214,91 @@ impl SystemMetrics {
     }
 }
 
+fn parse_default_gateway(content: &str) -> Option<std::net::Ipv4Addr> {
+    for line in content.lines().skip(1) {
+        let mut parts = line.split_whitespace();
+        let _iface = parts.next()?;
+        let dest_hex = parts.next()?;
+        let gateway_hex = parts.next()?;
+
+        if dest_hex == "00000000" {
+            let gateway_u32 = u32::from_str_radix(gateway_hex, 16).ok()?;
+            if gateway_u32 != 0 {
+                return Some(std::net::Ipv4Addr::from(gateway_u32.to_ne_bytes()));
+            }
+        }
+    }
+    None
+}
+
+fn get_default_gateway() -> Option<std::net::Ipv4Addr> {
+    let content = std::fs::read_to_string("/proc/net/route").ok()?;
+    parse_default_gateway(&content)
+}
+
+fn parse_local_ips_from_fib_trie(content: &str) -> Vec<std::net::Ipv4Addr> {
+    let mut ips = Vec::new();
+    let mut last_ip = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("|--")
+            && let Some(ip_str) = trimmed.split_whitespace().last()
+            && let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>()
+        {
+            last_ip = Some(ip);
+        } else if trimmed.contains("host LOCAL")
+            && let Some(ip) = last_ip
+            && !ip.is_loopback()
+        {
+            ips.push(ip);
+        }
+    }
+    ips
+}
+
+fn get_local_ips_from_fib_trie() -> Vec<std::net::Ipv4Addr> {
+    if let Ok(content) = std::fs::read_to_string("/proc/net/fib_trie") {
+        parse_local_ips_from_fib_trie(&content)
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_default_gateway() {
+        let route_content = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+enp12s0\t00000000\tFE010A0A\t0003\t0\t0\t1024\t00000000\t0\t0\t0
+enp12s0\t00010A0A\t00000000\t0001\t0\t0\t1024\t00FFFFFF\t0\t0\t0
+";
+        let gateway = parse_default_gateway(route_content);
+        assert_eq!(gateway, Some(std::net::Ipv4Addr::new(10, 10, 1, 254)));
+    }
+
+    #[test]
+    fn test_parse_local_ips_from_fib_trie() {
+        let trie_content = "\
+Local:
+  +-- 0.0.0.0/0 3 0 5
+     +-- 10.10.1.128/25 2 0 2
+        |-- 10.10.1.139
+           /32 host LOCAL
+        |-- 10.10.1.255
+           /32 link BROADCAST
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+";
+        let ips = parse_local_ips_from_fib_trie(trie_content);
+        assert_eq!(ips, vec![std::net::Ipv4Addr::new(10, 10, 1, 139)]);
+    }
 
     const GIB: u64 = 1_073_741_824;
 

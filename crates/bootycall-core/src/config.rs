@@ -31,10 +31,15 @@ fn default_bootloader_bios() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    /// IP address and port to bind the HTTP dashboard and dynamic API endpoints.
     pub http_bind: String,
+    /// IP address and port to bind the TFTP server serving bootloader binaries.
     pub tftp_bind: String,
+    /// Local filesystem path to the root directory for TFTP transfers.
     pub tftp_root: PathBuf,
+    /// IP address and port to bind the Proxy DHCP service.
     pub proxy_dhcp_bind: String,
+    /// Local filesystem path to the directory used for caching extracted ISO kernels and initrds.
     pub cache_dir: PathBuf,
     /// Root directory for static HTTP assets (wallpapers, etc.). Resolved
     /// independently of the process CWD; defaults to `./static` so existing
@@ -89,12 +94,19 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
+    /// The hardware MAC address of the target host, normalized to lowercase with colons.
     pub mac: String,
+    /// A unique human-readable hostname or identifier for the target host.
     pub name: String,
+    /// Path to the ISO or disk image on the local filesystem containing the target OS installation files.
     pub image_path: PathBuf,
+    /// Optional path (relative to tftp_root) of a custom bootloader binary to serve to this host.
     pub bootloader: Option<String>,
+    /// Optional custom kernel path within the image (or absolute path) to override extraction.
     pub kernel_path: Option<String>,
+    /// Optional custom initrd path within the image (or absolute path) to override extraction.
     pub initrd_path: Option<String>,
+    /// Optional kernel command line arguments/parameters appended during boot.
     pub cmdline: Option<String>,
 }
 
@@ -144,8 +156,6 @@ impl Config {
         use std::collections::HashSet;
         use std::net::SocketAddr;
 
-        let invalid = |msg: String| CoreError::InvalidConfig(msg);
-
         // Bind addresses must parse as a concrete host:port socket address.
         for (field, value) in [
             ("http_bind", &self.server.http_bind),
@@ -153,9 +163,10 @@ impl Config {
             ("proxy_dhcp_bind", &self.server.proxy_dhcp_bind),
         ] {
             if value.parse::<SocketAddr>().is_err() {
-                return Err(invalid(format!(
-                    "server.{field} = {value:?} is not a valid socket address (expected e.g. \"0.0.0.0:69\")"
-                )));
+                return Err(CoreError::InvalidBindAddr {
+                    field: field.to_string(),
+                    value: value.clone(),
+                });
             }
         }
 
@@ -176,7 +187,7 @@ impl Config {
             ),
         ] {
             if value.trim().is_empty() {
-                return Err(invalid(format!("server.{field} must not be empty")));
+                return Err(CoreError::EmptyBootloader(field.to_string()));
             }
         }
 
@@ -184,10 +195,7 @@ impl Config {
         if let Some(token) = &self.server.api_token
             && token.is_empty()
         {
-            return Err(invalid(
-                "server.api_token is set but empty; unset it to disable auth or provide a real secret"
-                    .to_string(),
-            ));
+            return Err(CoreError::EmptyApiToken);
         }
 
         // advertised_host and allowed_hosts entries are interpolated into
@@ -196,25 +204,22 @@ impl Config {
         if let Some(advertised) = &self.server.advertised_host
             && (advertised.is_empty() || advertised.chars().any(char::is_whitespace))
         {
-            return Err(invalid(format!(
-                "server.advertised_host = {advertised:?} must be a non-empty host[:port] without whitespace"
-            )));
+            return Err(CoreError::InvalidAdvertisedHost {
+                value: advertised.clone(),
+            });
         }
         for host in &self.server.allowed_hosts {
             if host.is_empty() || host.chars().any(char::is_whitespace) {
-                return Err(invalid(format!(
-                    "server.allowed_hosts entry {host:?} must be a non-empty hostname/IP without whitespace"
-                )));
+                return Err(CoreError::InvalidAllowedHost {
+                    value: host.clone(),
+                });
             }
         }
 
         // A zero artifact ceiling would reject every extraction — almost
         // certainly a mistake; unset it for "unbounded".
         if self.server.max_artifact_bytes == Some(0) {
-            return Err(invalid(
-                "server.max_artifact_bytes is 0 (rejects all artifacts); unset it for unbounded"
-                    .to_string(),
-            ));
+            return Err(CoreError::ZeroArtifactCap);
         }
 
         // Per-host: valid MAC syntax, and no duplicate MAC or name.
@@ -222,27 +227,22 @@ impl Config {
         let mut seen_names: HashSet<&str> = HashSet::new();
         for host in &self.hosts {
             if !crate::mac::is_valid_mac(&host.mac) {
-                return Err(invalid(format!(
-                    "host {:?} has an invalid MAC address {:?} (expected aa:bb:cc:dd:ee:ff)",
-                    host.name, host.mac
-                )));
+                return Err(CoreError::InvalidMac {
+                    host: host.name.clone(),
+                    mac: host.mac.clone(),
+                });
             }
             if !seen_macs.insert(host.mac.as_str()) {
-                return Err(invalid(format!(
-                    "duplicate host MAC {:?} (each host MAC must be unique)",
-                    host.mac
-                )));
+                return Err(CoreError::DuplicateMac(host.mac.clone()));
             }
             // Key uniqueness on the *trimmed* name: "web" and "web " would
             // otherwise pass as two distinct hosts and confuse the dashboard.
             let name = host.name.trim();
             if name.is_empty() {
-                return Err(invalid("a host has an empty name".to_string()));
+                return Err(CoreError::EmptyHostName);
             }
             if !seen_names.insert(name) {
-                return Err(invalid(format!(
-                    "duplicate host name {name:?} (each host name must be unique)"
-                )));
+                return Err(CoreError::DuplicateName(name.to_string()));
             }
         }
 
@@ -735,16 +735,6 @@ hosts:
         }
     }
 
-    fn assert_invalid(cfg: &Config, needle: &str) {
-        match cfg.validate() {
-            Err(CoreError::InvalidConfig(msg)) => assert!(
-                msg.contains(needle),
-                "error {msg:?} did not mention {needle:?}"
-            ),
-            other => panic!("expected InvalidConfig mentioning {needle:?}, got {other:?}"),
-        }
-    }
-
     #[test]
     fn validate_accepts_a_good_config() {
         assert!(valid_config().validate().is_ok());
@@ -758,36 +748,58 @@ hosts:
     fn validate_rejects_bad_bind_address() {
         let mut cfg = valid_config();
         cfg.server.http_bind = "localhost".to_string();
-        assert_invalid(&cfg, "http_bind");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidBindAddr { ref field, ref value })
+                if field == "http_bind" && value == "localhost"
+        ));
 
         let mut cfg = valid_config();
         cfg.server.tftp_bind = "0.0.0.0:69 ".to_string(); // trailing space
-        assert_invalid(&cfg, "tftp_bind");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidBindAddr { ref field, ref value })
+                if field == "tftp_bind" && value == "0.0.0.0:69 "
+        ));
 
         let mut cfg = valid_config();
         cfg.server.proxy_dhcp_bind = "not-an-addr".to_string();
-        assert_invalid(&cfg, "proxy_dhcp_bind");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidBindAddr { ref field, ref value })
+                if field == "proxy_dhcp_bind" && value == "not-an-addr"
+        ));
     }
 
     #[test]
     fn validate_rejects_malformed_mac() {
         let mut cfg = valid_config();
         cfg.hosts[0].mac = "zz:bb:cc:dd:ee:ff".to_string();
-        assert_invalid(&cfg, "invalid MAC");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidMac { ref host, ref mac })
+                if host == "host-a" && mac == "zz:bb:cc:dd:ee:ff"
+        ));
     }
 
     #[test]
     fn validate_rejects_duplicate_mac() {
         let mut cfg = valid_config();
         cfg.hosts[1].mac = cfg.hosts[0].mac.clone();
-        assert_invalid(&cfg, "duplicate host MAC");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::DuplicateMac(ref mac)) if mac == &cfg.hosts[0].mac
+        ));
     }
 
     #[test]
     fn validate_rejects_duplicate_name() {
         let mut cfg = valid_config();
         cfg.hosts[1].name = cfg.hosts[0].name.clone();
-        assert_invalid(&cfg, "duplicate host name");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::DuplicateName(ref name)) if name == &cfg.hosts[0].name
+        ));
     }
 
     #[test]
@@ -796,31 +808,43 @@ hosts:
         let mut cfg = valid_config();
         cfg.hosts[0].name = "web".to_string();
         cfg.hosts[1].name = "web ".to_string();
-        assert_invalid(&cfg, "duplicate host name");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::DuplicateName(ref name)) if name == "web"
+        ));
 
         // Leading whitespace collides too.
         let mut cfg = valid_config();
         cfg.hosts[0].name = " web".to_string();
         cfg.hosts[1].name = "web".to_string();
-        assert_invalid(&cfg, "duplicate host name");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::DuplicateName(ref name)) if name == "web"
+        ));
     }
 
     #[test]
     fn validate_rejects_empty_bootloader() {
         let mut cfg = valid_config();
         cfg.server.default_bootloader_amd64 = String::new();
-        assert_invalid(&cfg, "default_bootloader_amd64");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::EmptyBootloader(ref field)) if field == "default_bootloader_amd64"
+        ));
 
         let mut cfg = valid_config();
         cfg.server.default_bootloader_arm64 = "   ".to_string();
-        assert_invalid(&cfg, "default_bootloader_arm64");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::EmptyBootloader(ref field)) if field == "default_bootloader_arm64"
+        ));
     }
 
     #[test]
     fn validate_rejects_empty_api_token() {
         let mut cfg = valid_config();
         cfg.server.api_token = Some(String::new());
-        assert_invalid(&cfg, "api_token");
+        assert!(matches!(cfg.validate(), Err(CoreError::EmptyApiToken)));
         // A real secret is accepted.
         cfg.server.api_token = Some("s3cr3t".to_string());
         assert!(cfg.validate().is_ok());
@@ -830,19 +854,25 @@ hosts:
     fn validate_rejects_empty_host_name() {
         let mut cfg = valid_config();
         cfg.hosts[0].name = String::new();
-        assert_invalid(&cfg, "empty name");
+        assert!(matches!(cfg.validate(), Err(CoreError::EmptyHostName)));
     }
 
     #[test]
     fn validate_rejects_bad_advertised_host() {
         let mut cfg = valid_config();
         cfg.server.advertised_host = Some(String::new());
-        assert_invalid(&cfg, "advertised_host");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidAdvertisedHost { ref value }) if value.is_empty()
+        ));
 
         // Whitespace would let the value inject extra iPXE script lines.
         let mut cfg = valid_config();
         cfg.server.advertised_host = Some("boot.example\nchain evil".to_string());
-        assert_invalid(&cfg, "advertised_host");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidAdvertisedHost { ref value }) if value == "boot.example\nchain evil"
+        ));
 
         // A real host:port is accepted.
         let mut cfg = valid_config();
@@ -854,16 +884,29 @@ hosts:
     fn validate_rejects_bad_allowed_hosts_entry() {
         let mut cfg = valid_config();
         cfg.server.allowed_hosts = vec!["192.168.1.10".to_string(), String::new()];
-        assert_invalid(&cfg, "allowed_hosts");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidAllowedHost { ref value }) if value.is_empty()
+        ));
 
         let mut cfg = valid_config();
         cfg.server.allowed_hosts = vec!["boot example".to_string()];
-        assert_invalid(&cfg, "allowed_hosts");
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidAllowedHost { ref value }) if value == "boot example"
+        ));
 
         // Plain hostnames/IPs are accepted.
         let mut cfg = valid_config();
         cfg.server.allowed_hosts = vec!["192.168.1.10".to_string(), "boot.internal".to_string()];
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_artifact_bytes() {
+        let mut cfg = valid_config();
+        cfg.server.max_artifact_bytes = Some(0);
+        assert!(matches!(cfg.validate(), Err(CoreError::ZeroArtifactCap)));
     }
 
     #[test]

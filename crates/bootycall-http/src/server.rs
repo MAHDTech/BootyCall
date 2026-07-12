@@ -474,7 +474,7 @@ async fn poll_handler(
             };
 
             if is_ready {
-                state.state_store.update_host_status(
+                let _ = state.state_store.update_host_status(
                     &mac_str,
                     HostStatus::Booting,
                     None,
@@ -482,7 +482,7 @@ async fn poll_handler(
                     Some(client_ip.clone()),
                     None,
                 );
-                state.state_store.log_event(
+                let _ = state.state_store.log_event(
                     "INFO",
                     Some(&mac_str),
                     &format!(
@@ -497,7 +497,7 @@ async fn poll_handler(
                 );
                 ([(header::CONTENT_TYPE, "text/plain")], script).into_response()
             } else {
-                state.state_store.update_host_status(
+                let _ = state.state_store.update_host_status(
                     &mac_str,
                     HostStatus::Polling,
                     None,
@@ -505,7 +505,7 @@ async fn poll_handler(
                     Some(client_ip.clone()),
                     None,
                 );
-                state.state_store.log_event(
+                let _ = state.state_store.log_event(
                     "WARN",
                     Some(&mac_str),
                     &format!(
@@ -531,7 +531,7 @@ async fn poll_handler(
             // fault). Do NOT transition the host to Booting — mark it Failed,
             // emit an event, and return a non-empty HTTP 500 body rather than
             // the old empty-200 that left the client stuck with no signal.
-            state.state_store.update_host_status(
+            let _ = state.state_store.update_host_status(
                 &mac_str,
                 HostStatus::Failed,
                 None,
@@ -539,9 +539,10 @@ async fn poll_handler(
                 Some(client_ip.clone()),
                 None,
             );
-            state
-                .state_store
-                .log_event("ERROR", Some(&mac_str), "Boot script render failed");
+            let _ =
+                state
+                    .state_store
+                    .log_event("ERROR", Some(&mac_str), "Boot script render failed");
             bootycall_log::event!(
                 "http_boot_render_failed",
                 mac = %mac_str,
@@ -555,7 +556,7 @@ async fn poll_handler(
                 .into_response()
         }
         PollOutcome::Poll => {
-            state.state_store.update_host_status(
+            let _ = state.state_store.update_host_status(
                 &mac_str,
                 HostStatus::Polling,
                 None,
@@ -902,7 +903,7 @@ async fn api_override_handler(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    state.state_store.update_host_status(
+    let _ = state.state_store.update_host_status(
         &mac_str,
         HostStatus::Polling,
         None,
@@ -911,7 +912,7 @@ async fn api_override_handler(
         None,
     );
 
-    state.state_store.log_event(
+    let _ = state.state_store.log_event(
         "INFO",
         Some(&mac_str),
         &format!("Assigned manual override target: {}", payload.target),
@@ -1251,14 +1252,16 @@ mod tests {
         let template = env.get_template("boot").unwrap();
         let config = test_config(vec![]);
         let store = StateStore::new();
-        store.update_host_status(
-            "11:22:33:44:55:66",
-            HostStatus::Polling,
-            None,
-            Some("ghost-target".to_string()),
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "11:22:33:44:55:66",
+                HostStatus::Polling,
+                None,
+                Some("ghost-target".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
 
         let outcome = decide_poll_outcome(
             &template,

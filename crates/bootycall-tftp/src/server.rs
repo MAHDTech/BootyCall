@@ -430,8 +430,8 @@ async fn handle_tftp_transfer(
         client_addr, total_blocks, negotiated_windowsize
     );
     if let Some(ref mac) = mac_addr {
-        state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
-        state_store.log_event(
+        let _ = state_store.update_host_status(mac, HostStatus::Completed, None, None, None, None);
+        let _ = state_store.log_event(
             "INFO",
             Some(mac),
             &format!("TFTP transfer completed: {} blocks sent", total_blocks),
@@ -554,8 +554,8 @@ fn mark_tftp_failed(
     reason: &str,
 ) {
     if let Some(mac) = mac_addr {
-        state_store.update_host_status(mac, HostStatus::Failed, None, None, None, None);
-        state_store.log_event(
+        let _ = state_store.update_host_status(mac, HostStatus::Failed, None, None, None, None);
+        let _ = state_store.log_event(
             "ERROR",
             Some(mac),
             &format!("TFTP transfer failed: {}", reason),
@@ -805,8 +805,9 @@ pub async fn run_tftp_server_with_limit(
         };
 
         if let Some(ref mac) = mac_addr {
-            state_store.update_host_status(mac, HostStatus::Booting, None, None, None, None);
-            state_store.log_event(
+            let _ =
+                state_store.update_host_status(mac, HostStatus::Booting, None, None, None, None);
+            let _ = state_store.log_event(
                 "INFO",
                 Some(mac),
                 &format!(

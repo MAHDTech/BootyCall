@@ -1,3 +1,4 @@
+use crate::error::CoreError;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -109,6 +110,7 @@ impl Default for StateStore {
 }
 
 impl StateStore {
+    /// Creates a new, empty instance of `StateStore`.
     pub fn new() -> Self {
         Self {
             hosts: Arc::new(RwLock::new(HashMap::new())),
@@ -118,6 +120,7 @@ impl StateStore {
     }
 
     #[cfg(test)]
+    /// Creates a mocked instance of `StateStore` for unit testing with predictable timestamps.
     fn new_mocked(system_now: SystemTime, instant_now: Instant) -> (Self, Arc<MockClockState>) {
         let state = Arc::new(MockClockState {
             system_time: RwLock::new(system_now),
@@ -135,6 +138,11 @@ impl StateStore {
         )
     }
 
+    /// Updates the status and other tracked details of a host identified by its MAC address.
+    ///
+    /// If the MAC address is invalid, returns a `CoreError::InvalidMac` error.
+    /// Enforces the maximum tracked hosts limit by evicting the least-recently-seen host (LRU)
+    /// if the map is at its ceiling.
     pub fn update_host_status(
         &self,
         mac: &str,
@@ -143,9 +151,15 @@ impl StateStore {
         target: Option<String>,
         ip: Option<String>,
         arch: Option<String>,
-    ) {
-        let mut hosts = self.hosts.write();
+    ) -> Result<(), CoreError> {
         let normalized = crate::mac::normalize_mac(mac);
+        if !crate::mac::is_valid_mac(&normalized) {
+            return Err(CoreError::InvalidMac {
+                host: name.unwrap_or_default(),
+                mac: normalized,
+            });
+        }
+        let mut hosts = self.hosts.write();
         // SEC-4: if we're at the ceiling and this MAC is new, evict the
         // least-recently-seen entry (LRU) to make room instead of dropping
         // the newcomer. Dropping would let an attacker who keeps their
@@ -189,19 +203,26 @@ impl StateStore {
         if arch.is_some() {
             entry.architecture = arch;
         }
+        Ok(())
     }
 
+    /// Retrieves the current state of a host by its MAC address.
+    ///
+    /// The lookup is case-insensitive and normalizes separator hyphens to colons automatically.
+    /// Returns `None` if the host is not tracked in the state store.
     pub fn get_host(&self, mac: &str) -> Option<HostState> {
         let hosts = self.hosts.read();
         let normalized = crate::mac::normalize_mac(mac);
         hosts.get(&normalized).cloned()
     }
 
+    /// Lists all hosts currently tracked by the state store.
     pub fn list_hosts(&self) -> Vec<HostState> {
         let hosts = self.hosts.read();
         hosts.values().cloned().collect()
     }
 
+    /// Checks if any tracked hosts have reported activity within the specified maximum age duration.
     pub fn has_recent_activity(&self, max_age: std::time::Duration) -> bool {
         let now = self.clock.now_instant();
         let hosts = self.hosts.read();
@@ -212,25 +233,49 @@ impl StateStore {
         })
     }
 
-    pub fn log_event(&self, level: &str, mac: Option<&str>, message: &str) {
+    /// Logs a system or server event associated with an optional MAC address.
+    ///
+    /// If the provided MAC address is invalid, returns a `CoreError::InvalidMac` error.
+    /// Limits the total log entry count by evicting the oldest entries (FIFO) if `MAX_LOGS` is exceeded.
+    pub fn log_event(
+        &self,
+        level: &str,
+        mac: Option<&str>,
+        message: &str,
+    ) -> Result<(), CoreError> {
+        let validated_mac = if let Some(m) = mac {
+            let normalized = crate::mac::normalize_mac(m);
+            if !crate::mac::is_valid_mac(&normalized) {
+                return Err(CoreError::InvalidMac {
+                    host: String::new(),
+                    mac: normalized,
+                });
+            }
+            Some(normalized)
+        } else {
+            None
+        };
         let mut logs = self.logs.write();
         logs.push_back(LogEvent {
             timestamp: self.clock.now_system(),
             level: level.to_string(),
-            mac: mac.map(crate::mac::normalize_mac),
+            mac: validated_mac,
             message: message.to_string(),
         });
         // Evict oldest first (O(1) per pop) until back within the ring cap.
         while logs.len() > MAX_LOGS {
             logs.pop_front();
         }
+        Ok(())
     }
 
+    /// Lists all event log entries in chronological order.
     pub fn list_logs(&self) -> Vec<LogEvent> {
         let logs = self.logs.read();
         logs.iter().cloned().collect()
     }
 
+    /// Sweeps and evicts hosts that have not been seen for longer than `max_idle_secs` seconds.
     pub fn clean_stale_hosts(&self, max_idle_secs: u64) {
         let mut hosts = self.hosts.write();
         let now = self.clock.now_instant();
@@ -257,14 +302,16 @@ mod tests {
         assert_eq!(store.list_logs().len(), 0);
 
         // Update host status
-        store.update_host_status(
-            "AA-BB-CC-11-22-33",
-            HostStatus::Polling,
-            Some("host1".to_string()),
-            Some("target1".to_string()),
-            Some("192.168.1.100".to_string()),
-            Some("x86_64".to_string()),
-        );
+        store
+            .update_host_status(
+                "AA-BB-CC-11-22-33",
+                HostStatus::Polling,
+                Some("host1".to_string()),
+                Some("target1".to_string()),
+                Some("192.168.1.100".to_string()),
+                Some("x86_64".to_string()),
+            )
+            .unwrap();
 
         // MAC address should be normalized
         let host = store.get_host("aa:bb:cc:11:22:33").unwrap();
@@ -275,7 +322,9 @@ mod tests {
         assert_eq!(host.architecture, Some("x86_64".to_string()));
 
         // Log events
-        store.log_event("INFO", Some("AA-BB-CC-11-22-33"), "Started polling");
+        store
+            .log_event("INFO", Some("AA-BB-CC-11-22-33"), "Started polling")
+            .unwrap();
         let logs = store.list_logs();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].mac, Some("aa:bb:cc:11:22:33".to_string()));
@@ -286,14 +335,16 @@ mod tests {
     fn test_clean_stale_hosts() {
         let store = StateStore::new();
 
-        store.update_host_status(
-            "aa:bb:cc:00:00:01",
-            HostStatus::Polling,
-            Some("stale-host".to_string()),
-            None,
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "aa:bb:cc:00:00:01",
+                HostStatus::Polling,
+                Some("stale-host".to_string()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         // Verify the host exists
         assert!(store.get_host("aa:bb:cc:00:00:01").is_some());
@@ -317,24 +368,28 @@ mod tests {
         let store = StateStore::new();
 
         // First update sets all fields
-        store.update_host_status(
-            "aa:bb:cc:00:00:02",
-            HostStatus::Booting,
-            Some("my-host".to_string()),
-            Some("target-a".to_string()),
-            Some("10.0.0.1".to_string()),
-            Some("aarch64".to_string()),
-        );
+        store
+            .update_host_status(
+                "aa:bb:cc:00:00:02",
+                HostStatus::Booting,
+                Some("my-host".to_string()),
+                Some("target-a".to_string()),
+                Some("10.0.0.1".to_string()),
+                Some("aarch64".to_string()),
+            )
+            .unwrap();
 
         // Second update passes None for optional fields — originals should survive
-        store.update_host_status(
-            "aa:bb:cc:00:00:02",
-            HostStatus::Completed,
-            None,
-            None,
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "aa:bb:cc:00:00:02",
+                HostStatus::Completed,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let host = store.get_host("aa:bb:cc:00:00:02").unwrap();
         assert_eq!(
@@ -377,30 +432,36 @@ mod tests {
     fn test_list_hosts_returns_all() {
         let store = StateStore::new();
 
-        store.update_host_status(
-            "aa:00:00:00:00:01",
-            HostStatus::Polling,
-            None,
-            None,
-            None,
-            None,
-        );
-        store.update_host_status(
-            "aa:00:00:00:00:02",
-            HostStatus::Booting,
-            None,
-            None,
-            None,
-            None,
-        );
-        store.update_host_status(
-            "aa:00:00:00:00:03",
-            HostStatus::Completed,
-            None,
-            None,
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "aa:00:00:00:00:01",
+                HostStatus::Polling,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .update_host_status(
+                "aa:00:00:00:00:02",
+                HostStatus::Booting,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .update_host_status(
+                "aa:00:00:00:00:03",
+                HostStatus::Completed,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let hosts = store.list_hosts();
         assert_eq!(
@@ -414,9 +475,11 @@ mod tests {
     fn test_log_event_ordering() {
         let store = StateStore::new();
 
-        store.log_event("INFO", None, "first event");
-        store.log_event("WARN", Some("aa:bb:cc:dd:ee:ff"), "second event");
-        store.log_event("ERROR", None, "third event");
+        store.log_event("INFO", None, "first event").unwrap();
+        store
+            .log_event("WARN", Some("aa:bb:cc:dd:ee:ff"), "second event")
+            .unwrap();
+        store.log_event("ERROR", None, "third event").unwrap();
 
         let logs = store.list_logs();
         assert_eq!(logs.len(), 3);
@@ -442,7 +505,9 @@ mod tests {
         // 0x00..0xff) — all distinct, all valid lower-hex.
         for i in 0..MAX_TRACKED_HOSTS {
             let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
-            store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+            store
+                .update_host_status(&mac, HostStatus::Polling, None, None, None, None)
+                .unwrap();
         }
         assert_eq!(
             store.list_hosts().len(),
@@ -452,14 +517,16 @@ mod tests {
 
         // (a) A brand-new MAC at the ceiling is admitted by evicting the
         // least-recently-seen entry; the map never grows past the ceiling.
-        store.update_host_status(
-            "de:ad:be:ef:00:01",
-            HostStatus::Polling,
-            None,
-            None,
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "de:ad:be:ef:00:01",
+                HostStatus::Polling,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         assert!(
             store.get_host("de:ad:be:ef:00:01").is_some(),
             "a new MAC at the ceiling must be admitted via LRU eviction"
@@ -472,7 +539,9 @@ mod tests {
 
         // (b) An already-tracked MAC still updates in place at the ceiling.
         let existing = "de:ad:be:ef:00:01";
-        store.update_host_status(existing, HostStatus::Completed, None, None, None, None);
+        store
+            .update_host_status(existing, HostStatus::Completed, None, None, None, None)
+            .unwrap();
         assert_eq!(
             store.get_host(existing).unwrap().status,
             HostStatus::Completed,
@@ -488,7 +557,9 @@ mod tests {
         // Fill the store to the ceiling with an attacker's distinct MACs.
         for i in 0..MAX_TRACKED_HOSTS {
             let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
-            store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+            store
+                .update_host_status(&mac, HostStatus::Polling, None, None, None, None)
+                .unwrap();
         }
         assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
 
@@ -500,21 +571,25 @@ mod tests {
         for i in 0..MAX_TRACKED_HOSTS {
             let mac = format!("02:00:00:00:{:02x}:{:02x}", (i >> 8) & 0xff, i & 0xff);
             if mac != victim {
-                store.update_host_status(&mac, HostStatus::Polling, None, None, None, None);
+                store
+                    .update_host_status(&mac, HostStatus::Polling, None, None, None, None)
+                    .unwrap();
             }
         }
         assert_eq!(store.list_hosts().len(), MAX_TRACKED_HOSTS);
 
         // A legitimate host shows up while the flood keeps the map full: it
         // must be admitted, evicting the least-recently-seen entry.
-        store.update_host_status(
-            "aa:bb:cc:dd:ee:0f",
-            HostStatus::Polling,
-            None,
-            None,
-            None,
-            None,
-        );
+        store
+            .update_host_status(
+                "aa:bb:cc:dd:ee:0f",
+                HostStatus::Polling,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         assert!(
             store.get_host("aa:bb:cc:dd:ee:0f").is_some(),
@@ -540,7 +615,9 @@ mod tests {
 
         // Insert a host
         let mac = "00:11:22:33:44:55";
-        store.update_host_status(mac, HostStatus::Polling, None, None, None, None);
+        store
+            .update_host_status(mac, HostStatus::Polling, None, None, None, None)
+            .unwrap();
 
         // 1. Simulate a backward clock step in SystemTime
         // Subtract 1 hour from SystemTime, but advance Instant by only 5 seconds.
@@ -580,5 +657,24 @@ mod tests {
         // clean_stale_hosts should evict it
         store.clean_stale_hosts(30);
         assert!(store.get_host(mac).is_none());
+    }
+
+    #[test]
+    fn test_invalid_mac_rejected() {
+        let store = StateStore::new();
+        let res = store.update_host_status(
+            "invalid-mac-address",
+            HostStatus::Polling,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(res.is_err());
+        assert!(matches!(res, Err(CoreError::InvalidMac { .. })));
+
+        let log_res = store.log_event("INFO", Some("invalid-mac-address"), "test message");
+        assert!(log_res.is_err());
+        assert!(matches!(log_res, Err(CoreError::InvalidMac { .. })));
     }
 }

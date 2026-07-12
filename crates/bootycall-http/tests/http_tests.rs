@@ -359,8 +359,12 @@ async fn test_api_logs_endpoint() {
     let (_config, state_store) = spawn_test_server(port).await;
 
     // Seed some log events so we can verify they appear
-    state_store.log_event("INFO", Some("aa:bb:cc:dd:ee:ff"), "Test log entry");
-    state_store.log_event("WARN", None, "Another test log");
+    state_store
+        .log_event("INFO", Some("aa:bb:cc:dd:ee:ff"), "Test log entry")
+        .unwrap();
+    state_store
+        .log_event("WARN", None, "Another test log")
+        .unwrap();
 
     // GET /api/logs should return 200 with a JSON array
     let mut client = TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -616,14 +620,16 @@ async fn test_poll_missing_override_target_keeps_polling() {
     // must keep polling (200 + retry script), not boot (issue 010/046).
     let port: u16 = 26103;
     let (_config, state_store) = spawn_test_server(port).await;
-    state_store.update_host_status(
-        "11:22:33:44:55:66",
-        HostStatus::Polling,
-        None,
-        Some("does-not-exist".to_string()),
-        None,
-        None,
-    );
+    state_store
+        .update_host_status(
+            "11:22:33:44:55:66",
+            HostStatus::Polling,
+            None,
+            Some("does-not-exist".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
 
     let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await

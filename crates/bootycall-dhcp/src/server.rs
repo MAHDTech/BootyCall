@@ -412,7 +412,7 @@ async fn respond_to_pxe_request(
             mac_str,
             arch.map(|a| a.0)
         );
-        state_store.log_event(
+        let _ = state_store.log_event(
             "WARN",
             Some(&mac_str),
             &format!(
@@ -427,7 +427,7 @@ async fn respond_to_pxe_request(
     let our_ip = resolve_local_ip(&request, socket).await;
 
     // Update StateStore
-    state_store.update_host_status(
+    let _ = state_store.update_host_status(
         &mac_str,
         HostStatus::Polling,
         host_name,
@@ -436,7 +436,7 @@ async fn respond_to_pxe_request(
         Some(arch_str.to_string()),
     );
 
-    state_store.log_event(
+    let _ = state_store.log_event(
         "INFO",
         Some(&mac_str),
         &format!(

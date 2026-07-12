@@ -90,14 +90,16 @@ async fn test_tftp_server_negotiation_and_transfer() {
     let state_store = StateStore::new();
 
     // Insert host in state store, mapping 127.0.0.1 to MAC 00:aa:bb:cc:dd:ee
-    state_store.update_host_status(
-        "00:aa:bb:cc:dd:ee",
-        HostStatus::Polling,
-        Some("test-client".to_string()),
-        None,
-        Some("127.0.0.1".to_string()),
-        Some("x86_64".to_string()),
-    );
+    state_store
+        .update_host_status(
+            "00:aa:bb:cc:dd:ee",
+            HostStatus::Polling,
+            Some("test-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
 
     // 3. Spawn TFTP Server
     let server_store = state_store.clone();
@@ -498,14 +500,16 @@ async fn test_tftp_timeout_marks_host_failed() {
 
     // Map 127.0.0.1 -> a known MAC so the transfer associates a host.
     let mac = "00:11:22:33:44:55";
-    state_store.update_host_status(
-        mac,
-        HostStatus::Polling,
-        Some("failing-client".to_string()),
-        None,
-        Some("127.0.0.1".to_string()),
-        Some("x86_64".to_string()),
-    );
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("failing-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
 
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
@@ -668,14 +672,16 @@ async fn test_tftp_server_busy_marks_known_host_failed() {
 
     // Map 127.0.0.1 -> a known MAC so the RRQs associate a host.
     let mac = "00:aa:bb:cc:dd:71";
-    state_store.update_host_status(
-        mac,
-        HostStatus::Polling,
-        Some("busy-client".to_string()),
-        None,
-        Some("127.0.0.1".to_string()),
-        Some("x86_64".to_string()),
-    );
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("busy-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
 
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
@@ -774,14 +780,16 @@ async fn test_tftp_server_ipv6_negotiation_and_transfer() {
     // Map ::1 -> a known MAC so the transfer exercises the SocketAddr::V6
     // branch of the client-IP host lookup and the status transitions.
     let mac = "00:aa:bb:cc:dd:60";
-    state_store.update_host_status(
-        mac,
-        HostStatus::Polling,
-        Some("ipv6-client".to_string()),
-        None,
-        Some("::1".to_string()),
-        Some("x86_64".to_string()),
-    );
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("ipv6-client".to_string()),
+            None,
+            Some("::1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
 
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();
@@ -899,14 +907,16 @@ async fn test_tftp_bios_default_redirected_to_override() {
 
     // Map 127.0.0.1 -> the overridden MAC so the RRQ associates the host.
     let mac = "00:aa:bb:cc:dd:72";
-    state_store.update_host_status(
-        mac,
-        HostStatus::Polling,
-        Some("bios-client".to_string()),
-        None,
-        Some("127.0.0.1".to_string()),
-        Some("x86 (BIOS)".to_string()),
-    );
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("bios-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86 (BIOS)".to_string()),
+        )
+        .unwrap();
 
     let server_store = state_store.clone();
     let server_config_clone = shared_config.clone();

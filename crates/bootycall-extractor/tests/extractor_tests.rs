@@ -921,6 +921,7 @@ fn test_sync_all_hosts_cache_unbounded_warning() {
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(BufWriter(buf.clone()))
+        .with_max_level(tracing::Level::WARN)
         .finish();
 
     let dir = tempdir().unwrap();

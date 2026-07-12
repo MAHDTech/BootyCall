@@ -3,8 +3,10 @@ use bootycall_core::config::{Config, ServerConfig};
 use bootycall_core::state::{HostStatus, StateStore};
 use bootycall_log::{debug, error, info, warn};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder, v4};
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::UdpSocket;
 
 /// PXE client system architecture (DHCP Option 93 / RFC 5970) values we route
@@ -35,6 +37,18 @@ const CHADDR_MAX_LEN: usize = 16;
 /// worth of bytes to identify the client.
 const MAC_LEN: usize = 6;
 
+static IP_RESOLVE_CACHE: OnceLock<RwLock<HashMap<Ipv4Addr, Ipv4Addr>>> = OnceLock::new();
+
+fn get_cached_local_ip(target: Ipv4Addr) -> Option<Ipv4Addr> {
+    let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    cache.read().get(&target).copied()
+}
+
+fn cache_local_ip(target: Ipv4Addr, local_ip: Ipv4Addr) {
+    let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    cache.write().insert(target, local_ip);
+}
+
 fn get_local_ip_for_target(target: Ipv4Addr) -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket
@@ -51,35 +65,65 @@ fn get_default_local_ip() -> Ipv4Addr {
         .unwrap_or_else(|| Ipv4Addr::new(127, 0, 0, 1))
 }
 
-fn resolve_local_ip(request: &v4::Message, socket: &UdpSocket) -> Ipv4Addr {
-    // 1. Try resolving using client's IP (ciaddr)
+async fn resolve_local_ip(request: &v4::Message, socket: &UdpSocket) -> Ipv4Addr {
     let ciaddr = request.ciaddr();
-    if !ciaddr.is_unspecified() {
-        let ip_opt = get_local_ip_for_target(ciaddr);
-        if let Some(ip) = ip_opt {
-            return ip;
-        }
-    }
-
-    // 2. Try resolving using relay IP (giaddr)
     let giaddr = request.giaddr();
+    let local_addr = socket.local_addr().ok();
+
+    // 1. Try checking cache first for direct lookups to avoid spawn_blocking entirely when cached.
+    if !ciaddr.is_unspecified() {
+        let ip_opt = get_cached_local_ip(ciaddr);
+        if let Some(ip) = ip_opt {
+            return ip;
+        }
+    }
     if !giaddr.is_unspecified() {
-        let ip_opt = get_local_ip_for_target(giaddr);
+        let ip_opt = get_cached_local_ip(giaddr);
         if let Some(ip) = ip_opt {
             return ip;
         }
     }
 
-    // 3. Fallback: look up the local address of the socket
-    if let Ok(addr) = socket.local_addr() {
-        match addr.ip() {
-            std::net::IpAddr::V4(ip) if !ip.is_unspecified() => return ip,
-            _ => {}
+    // If cache miss, or no ciaddr/giaddr, run the resolution logic inside spawn_blocking.
+    tokio::task::spawn_blocking(move || {
+        // 1. Try resolving using client's IP (ciaddr)
+        if !ciaddr.is_unspecified() {
+            let ip_opt = get_local_ip_for_target(ciaddr);
+            if let Some(ip) = ip_opt {
+                cache_local_ip(ciaddr, ip);
+                return ip;
+            }
         }
-    }
 
-    // 4. Fallback: return default local IP using target routing
-    get_default_local_ip()
+        // 2. Try resolving using relay IP (giaddr)
+        if !giaddr.is_unspecified() {
+            let ip_opt = get_local_ip_for_target(giaddr);
+            if let Some(ip) = ip_opt {
+                cache_local_ip(giaddr, ip);
+                return ip;
+            }
+        }
+
+        // 3. Fallback: look up the local address of the socket
+        if let Some(addr) = local_addr {
+            match addr.ip() {
+                std::net::IpAddr::V4(ip) if !ip.is_unspecified() => return ip,
+                _ => {}
+            }
+        }
+
+        // 4. Fallback: return default local IP using target routing
+        let default_target = Ipv4Addr::new(8, 8, 8, 8);
+        let cached_default_opt = get_cached_local_ip(default_target);
+        if let Some(cached_ip) = cached_default_opt {
+            return cached_ip;
+        }
+        let default_ip = get_default_local_ip();
+        cache_local_ip(default_target, default_ip);
+        default_ip
+    })
+    .await
+    .unwrap_or_else(|_| Ipv4Addr::new(127, 0, 0, 1))
 }
 
 /// Returns true iff DHCP Option 60 (Vendor Class Identifier) is present and
@@ -380,7 +424,7 @@ async fn respond_to_pxe_request(
     };
 
     // Resolve Next-Server IP
-    let our_ip = resolve_local_ip(&request, socket);
+    let our_ip = resolve_local_ip(&request, socket).await;
 
     // Update StateStore
     state_store.update_host_status(
@@ -776,5 +820,41 @@ mod tests {
             spans.iter().any(|s| s["name"] == "respond_to_pxe_request"),
             "the span list must include the per-request span, got: {spans:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_local_ip_caches_results_and_resolves_correctly() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_ip = Ipv4Addr::new(127, 0, 0, 1);
+        let request = v4::Message::new_with_id(
+            123,
+            target_ip,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            &[0u8; 16],
+        );
+
+        // Make sure target_ip is not in cache before starting
+        {
+            let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+            cache.write().remove(&target_ip);
+        }
+        assert!(get_cached_local_ip(target_ip).is_none());
+
+        // Call resolve_local_ip (which will do standard resolution and cache it)
+        let resolved_ip = resolve_local_ip(&request, &socket).await;
+
+        // Now, it should be cached!
+        let cached_ip = get_cached_local_ip(target_ip).expect("IP must be cached");
+        assert_eq!(resolved_ip, cached_ip);
+
+        // Change the resolved cache value to a dummy IP to verify the cache hit works
+        let dummy_ip = Ipv4Addr::new(192, 0, 2, 99);
+        cache_local_ip(target_ip, dummy_ip);
+
+        // Query again, it should return the cached dummy_ip directly
+        let resolved_again = resolve_local_ip(&request, &socket).await;
+        assert_eq!(resolved_again, dummy_ip);
     }
 }

@@ -46,4 +46,10 @@ pub enum CoreError {
 
     #[error("a host has an empty name")]
     EmptyHostName,
+
+    #[error("host name {value:?} contains a newline or carriage return (\\n or \\r)")]
+    InvalidHostName { value: String },
+
+    #[error("host {host:?} cmdline contains a newline or carriage return (\\n or \\r)")]
+    InvalidHostCmdline { host: String, value: String },
 }

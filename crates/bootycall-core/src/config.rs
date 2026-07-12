@@ -241,6 +241,19 @@ impl Config {
             if name.is_empty() {
                 return Err(CoreError::EmptyHostName);
             }
+            if host.name.contains('\n') || host.name.contains('\r') {
+                return Err(CoreError::InvalidHostName {
+                    value: host.name.clone(),
+                });
+            }
+            if let Some(cmdline) = &host.cmdline
+                && (cmdline.contains('\n') || cmdline.contains('\r'))
+            {
+                return Err(CoreError::InvalidHostCmdline {
+                    host: host.name.clone(),
+                    value: cmdline.clone(),
+                });
+            }
             if !seen_names.insert(name) {
                 return Err(CoreError::DuplicateName(name.to_string()));
             }
@@ -855,6 +868,42 @@ hosts:
         let mut cfg = valid_config();
         cfg.hosts[0].name = String::new();
         assert!(matches!(cfg.validate(), Err(CoreError::EmptyHostName)));
+    }
+
+    #[test]
+    fn validate_rejects_host_name_with_newline() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = "host\nname".to_string();
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidHostName { ref value }) if value == "host\nname"
+        ));
+
+        let mut cfg = valid_config();
+        cfg.hosts[0].name = "host\rname".to_string();
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidHostName { ref value }) if value == "host\rname"
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_host_cmdline_with_newline() {
+        let mut cfg = valid_config();
+        cfg.hosts[0].cmdline = Some("console=tty0\nchain evil".to_string());
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidHostCmdline { ref host, ref value })
+                if host == "host-a" && value == "console=tty0\nchain evil"
+        ));
+
+        let mut cfg = valid_config();
+        cfg.hosts[0].cmdline = Some("console=tty0\rchain evil".to_string());
+        assert!(matches!(
+            cfg.validate(),
+            Err(CoreError::InvalidHostCmdline { ref host, ref value })
+                if host == "host-a" && value == "console=tty0\rchain evil"
+        ));
     }
 
     #[test]

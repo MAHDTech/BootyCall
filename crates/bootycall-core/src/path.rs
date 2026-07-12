@@ -45,6 +45,14 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Containment is guaranteed only at check time — see the module docs for
 /// the return-then-open race and for drive-letter handling on Unix.
+///
+/// # Security / TOCTOU
+///
+/// This function is subject to a Time-of-Check to Time-of-Use (TOCTOU) race window.
+/// If a local attacker can modify the directories in the path after this validation
+/// but before the file is opened, they could swap in a symlink pointing outside the
+/// root. Ensure that the directory tree being served cannot be written to by untrusted
+/// users, or open the file using directory-relative descriptor-based APIs (`O_NOFOLLOW`).
 pub fn safe_join(root: &Path, requested: &str) -> Option<PathBuf> {
     let normalized = requested.replace('\\', "/");
     let requested_path = Path::new(&normalized);

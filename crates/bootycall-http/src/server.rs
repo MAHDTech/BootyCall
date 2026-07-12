@@ -169,6 +169,27 @@ async fn serve_file_from_dir(dir: PathBuf, relative_path: String) -> Result<Resp
     Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
+async fn inject_security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static("default-src 'self'"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        header::HeaderValue::from_static("DENY"),
+    );
+    response
+}
+
 async fn serve_asset(path: &str) -> Response {
     match Asset::get(path) {
         Some(content) => (
@@ -941,6 +962,7 @@ pub async fn run_http_server(
     let app = Router::new()
         .route("/", get(root_redirect))
         .route("/ui/{*path}", get(ui_handler))
+        .layer(axum::middleware::from_fn(inject_security_headers))
         .route("/static/{*path}", get(serve_static_file))
         .route("/cache/{*path}", get(serve_cache_file))
         .route("/start", get(start_handler))

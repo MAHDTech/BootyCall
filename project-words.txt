@@ -192,3 +192,5 @@ siaddr
 sname
 yiaddr
 unicasts
+nosniff
+xframe

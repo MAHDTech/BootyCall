@@ -3,8 +3,19 @@ use std::fs::{self, File};
 use std::io::Write;
 use tempfile::tempdir;
 
+fn init_test_logging() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
 #[test]
 fn test_gpt_fat_extraction_and_caching() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let disk_path = dir.path().join("test_disk.img");
     let cache_dir = dir.path().join("cache");
@@ -140,6 +151,7 @@ fn test_gpt_fat_extraction_and_caching() {
 
 #[test]
 fn test_sync_host_cache_missing_image() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let cache_dir = dir.path().join("cache");
     let bogus_image_path = dir.path().join("does_not_exist.iso");
@@ -252,6 +264,7 @@ fn build_dual_kernel_gpt_image(disk_path: &std::path::Path) {
 
 #[test]
 fn test_cache_invalidated_on_kernel_path_change() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let disk_path = dir.path().join("test_disk.img");
     let cache_dir = dir.path().join("cache");
@@ -313,6 +326,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
 
 #[test]
 fn test_stale_tmp_artifacts_swept_on_cache_hit() {
+    init_test_logging();
     // Extraction stages artifacts as `kernel.tmp`/`initrd.tmp` before an
     // atomic rename (issue 085). A crash mid-extraction can strand those
     // staging files; a later sync that is a cache HIT (no re-extraction to
@@ -383,6 +397,7 @@ fn server_config(cache_dir: &std::path::Path) -> ServerConfig {
 
 #[test]
 fn test_sync_all_hosts_cache_partial_failure() {
+    init_test_logging();
     // One host with a real GPT/FAT image + one host whose image is missing.
     // sync_all_hosts_cache must report succeeded=1, failed=[missing], not the
     // old Ok(())-always behaviour (issue 002).
@@ -425,6 +440,7 @@ fn test_sync_all_hosts_cache_partial_failure() {
 
 #[test]
 fn test_sync_all_hosts_cache_all_failed() {
+    init_test_logging();
     // Every host's image is missing -> all_failed() is true (distinct from a
     // healthy sync), which main surfaces prominently (issue 020).
     let dir = tempdir().unwrap();
@@ -450,6 +466,7 @@ fn test_sync_all_hosts_cache_all_failed() {
 
 #[test]
 fn test_sync_host_cache_size_ceiling() {
+    init_test_logging();
     // The synthetic image's kernel is 14 bytes; a 5-byte ceiling must reject
     // it with ArtifactTooLarge and leave no partial cache behind (issue 006).
     let dir = tempdir().unwrap();
@@ -504,6 +521,7 @@ fn test_sync_host_cache_size_ceiling() {
 
 #[test]
 fn test_corrupt_images_error_not_panic() {
+    init_test_logging();
     // The extractor parses semi-trusted image bytes; hostile/degenerate input
     // must return Err, never panic (a panic fails this test). Issue 039.
     let dir = tempdir().unwrap();
@@ -558,6 +576,7 @@ fn test_corrupt_images_error_not_panic() {
 
 #[test]
 fn test_partition_slice_seek_guards_overflow() {
+    init_test_logging();
     use std::io::{Cursor, Seek, SeekFrom};
     // BUG-12: `SeekFrom::Start(u64::MAX)` used to cast straight to i64,
     // wrap silently, and land somewhere valid. It should return an error.
@@ -656,6 +675,7 @@ fn build_deeply_nested_gpt_image(disk_path: &std::path::Path, depth: usize) {
 
 #[test]
 fn test_fat_recursion_depth_cap() {
+    init_test_logging();
     // A kernel buried past MAX_DIR_DEPTH (64) must NOT be found: the FAT walker
     // bails at the cap (Ok(None) internally) rather than recursing / stack-
     // overflowing. Observable outcome: KernelNotFound, no panic. Issue 040.
@@ -825,6 +845,7 @@ fn build_minimal_iso(path: &std::path::Path, files: &[(&str, &[u8])]) {
 
 #[test]
 fn test_iso_auto_detect() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let iso = dir.path().join("auto.iso");
     build_minimal_iso(
@@ -843,6 +864,7 @@ fn test_iso_auto_detect() {
 
 #[test]
 fn test_iso_explicit_overrides() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let iso = dir.path().join("override.iso");
     // Names deliberately do NOT match the auto-detect heuristics, so success
@@ -873,6 +895,7 @@ fn test_iso_explicit_overrides() {
 
 #[test]
 fn test_iso_missing_kernel_and_initrd() {
+    init_test_logging();
     let dir = tempdir().unwrap();
     let out_k = dir.path().join("k");
     let out_i = dir.path().join("i");
@@ -896,6 +919,7 @@ fn test_iso_missing_kernel_and_initrd() {
 
 #[test]
 fn test_sync_all_hosts_cache_unbounded_warning() {
+    init_test_logging();
     use tracing_subscriber::fmt::MakeWriter;
 
     #[derive(Clone, Default)]

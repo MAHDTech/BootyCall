@@ -594,12 +594,18 @@ pub async fn run_oled_manager(
         .name(OLED_THREAD_NAME.to_string())
         .spawn(move || {
             let flag_for_runs = flag_for_thread.clone();
-            supervise(&flag_for_thread, RENDER_RESTART_POLICY, move || {
+            let mut enable_line = OptionalGpioLine::new(
+                "GPIO rackmount power enable",
+                request_power_enable_line,
+                Instant::now(),
+            );
+            supervise(&flag_for_thread, RENDER_RESTART_POLICY, || {
                 render_loop(
                     state_for_thread.clone(),
                     brightness,
                     flag_for_runs.clone(),
                     PanelSink::new(),
+                    &mut enable_line,
                 )
             });
         })?;
@@ -624,12 +630,13 @@ pub async fn run_oled_manager(
     }
 }
 
-#[tracing::instrument(skip(state_store, shutdown, sink))]
+#[tracing::instrument(skip(state_store, shutdown, sink, enable_line))]
 fn render_loop<S: FrameSink>(
     state_store: StateStore,
     brightness: u8,
     shutdown: Arc<AtomicBool>,
     mut sink: S,
+    enable_line: &mut OptionalGpioLine,
 ) -> Result<(), OledError> {
     // Hardware-absent (headless) short-circuit: the panel sink returns false
     // when neither the framebuffer nor the GPIO chip is present (a dev laptop,
@@ -653,11 +660,6 @@ fn render_loop<S: FrameSink>(
     let now0 = Instant::now();
     let mut detect_line =
         OptionalGpioLine::new("GPIO rackmount detection", request_detect_line, now0);
-    let mut enable_line = OptionalGpioLine::new(
-        "GPIO rackmount power enable",
-        request_power_enable_line,
-        now0,
-    );
 
     let mut fb = Framebuffer::with_brightness(brightness);
     let mut sys_metrics = SystemMetrics::new();
@@ -806,7 +808,12 @@ pub fn run_sim(out_dir: &str, brightness: u8, max_frames: usize) -> Result<(), O
         frame: 0,
         max_frames,
     };
-    render_loop(state_store, brightness, shutdown, sink)
+    let mut enable_line = OptionalGpioLine::new(
+        "GPIO rackmount power enable",
+        request_power_enable_line,
+        Instant::now(),
+    );
+    render_loop(state_store, brightness, shutdown, sink, &mut enable_line)
 }
 
 /// Draw a Metrics page: left status icon, top label, mid separator, and the
@@ -1164,5 +1171,57 @@ mod tests {
             // The draw coordinate casts to usize, so x/y must never be negative.
             assert!(state.0 >= 0 && state.1 >= 0);
         }
+    }
+
+    struct MockSink {
+        rotation: Arc<std::sync::atomic::AtomicI32>,
+        brightness: Arc<std::sync::atomic::AtomicU8>,
+        frame_count: Arc<std::sync::atomic::AtomicUsize>,
+        max_frames: usize,
+    }
+
+    impl FrameSink for MockSink {
+        fn should_run(&self) -> bool {
+            true
+        }
+        fn present(&mut self, fb: &mut Framebuffer) -> bool {
+            self.rotation.store(fb.rotation.into(), Ordering::Relaxed);
+            self.brightness.store(fb.brightness(), Ordering::Relaxed);
+            let count = self.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
+            count < self.max_frames
+        }
+        fn tick(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+    }
+
+    fn mock_acquire() -> Option<gpiocdev::Request> {
+        None
+    }
+
+    #[test]
+    fn test_render_loop_with_mock_sink() {
+        let state_store = StateStore::new();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let rotation = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let brightness = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let frame_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let sink = MockSink {
+            rotation: rotation.clone(),
+            brightness: brightness.clone(),
+            frame_count: frame_count.clone(),
+            max_frames: 3,
+        };
+
+        let mut enable_line =
+            OptionalGpioLine::new("GPIO rackmount power enable", mock_acquire, Instant::now());
+
+        let result = render_loop(state_store, 128, shutdown, sink, &mut enable_line);
+
+        assert!(result.is_ok());
+        assert_eq!(frame_count.load(Ordering::Relaxed), 3);
+        assert_eq!(rotation.load(Ordering::Relaxed), 180);
+        assert_eq!(brightness.load(Ordering::Relaxed), 128);
     }
 }

@@ -176,6 +176,7 @@ pub async fn run_led_manager(
     let mut was_active = false;
     let mut last_blue = None;
     let mut last_white = None;
+    let mut last_cache_bypass = tokio::time::Instant::now();
     info!("Starting LED Manager Task...");
 
     loop {
@@ -196,6 +197,12 @@ pub async fn run_led_manager(
                 break;
             }
             _ = sleep(Duration::from_millis(LED_BLINK_MS)) => {
+                if last_cache_bypass.elapsed() >= Duration::from_secs(60) {
+                    last_blue = None;
+                    last_white = None;
+                    last_cache_bypass = tokio::time::Instant::now();
+                }
+
                 if active {
                     if state {
                         set_led_cached(LED_BLUE_PATH, 255, &mut last_blue);
@@ -304,6 +311,7 @@ mod tests {
     fn capture_logs(f: impl FnOnce()) -> String {
         let buf = BufWriter::default();
         let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
             .with_ansi(false)
             .with_writer(buf.clone())
             .finish();

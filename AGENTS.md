@@ -53,7 +53,7 @@ full git-hook battery **and** the workspace test suite (`cargo test --workspace
 
 ### Documentation & Link Standards
 
-- **Relative Paths Only**: Always use repository-relative URLs (e.g., `[default.nix](../packages/ipxe/default.nix)`) for all documentation links referencing repository files.
+- **Relative Paths Only**: Always use repository-relative URLs (e.g., `[default.nix](./packages/ipxe/default.nix)` from the repository root, or `[default.nix](../packages/ipxe/default.nix)` from files within the `docs/` subdirectory) for all documentation links referencing repository files.
 - **No Absolute `file://` Links**: NEVER commit absolute `file://` links in repository markdown files (such as `docs/*.md` or `README.md`). They are not portable and will cause link-checking (`lychee`) failures in CI.
 
 ---

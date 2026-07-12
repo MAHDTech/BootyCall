@@ -1195,3 +1195,196 @@ async fn test_ui_security_headers() {
         assert!(xframe.is_none());
     }
 }
+
+#[tokio::test]
+async fn test_http_range_requests() {
+    let tmp = tempdir().unwrap();
+    let static_dir = tmp.path().join("assets");
+    fs::create_dir_all(&static_dir).unwrap();
+
+    // Write some data (e.g. 20 bytes: 0123456789abcdefghij)
+    let file_content = b"0123456789abcdefghij";
+    fs::write(static_dir.join("test.txt"), file_content).unwrap();
+
+    let port: u16 = 26299;
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: static_dir.clone(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let _leaked = Box::leak(Box::new(tmp));
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Helper to send HTTP requests with headers
+    async fn send_request(
+        port: u16,
+        range_hdr: Option<&str>,
+    ) -> (String, Vec<(String, String)>, Vec<u8>) {
+        let mut req = format!(
+            "GET /static/test.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n"
+        );
+        if let Some(r) = range_hdr {
+            req.push_str(&format!("Range: {}\r\n", r));
+        }
+        req.push_str("\r\n");
+        let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        parse_http_response(&response)
+    }
+
+    // 1. Full request (no Range header)
+    {
+        let (status, headers, body) = send_request(port, None).await;
+        assert!(
+            status.contains("200 OK"),
+            "Expected 200 OK, got: {}",
+            status
+        );
+
+        let accept_ranges = headers
+            .iter()
+            .find(|(k, _)| k == "accept-ranges")
+            .map(|(_, v)| v.as_str());
+        let content_length = headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(accept_ranges, Some("bytes"));
+        assert_eq!(content_length, Some("20"));
+        assert_eq!(body, file_content);
+    }
+
+    // 2. Partial request: first 10 bytes (bytes=0-9)
+    {
+        let (status, headers, body) = send_request(port, Some("bytes=0-9")).await;
+        assert!(
+            status.contains("206 Partial Content"),
+            "Expected 206, got: {}",
+            status
+        );
+
+        let accept_ranges = headers
+            .iter()
+            .find(|(k, _)| k == "accept-ranges")
+            .map(|(_, v)| v.as_str());
+        let content_length = headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .map(|(_, v)| v.as_str());
+        let content_range = headers
+            .iter()
+            .find(|(k, _)| k == "content-range")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(accept_ranges, Some("bytes"));
+        assert_eq!(content_length, Some("10"));
+        assert_eq!(content_range, Some("bytes 0-9/20"));
+        assert_eq!(body, b"0123456789");
+    }
+
+    // 3. Partial request: offset range (bytes=5-15)
+    {
+        let (status, headers, body) = send_request(port, Some("bytes=5-15")).await;
+        assert!(
+            status.contains("206 Partial Content"),
+            "Expected 206, got: {}",
+            status
+        );
+
+        let accept_ranges = headers
+            .iter()
+            .find(|(k, _)| k == "accept-ranges")
+            .map(|(_, v)| v.as_str());
+        let content_length = headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .map(|(_, v)| v.as_str());
+        let content_range = headers
+            .iter()
+            .find(|(k, _)| k == "content-range")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(accept_ranges, Some("bytes"));
+        assert_eq!(content_length, Some("11"));
+        assert_eq!(content_range, Some("bytes 5-15/20"));
+        assert_eq!(body, b"56789abcdef");
+    }
+
+    // 4. Partial request: start to end of file (bytes=10-)
+    {
+        let (status, headers, body) = send_request(port, Some("bytes=10-")).await;
+        assert!(
+            status.contains("206 Partial Content"),
+            "Expected 206, got: {}",
+            status
+        );
+
+        let accept_ranges = headers
+            .iter()
+            .find(|(k, _)| k == "accept-ranges")
+            .map(|(_, v)| v.as_str());
+        let content_length = headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .map(|(_, v)| v.as_str());
+        let content_range = headers
+            .iter()
+            .find(|(k, _)| k == "content-range")
+            .map(|(_, v)| v.as_str());
+
+        assert_eq!(accept_ranges, Some("bytes"));
+        assert_eq!(content_length, Some("10"));
+        assert_eq!(content_range, Some("bytes 10-19/20"));
+        assert_eq!(body, b"abcdefghij");
+    }
+
+    // 5. Unsatisfiable range (bytes=20-25)
+    {
+        let (status, headers, _body) = send_request(port, Some("bytes=20-25")).await;
+        assert!(
+            status.contains("416 Range Not Satisfiable") || status.contains("416"),
+            "Expected 416, got: {}",
+            status
+        );
+
+        let content_range = headers
+            .iter()
+            .find(|(k, _)| k == "content-range")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(content_range, Some("bytes */20"));
+    }
+}

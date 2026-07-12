@@ -142,31 +142,127 @@ async fn safe_join_blocking(root: PathBuf, requested: String) -> Option<PathBuf>
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RangeSpec {
+    Satisfiable { start: u64, end: u64 },
+    Unsatisfiable,
+}
+
+fn parse_range_header(value: &str, file_size: u64) -> Option<RangeSpec> {
+    if file_size == 0 {
+        return Some(RangeSpec::Unsatisfiable);
+    }
+    let s = value.strip_prefix("bytes=")?;
+    let first_range = s.split(',').next()?.trim();
+
+    if let Some(suffix_str) = first_range.strip_prefix('-') {
+        let suffix_len = suffix_str.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        let start = file_size.saturating_sub(suffix_len);
+        let end = file_size - 1;
+        Some(RangeSpec::Satisfiable { start, end })
+    } else if let Some((start_str, end_str)) = first_range.split_once('-') {
+        let start = start_str.trim().parse::<u64>().ok()?;
+        if start >= file_size {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        let end = if end_str.trim().is_empty() {
+            file_size - 1
+        } else {
+            let parsed_end = end_str.trim().parse::<u64>().ok()?;
+            std::cmp::min(parsed_end, file_size - 1)
+        };
+        if start > end {
+            return Some(RangeSpec::Unsatisfiable);
+        }
+        Some(RangeSpec::Satisfiable { start, end })
+    } else {
+        None
+    }
+}
+
 #[tracing::instrument(skip_all, fields(dir = %dir.display(), path = %relative_path))]
-async fn serve_file_from_dir(dir: PathBuf, relative_path: String) -> Result<Response, StatusCode> {
+async fn serve_file_from_dir(
+    dir: PathBuf,
+    relative_path: String,
+    headers: &HeaderMap,
+) -> Result<Response, StatusCode> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
     let full_path = safe_join_blocking(dir, relative_path.clone())
         .await
         .ok_or(StatusCode::FORBIDDEN)?;
 
-    // One offloaded stat (tokio::fs runs it on the blocking pool) replaces the
-    // old on-runtime `exists()` + `is_file()` pair; a missing path and a
-    // non-file (directory, socket, …) both map to 404 as before.
-    match tokio::fs::metadata(&full_path).await {
-        Ok(meta) if meta.is_file() => {}
+    let meta = match tokio::fs::metadata(&full_path).await {
+        Ok(meta) if meta.is_file() => meta,
         _ => return Err(StatusCode::NOT_FOUND),
-    }
+    };
 
-    let file = match tokio::fs::File::open(&full_path).await {
+    let file_size = meta.len();
+    let mut file = match tokio::fs::File::open(&full_path).await {
         Ok(f) => f,
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
     let content_type = content_type_for(&relative_path);
 
-    let stream = tokio_util::io::ReaderStream::new(file);
-    let body = axum::body::Body::from_stream(stream);
+    let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
-    Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
+    if let Some(range_val) = range_header {
+        match parse_range_header(range_val, file_size) {
+            Some(RangeSpec::Satisfiable { start, end }) => {
+                if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                let slice_len = end - start + 1;
+                let stream = tokio_util::io::ReaderStream::new(file.take(slice_len));
+                let body = axum::body::Body::from_stream(stream);
+
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{end}/{file_size}"),
+                    )
+                    .header(header::CONTENT_LENGTH, slice_len.to_string())
+                    .body(body)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Some(RangeSpec::Unsatisfiable) => Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
+                .header(header::CONTENT_LENGTH, "0")
+                .body(axum::body::Body::empty())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+            None => {
+                let stream = tokio_util::io::ReaderStream::new(file);
+                let body = axum::body::Body::from_stream(stream);
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::CONTENT_LENGTH, file_size.to_string())
+                    .body(body)
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    } else {
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let body = axum::body::Body::from_stream(stream);
+
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header(header::CONTENT_LENGTH, file_size.to_string())
+            .body(body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
 }
 
 async fn inject_security_headers(
@@ -218,25 +314,27 @@ async fn root_redirect() -> impl IntoResponse {
 // Serving static wallpaper files from the configured static dir
 async fn serve_static_file(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Response, StatusCode> {
     let static_dir = {
         let config_guard = state.config.read();
         config_guard.server.static_dir.clone()
     };
-    serve_file_from_dir(static_dir, path).await
+    serve_file_from_dir(static_dir, path, &headers).await
 }
 
 // Serving cached kernels and initrds
 async fn serve_cache_file(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Response, StatusCode> {
     let cache_dir = {
         let config_guard = state.config.read();
         config_guard.server.cache_dir.clone()
     };
-    serve_file_from_dir(cache_dir, path).await
+    serve_file_from_dir(cache_dir, path, &headers).await
 }
 
 /// Strip an optional `:port` suffix from a `Host` header value, handling
@@ -1038,34 +1136,79 @@ mod tests {
         std::fs::write(dir.path().join("file.bin"), b"DATA").unwrap();
 
         // Existing file → 200.
-        let ok = serve_file_from_dir(dir.path().to_path_buf(), "file.bin".to_string())
-            .await
-            .expect("existing file must serve");
+        let ok = serve_file_from_dir(
+            dir.path().to_path_buf(),
+            "file.bin".to_string(),
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("existing file must serve");
         assert_eq!(ok.status(), StatusCode::OK);
 
         // Missing file → 404.
         assert_eq!(
-            serve_file_from_dir(dir.path().to_path_buf(), "missing.bin".to_string())
-                .await
-                .unwrap_err(),
+            serve_file_from_dir(
+                dir.path().to_path_buf(),
+                "missing.bin".to_string(),
+                &HeaderMap::new()
+            )
+            .await
+            .unwrap_err(),
             StatusCode::NOT_FOUND
         );
 
         // Directory (exists, not a file) → 404.
         assert_eq!(
-            serve_file_from_dir(dir.path().to_path_buf(), "subdir".to_string())
-                .await
-                .unwrap_err(),
+            serve_file_from_dir(
+                dir.path().to_path_buf(),
+                "subdir".to_string(),
+                &HeaderMap::new()
+            )
+            .await
+            .unwrap_err(),
             StatusCode::NOT_FOUND
         );
 
         // Traversal → 403.
         assert_eq!(
-            serve_file_from_dir(dir.path().to_path_buf(), "../etc/passwd".to_string())
-                .await
-                .unwrap_err(),
+            serve_file_from_dir(
+                dir.path().to_path_buf(),
+                "../etc/passwd".to_string(),
+                &HeaderMap::new()
+            )
+            .await
+            .unwrap_err(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[test]
+    fn test_parse_range_header() {
+        assert_eq!(
+            parse_range_header("bytes=0-9", 20),
+            Some(RangeSpec::Satisfiable { start: 0, end: 9 })
+        );
+        assert_eq!(
+            parse_range_header("bytes=5-", 20),
+            Some(RangeSpec::Satisfiable { start: 5, end: 19 })
+        );
+        assert_eq!(
+            parse_range_header("bytes=-5", 20),
+            Some(RangeSpec::Satisfiable { start: 15, end: 19 })
+        );
+        assert_eq!(
+            parse_range_header("bytes=20-25", 20),
+            Some(RangeSpec::Unsatisfiable)
+        );
+        assert_eq!(
+            parse_range_header("bytes=10-5", 20),
+            Some(RangeSpec::Unsatisfiable)
+        );
+        assert_eq!(
+            parse_range_header("bytes=0-0", 0),
+            Some(RangeSpec::Unsatisfiable)
+        );
+        assert_eq!(parse_range_header("invalid", 20), None);
     }
 
     fn test_config(hosts: Vec<HostConfig>) -> Config {

@@ -133,6 +133,63 @@ gate before atomically renaming a new config into place:
 nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml check-config
 ```
 
+### Hardware Test Subcommands
+
+To verify the physical OLED panel and status LEDs function correctly on target hardware, the CLI provides two non-interactive subcommands. **Note:** Stop the running `bootycall` service first before executing these tests to prevent conflicting updates to the display and LEDs.
+
+#### 1. OLED Screen Preview (`oled-test`)
+
+Renders a custom text string to the rackmount OLED display with specified font size and layout alignment, then exits:
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml oled-test [OPTIONS]
+```
+
+**Options & Ranges:**
+
+- `--size <SIZE>`: Font size in points. Supported range: `6` to `40`. (Default: `12`)
+- `--alignment <ALIGNMENT>`: Text layout alignment. Valid options are: `left`, `center`, `right`, `left-top`, `left-bottom`, `center-top`, `center-bottom`, `right-top`, `right-bottom`. (Default: `left`)
+- `--text <TEXT>`: The text string to display on the screen. (Default: `Hello World`)
+
+**Example:**
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml oled-test --size 20 --alignment center --text "BootyCall Ready"
+```
+
+#### 2. Status LED Test (`led-test`)
+
+Controls the rackmount blue/white status LEDs directly:
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml led-test [FLAGS] [OPTIONS]
+```
+
+**Options & Flags:**
+
+- `--color <COLOR>`: The LED color to test. Valid choices: `blue`, `white`, `off`. (Default: `blue`)
+- `--blinking`: If provided, cycles the LED on and off 10 times for 500 ms each (total 10 seconds). Without this flag, the LED is set to solid.
+
+**Examples:**
+
+_Set LED to solid blue:_
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml led-test --color blue
+```
+
+_Blink the white LED for 10 seconds:_
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml led-test --color white --blinking
+```
+
+_Turn LEDs off:_
+
+```bash
+nix develop --impure --command cargo run -p bootycall-rs -- --config bootycall.yaml led-test --color off
+```
+
 ### Health / readiness probe
 
 `GET /api/health` is an unauthenticated readiness endpoint. It returns `200`

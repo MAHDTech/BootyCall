@@ -216,6 +216,17 @@ impl StateStore {
         hosts.get(&normalized).cloned()
     }
 
+    /// Retrieves the current state of a host by its IP address.
+    ///
+    /// Returns `None` if no host with the matching IP is tracked in the state store.
+    pub fn get_host_by_ip(&self, ip: &str) -> Option<HostState> {
+        let hosts = self.hosts.read();
+        hosts
+            .values()
+            .find(|h| h.client_ip.as_deref() == Some(ip))
+            .cloned()
+    }
+
     /// Lists all hosts currently tracked by the state store.
     pub fn list_hosts(&self) -> Vec<HostState> {
         let hosts = self.hosts.read();
@@ -425,6 +436,34 @@ mod tests {
         assert!(
             store.get_host("ff:ff:ff:ff:ff:ff").is_none(),
             "Getting a nonexistent host should return None"
+        );
+    }
+
+    #[test]
+    fn test_get_host_by_ip() {
+        let store = StateStore::new();
+        assert!(
+            store.get_host_by_ip("192.168.1.100").is_none(),
+            "Getting host by IP when empty should return None"
+        );
+
+        store
+            .update_host_status(
+                "aa:bb:cc:11:22:33",
+                HostStatus::Polling,
+                Some("host1".to_string()),
+                None,
+                Some("192.168.1.100".to_string()),
+                None,
+            )
+            .unwrap();
+
+        let host = store.get_host_by_ip("192.168.1.100").unwrap();
+        assert_eq!(host.mac, "aa:bb:cc:11:22:33");
+
+        assert!(
+            store.get_host_by_ip("192.168.1.101").is_none(),
+            "Getting host by non-matching IP should return None"
         );
     }
 

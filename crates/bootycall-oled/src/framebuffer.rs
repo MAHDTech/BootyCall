@@ -61,7 +61,7 @@ pub struct Framebuffer {
     brightness: u8,
     // Cached file descriptor to the framebuffer
     file: Option<File>,
-    // Rotation state: 0 or 180 (defaults to 180 standalone)
+    // Rotation state: 0 or 180 degrees. Default layout is 0. 180 rotates the screen 180 degrees.
     pub rotation: u16,
 }
 
@@ -96,7 +96,7 @@ impl Framebuffer {
             lut,
             brightness,
             file,
-            rotation: 180,
+            rotation: 0,
         }
     }
 
@@ -173,12 +173,12 @@ impl Framebuffer {
 /// framebuffer. Split out of `Framebuffer::flush` so tests can exercise
 /// the LUT + rotation invariants without needing `/dev/fb0`.
 ///
-/// When `rotation == 0` the buffer is iterated in reverse so the
-/// user-space 180° rotation cancels out the driver's; any other value
-/// leaves the buffer un-rotated in user space.
+/// When `rotation == 180` the buffer is iterated in reverse to perform
+/// a 180-degree rotation of the screen; any other value leaves the
+/// buffer un-rotated in its default layout.
 pub fn pack_buffer(buffer: &[u8], lut: &[u16; 256], rotation: u16) -> Vec<u8> {
     let mut packed = Vec::with_capacity(buffer.len() * 2);
-    if rotation == 0 {
+    if rotation == 180 {
         for &gray in buffer.iter().rev() {
             let rgb565 = lut[gray as usize];
             packed.push((rgb565 & 0xFF) as u8);
@@ -255,13 +255,33 @@ mod tests {
         // mirrored output.
         let lut = build_lut(FULL_BRIGHTNESS);
         let buf = [0u8, 64, 128, 255];
-        let normal = pack_buffer(&buf, &lut, 180);
-        let rotated = pack_buffer(&buf, &lut, 0);
+        let normal = pack_buffer(&buf, &lut, 0);
+        let rotated = pack_buffer(&buf, &lut, 180);
         assert_eq!(normal.len(), 8);
         assert_eq!(rotated.len(), 8);
         // rotated byte-pairs are `normal` byte-pairs in reverse order.
         let normal_pairs: Vec<_> = normal.chunks(2).collect();
         let rotated_pairs: Vec<_> = rotated.chunks(2).collect();
+        for (i, pair) in rotated_pairs.iter().enumerate() {
+            assert_eq!(*pair, normal_pairs[normal_pairs.len() - 1 - i]);
+        }
+    }
+
+    #[test]
+    fn test_rotation_values_map_to_orientation() {
+        let lut = build_lut(FULL_BRIGHTNESS);
+        let buf = [0u8, 64, 128, 255];
+        // Rotation 0 and default layout (no rotation) should be identical.
+        let rot_0 = pack_buffer(&buf, &lut, 0);
+        let rot_default = pack_buffer(&buf, &lut, 90); // default layout for unsupported rotation values
+        assert_eq!(rot_0, rot_default);
+
+        // Rotation 180 flips it.
+        let rot_180 = pack_buffer(&buf, &lut, 180);
+        assert_ne!(rot_0, rot_180);
+
+        let normal_pairs: Vec<_> = rot_0.chunks(2).collect();
+        let rotated_pairs: Vec<_> = rot_180.chunks(2).collect();
         for (i, pair) in rotated_pairs.iter().enumerate() {
             assert_eq!(*pair, normal_pairs[normal_pairs.len() - 1 - i]);
         }

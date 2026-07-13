@@ -761,7 +761,7 @@ fn render_loop<S: FrameSink>(
             }
         }
 
-        // Read rackmount detection state: low (0) = docked (rotation 0), high/error = standalone (rotation 180)
+        // Read rackmount detection state: low (0) = docked (rotation 180), high/error = standalone (rotation 0)
         let is_docked = if let Some(req) = detect_line.get() {
             req.lone_value()
                 .map(|val| val == Value::Inactive)
@@ -770,7 +770,7 @@ fn render_loop<S: FrameSink>(
             false
         };
 
-        fb.rotation = if is_docked { 0 } else { 180 };
+        fb.rotation = if is_docked { 180 } else { 0 };
 
         // Hand the frame to the sink (panel write, or PNG dump under sim). A
         // `false` return stops the loop (sim frame budget exhausted).
@@ -1221,7 +1221,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(frame_count.load(Ordering::Relaxed), 3);
-        assert_eq!(rotation.load(Ordering::Relaxed), 180);
+        assert_eq!(rotation.load(Ordering::Relaxed), 0);
         assert_eq!(brightness.load(Ordering::Relaxed), 128);
     }
 }

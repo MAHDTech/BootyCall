@@ -555,6 +555,38 @@ jobs:
         name: Nix Build bootycall
         run: nix build .#bootycall --no-link --print-out-paths
 
+  ci-nixos-vm-test:
+    name: NixOS VM Test (amd64)
+    runs-on: ubuntu-latest
+    needs:
+      - setup-environment
+    if: always() && needs.setup-environment.result == 'success'
+    steps:
+      - id: checkout_repository
+        name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - id: get_repository_owner
+        name: Get lowercased repository owner
+        run: echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - id: setup_devenv
+        name: Setup Devenv
+        uses: ./.github/actions/setup-devenv
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cachix-cache-name: ${{ steps.get_repository_owner.outputs.owner }}
+          cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skip-push: "true"
+
+      - id: nix_build_vm_test
+        name: Build and Run NixOS VM Test
+        run: nix build .#checks.x86_64-linux.vmTest --no-link --print-out-paths --impure
+
   ci-statix:
     name: Check Statix
     runs-on: ubuntu-latest
@@ -611,6 +643,7 @@ jobs:
       - ci-statix
       - ci-build-assets
       - ci-nix-build-bootycall
+      - ci-nixos-vm-test
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -665,6 +698,7 @@ jobs:
             echo "| Statix Check | $(status_emoji '${{ needs.ci-statix.result }}') ${{ needs.ci-statix.result }} |"
             echo "| Build Assets & iPXE | $(status_emoji '${{ needs.ci-build-assets.result }}') ${{ needs.ci-build-assets.result }} |"
             echo "| Nix Build bootycall | $(status_emoji '${{ needs.ci-nix-build-bootycall.result }}') ${{ needs.ci-nix-build-bootycall.result }} |"
+            echo "| NixOS VM Test | $(status_emoji '${{ needs.ci-nixos-vm-test.result }}') ${{ needs.ci-nixos-vm-test.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - id: check_failures
@@ -707,6 +741,7 @@ jobs:
             "${{ needs.ci-statix.result }}"
             "${{ needs.ci-build-assets.result }}"
             "${{ needs.ci-nix-build-bootycall.result }}"
+            "${{ needs.ci-nixos-vm-test.result }}"
           )
 
           for res in "${DOWNSTREAM_RESULTS[@]}"; do

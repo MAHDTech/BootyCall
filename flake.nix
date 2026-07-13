@@ -114,15 +114,45 @@
           vmTest =
             (pkgs.testers.runNixOSTest {
               name = "bootycall-init-test";
-              nodes.server = {
-                imports = [ self.nixosModules.default ];
-                services.bootycall.enable = true;
+              nodes = {
+                server = {
+                  imports = [ self.nixosModules.default ];
+                  networking.firewall.enable = false;
+                  services.bootycall = {
+                    enable = true;
+                    server.httpBind = "0.0.0.0:8080";
+                    server.apiToken = "test-token";
+                  };
+                };
+                client = { pkgs, ... }: {
+                  networking.firewall.enable = false;
+                  environment.systemPackages = [
+                    pkgs.curl
+                    pkgs.tftp-hpa
+                  ];
+                };
               };
               testScript = ''
                 # Wait for the service to start initially
                 server.wait_for_unit("bootycall.service")
 
-                # Check that default assets are seeded
+                # Verify core ports are listening
+                server.wait_for_open_port(8080)
+                server.wait_until_succeeds("ss -ulnp | grep -q :69")
+                server.wait_until_succeeds("ss -ulnp | grep -q :4011")
+
+                # Wait for client node to start
+                client.wait_for_unit("network.target")
+
+                # Assert HTTP API endpoints work from client
+                client.succeed("curl -fv http://server:8080/api/health")
+                client.succeed("curl -fv -H 'X-API-Token: test-token' http://server:8080/api/health")
+
+                # Assert TFTP server can serve bootloader files to client
+                client.succeed("tftp 192.168.1.2 -m binary -c get boot/x64/ipxe.efi")
+                client.succeed("test -s ipxe.efi")
+
+                # Check that default assets are seeded on server
                 server.succeed("test -f /var/lib/bootycall/tftpboot/boot/x64/ipxe.efi")
 
                 # Stop the service

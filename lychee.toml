@@ -2,6 +2,7 @@
 
 exclude = [
   "http://127.0.0.1.*",
+  "http://server:8080.*",
   ".*/ui/style.css",
   "https://www.latofonts.com"
 ]

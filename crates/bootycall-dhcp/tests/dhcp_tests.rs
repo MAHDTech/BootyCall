@@ -129,6 +129,31 @@ async fn test_dhcp_server_redirection() {
         panic!("Missing BootfileName option");
     }
 
+    // Verify TFTPServerName option (Option 66)
+    let tftp_server = response.opts().get(v4::OptionCode::TFTPServerName).unwrap();
+    if let v4::DhcpOption::TFTPServerName(bytes) = tftp_server {
+        let sname = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(sname, "127.0.0.1");
+    } else {
+        panic!("Missing TFTPServerName option");
+    }
+
+    // Verify legacy BOOTP sname header matches the TFTPServerName
+    let sname_res = response
+        .sname_str()
+        .expect("sname header should be present")
+        .expect("sname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(sname_res, "127.0.0.1");
+
+    // Verify legacy BOOTP file header matches the BootfileName
+    let fname_res = response
+        .fname_str()
+        .expect("fname header should be present")
+        .expect("fname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(fname_res, "boot/special.efi");
+
     // Verify Option 97 Client Machine Identifier is copied back
     let response_machine_id = response
         .opts()
@@ -300,6 +325,31 @@ async fn test_dhcp_server_handles_arm64_arch() {
         panic!("Missing BootfileName option");
     }
 
+    // Verify TFTPServerName option (Option 66)
+    let tftp_server = response.opts().get(v4::OptionCode::TFTPServerName).unwrap();
+    if let v4::DhcpOption::TFTPServerName(bytes) = tftp_server {
+        let sname = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(sname, "127.0.0.1");
+    } else {
+        panic!("Missing TFTPServerName option");
+    }
+
+    // Verify legacy BOOTP sname header matches the TFTPServerName
+    let sname_res = response
+        .sname_str()
+        .expect("sname header should be present")
+        .expect("sname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(sname_res, "127.0.0.1");
+
+    // Verify legacy BOOTP file header matches the BootfileName
+    let fname_res = response
+        .fname_str()
+        .expect("fname header should be present")
+        .expect("fname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(fname_res, "boot/arm64/ipxe.efi");
+
     let host_state = state_store.get_host("00:aa:bb:cc:dd:ee").unwrap();
     assert_eq!(host_state.architecture, Some("aarch64".to_string()));
 }
@@ -388,6 +438,31 @@ async fn test_dhcp_arch0_serves_bios_bootloader() {
     } else {
         panic!("Missing BootfileName option");
     }
+
+    // Verify TFTPServerName option (Option 66)
+    let tftp_server = response.opts().get(v4::OptionCode::TFTPServerName).unwrap();
+    if let v4::DhcpOption::TFTPServerName(bytes) = tftp_server {
+        let sname = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(sname, "127.0.0.1");
+    } else {
+        panic!("Missing TFTPServerName option");
+    }
+
+    // Verify legacy BOOTP sname header matches the TFTPServerName
+    let sname_res = response
+        .sname_str()
+        .expect("sname header should be present")
+        .expect("sname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(sname_res, "127.0.0.1");
+
+    // Verify legacy BOOTP file header matches the BootfileName
+    let fname_res = response
+        .fname_str()
+        .expect("fname header should be present")
+        .expect("fname header should be valid UTF-8")
+        .trim_end_matches('\0');
+    assert_eq!(fname_res, "boot/bios/undionly.kpxe");
 
     let host_state = state_store.get_host("02:00:00:00:00:01").unwrap();
     assert_eq!(host_state.architecture, Some("x86 (BIOS)".to_string()));

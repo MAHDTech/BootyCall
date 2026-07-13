@@ -480,6 +480,30 @@ async fn respond_to_pxe_request(
     reply.set_flags(request.flags());
     reply.set_opcode(v4::Opcode::BootReply);
 
+    // Populate legacy BOOTP header fields: sname (64 bytes) and file/fname (128 bytes).
+    // Ensure they are null-terminated and validate length constraints before calling setters to prevent panics/DoS.
+    let mut sname_bytes = our_ip.to_string().into_bytes();
+    sname_bytes.push(0);
+    if sname_bytes.len() <= 64 {
+        reply.set_sname(&sname_bytes);
+    } else {
+        warn!(
+            "sname field length ({}) exceeds 64-byte limit; skipping setting legacy BOOTP sname",
+            sname_bytes.len()
+        );
+    }
+
+    let mut fname_bytes = bootloader_path.as_bytes().to_vec();
+    fname_bytes.push(0);
+    if fname_bytes.len() <= 128 {
+        reply.set_fname(&fname_bytes);
+    } else {
+        warn!(
+            "fname field length ({}) exceeds 128-byte limit; skipping setting legacy BOOTP file",
+            fname_bytes.len()
+        );
+    }
+
     // Set mandatory options
     reply
         .opts_mut()

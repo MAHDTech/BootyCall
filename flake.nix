@@ -56,11 +56,10 @@
                   modules = [
                     self.nixosModules.default
                     (_: {
-                      services.bootycall = {
+                      services.bootycall = pkgs.lib.recursiveUpdate {
                         enable = true;
                         server.httpBind = httpBind;
-                      }
-                      // extraConfig;
+                      } extraConfig;
                     })
                   ];
                 };
@@ -83,12 +82,33 @@
               test9090CustomAssets =
                 !(hasPortFailure (evalWithHttpBind "127.0.0.1:9090" { assetsPackage = dummyAssets; }));
 
-              allTestsPassed = test8080 && test80 && test9090 && test9090Allowed && test9090CustomAssets;
+              testFirewallLoopback =
+                let
+                  eval = evalWithHttpBind "127.0.0.1:8080" { };
+                in
+                eval.config.services.bootycall.firewallPorts.tcp == [ ];
+
+              testFirewallNonLoopback =
+                let
+                  eval = evalWithHttpBind "192.168.1.5:8080" {
+                    server.apiToken = "test-token-1234567890";
+                  };
+                in
+                eval.config.services.bootycall.firewallPorts.tcp == [ 8080 ];
+
+              allTestsPassed =
+                test8080
+                && test80
+                && test9090
+                && test9090Allowed
+                && test9090CustomAssets
+                && testFirewallLoopback
+                && testFirewallNonLoopback;
             in
             if allTestsPassed then
               pkgs.runCommand "bootycall-port-validation-test" { } "touch $out"
             else
-              throw "bootycall portValidationTest failed: test8080=${builtins.toString test8080} test80=${builtins.toString test80} test9090=${builtins.toString test9090} test9090Allowed=${builtins.toString test9090Allowed} test9090CustomAssets=${builtins.toString test9090CustomAssets}";
+              throw "bootycall portValidationTest failed: test8080=${builtins.toString test8080} test80=${builtins.toString test80} test9090=${builtins.toString test9090} test9090Allowed=${builtins.toString test9090Allowed} test9090CustomAssets=${builtins.toString test9090CustomAssets} testFirewallLoopback=${builtins.toString testFirewallLoopback} testFirewallNonLoopback=${builtins.toString testFirewallNonLoopback}";
         }
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           vmTest = pkgs.testers.runNixOSTest {

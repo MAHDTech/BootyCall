@@ -168,20 +168,63 @@ async fn main() -> Result<(), anyhow::Error> {
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let state_store = StateStore::new();
 
+    let shutdown_token = CancellationToken::new();
+
     // 6. Setup configuration file watcher for live reload
+    let (config_tx, mut config_rx) = tokio::sync::watch::channel(config.clone());
+    let config_tx_clone = config_tx.clone();
+
     let config_path_clone = config_path.clone();
     let shared_config_clone = shared_config.clone();
     let _watcher = watch_config(config_path_clone, move |new_config| {
-        info!("Configuration file modified! Syncing cache...");
-        match bootycall_extractor::sync_all_hosts_cache(&new_config) {
-            Ok(summary) => log_sync_summary(&summary),
-            Err(e) => error!("Cache sync failed on config reload (cache dir): {:?}", e),
+        info!("Configuration file modified! Updating configuration guard...");
+        {
+            let mut guard = shared_config_clone.write();
+            *guard = new_config.clone();
         }
-        let mut guard = shared_config_clone.write();
-        *guard = new_config;
+        if let Err(e) = config_tx_clone.send(new_config) {
+            error!(
+                "Failed to send configuration update to background task: {:?}",
+                e
+            );
+        }
     })
     .context("Failed to start configuration file watcher")
     .map_err(|e| fail_startup(e, led_enabled))?;
+
+    let shutdown_token_clone = shutdown_token.clone();
+    let sync_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let extractor_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_token_clone.cancelled() => {
+                    break;
+                }
+                changed_res = config_rx.changed() => {
+                    if changed_res.is_err() {
+                        break;
+                    }
+                    let new_config = {
+                        let guard = config_rx.borrow();
+                        guard.clone()
+                    };
+                    let sync_lock_clone = sync_lock.clone();
+                    let _permit = sync_lock_clone.lock_owned().await;
+                    info!("Configuration file reload: starting background cache sync...");
+                    let handle = tokio::task::spawn_blocking(move || {
+                        let _permit = _permit;
+                        bootycall_extractor::sync_all_hosts_cache(&new_config)
+                    });
+                    let sync_result = handle.await;
+                    match sync_result {
+                        Ok(Ok(summary)) => log_sync_summary(&summary),
+                        Ok(Err(e)) => error!("Cache sync failed on config reload (cache dir): {:?}", e),
+                        Err(join_err) => error!("Cache sync task join error: {:?}", join_err),
+                    }
+                }
+            }
+        }
+    });
 
     // Check for systemd socket activation environment variables (informational)
     if std::env::var("LISTEN_FDS").is_ok() {
@@ -204,7 +247,6 @@ async fn main() -> Result<(), anyhow::Error> {
     //    (bind failure, socket error) propagates through the JoinHandle and
     //    turns into a non-zero exit below — systemd Restart=on-failure then
     //    kicks the unit back to life instead of silently succeeding.
-    let shutdown_token = CancellationToken::new();
 
     let dhcp_config = shared_config.clone();
     let dhcp_store = state_store.clone();
@@ -318,6 +360,7 @@ async fn main() -> Result<(), anyhow::Error> {
             Some(dhcp_handle),
             Some(tftp_handle),
             Some(http_handle),
+            Some(extractor_handle),
         )
         .await;
 
@@ -436,6 +479,7 @@ async fn main() -> Result<(), anyhow::Error> {
         Some(dhcp_handle),
         Some(tftp_handle),
         Some(http_handle),
+        Some(extractor_handle),
     )
     .await;
 
@@ -459,10 +503,24 @@ async fn graceful_shutdown(
     dhcp_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
     tftp_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
     http_handle: Option<tokio::task::JoinHandle<Result<(), anyhow::Error>>>,
+    extractor_handle: Option<tokio::task::JoinHandle<()>>,
 ) {
     let _ = led_shutdown_tx.send(()).await;
     let _ = oled_shutdown_tx.send(()).await;
     shutdown_token.cancel();
+
+    if let Some(handle) = extractor_handle {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(15), handle).await;
+        match timed_out {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("Extractor loop task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("Extractor loop shutdown timed out");
+            }
+        }
+    }
 
     if let Some(handle) = led_manager_handle {
         match handle.await {

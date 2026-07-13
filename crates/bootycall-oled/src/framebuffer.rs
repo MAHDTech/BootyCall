@@ -85,19 +85,15 @@ impl Framebuffer {
     pub fn with_brightness(brightness: u8) -> Self {
         let lut = build_lut(brightness);
 
-        let file = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_SYNC)
-            .open(FB_PATH)
-            .ok();
-
-        Self {
+        let mut fb = Self {
             buffer: [0; WIDTH * HEIGHT],
             lut,
             brightness,
-            file,
+            file: None,
             rotation: 0,
-        }
+        };
+        fb.ensure_open();
+        fb
     }
 
     /// Rebuild the LUT for a new brightness. No-op when unchanged, so it is

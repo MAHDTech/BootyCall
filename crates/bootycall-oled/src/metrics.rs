@@ -146,26 +146,30 @@ impl SystemMetrics {
     }
 
     pub fn get_cpu_temp(&self) -> String {
-        let mut max_temp = 0.0;
+        let mut max_temp: Option<f32> = None;
         for component in &self.components {
-            let temperature = component.temperature().unwrap_or(0.0);
-            if temperature > max_temp {
-                max_temp = temperature;
+            if let Some(temperature) = component.temperature() {
+                max_temp = Some(match max_temp {
+                    Some(curr) => curr.max(temperature),
+                    None => temperature,
+                });
             }
         }
-        if max_temp == 0.0 {
+        if max_temp.is_none() {
             for path in &self.thermal_zones {
                 let temp_file = path.join("temp");
                 if let Ok(content) = std::fs::read_to_string(temp_file)
                     && let Some(temp_c) = parse_thermal_millidegrees(&content)
-                    && temp_c > max_temp
                 {
-                    max_temp = temp_c;
+                    max_temp = Some(match max_temp {
+                        Some(curr) => curr.max(temp_c),
+                        None => temp_c,
+                    });
                 }
             }
         }
-        if max_temp > 0.0 {
-            format!("{:.1}C", max_temp)
+        if let Some(temp) = max_temp {
+            format!("{:.1}C", temp)
         } else {
             "N/A".to_string()
         }
@@ -365,5 +369,84 @@ Local:
         ));
         assert!(!is_interactive_sshd("bash", &["bash @pts/1".to_string()]));
         assert!(!is_interactive_sshd("sshd", &[]));
+    }
+
+    #[test]
+    fn test_cpu_temp_handling() {
+        use std::fs;
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // 1. All sensor lookups fail / return None -> should return "N/A"
+        let metrics_na = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            thermal_zones: vec![],
+        };
+        assert_eq!(metrics_na.get_cpu_temp(), "N/A");
+
+        // 2. Test negative temperature (-2.5 C -> -2500 millidegrees)
+        let zone0 = temp_dir.path().join("thermal_zone0");
+        fs::create_dir(&zone0).unwrap();
+        fs::write(zone0.join("temp"), "-2500\n").unwrap();
+
+        let metrics_neg = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            thermal_zones: vec![zone0.clone()],
+        };
+        assert_eq!(metrics_neg.get_cpu_temp(), "-2.5C");
+
+        // 3. Test exactly zero temperature (0.0 C -> 0 millidegrees)
+        fs::write(zone0.join("temp"), "0\n").unwrap();
+        let metrics_zero = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            thermal_zones: vec![zone0.clone()],
+        };
+        assert_eq!(metrics_zero.get_cpu_temp(), "0.0C");
+
+        // 4. Test positive temperature (36.7 C -> 36700 millidegrees)
+        fs::write(zone0.join("temp"), "36700\n").unwrap();
+        let metrics_pos = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            thermal_zones: vec![zone0.clone()],
+        };
+        assert_eq!(metrics_pos.get_cpu_temp(), "36.7C");
+
+        // 5. Test multiple thermal zones, ensuring we get the max temperature
+        let zone1 = temp_dir.path().join("thermal_zone1");
+        fs::create_dir(&zone1).unwrap();
+        // zone0 has 36.7C, let's write 42.1C to zone1
+        fs::write(zone1.join("temp"), "42100\n").unwrap();
+        let metrics_multi = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            thermal_zones: vec![zone0, zone1],
+        };
+        assert_eq!(metrics_multi.get_cpu_temp(), "42.1C");
+
+        // 6. Test fallback when one zone is garbage/bogus
+        let zone2 = temp_dir.path().join("thermal_zone2");
+        fs::create_dir(&zone2).unwrap();
+        fs::write(zone2.join("temp"), "garbage\n").unwrap();
+
+        let zone3 = temp_dir.path().join("thermal_zone3");
+        fs::create_dir(&zone3).unwrap();
+        fs::write(zone3.join("temp"), "150000\n").unwrap(); // 150C is sanity ceiling, rejected by parse_thermal_millidegrees
+
+        let metrics_bogus = SystemMetrics {
+            sys: sysinfo::System::new(),
+            components: sysinfo::Components::new(),
+            disks: sysinfo::Disks::new(),
+            // zone2 has garbage, zone3 has 150C (invalid), so if we only have these, it should return "N/A"
+            thermal_zones: vec![zone2, zone3],
+        };
+        assert_eq!(metrics_bogus.get_cpu_temp(), "N/A");
     }
 }

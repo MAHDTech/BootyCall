@@ -136,6 +136,28 @@ impl CacheMetadata {
     }
 }
 
+struct TempDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempDirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn defuse(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_ref().filter(|p| p.exists()) {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// Outcome of a full-fleet cache sync. Carries per-host failures so the caller
 /// (`main`) can tell "one host's image is temporarily missing" (warn, keep
 /// serving) from "every host failed" (surface prominently, feed the health
@@ -339,6 +361,7 @@ pub fn sync_host_cache(
         let _ = fs::remove_dir_all(&host_cache_dir_tmp);
     }
     fs::create_dir_all(&host_cache_dir_tmp)?;
+    let mut tmp_dir_guard = TempDirGuard::new(host_cache_dir_tmp.clone());
 
     let kernel_path_tmp = host_cache_dir_tmp.join("kernel");
     let initrd_path_tmp = host_cache_dir_tmp.join("initrd");
@@ -412,6 +435,7 @@ pub fn sync_host_cache(
                     }
                     return Err(ExtractorError::Io(rename_err));
                 }
+                tmp_dir_guard.defuse();
 
                 // Step 3: Clean up / delete the old directory, logging but tolerating cleanup failures
                 if let Err(cleanup_err) = fs::remove_dir_all(&host_cache_dir_old) {
@@ -423,6 +447,7 @@ pub fn sync_host_cache(
             } else {
                 // If there's no active cache directory (first run), rename tmp to it
                 fs::rename(&host_cache_dir_tmp, &host_cache_dir)?;
+                tmp_dir_guard.defuse();
             }
 
             info!(
@@ -446,8 +471,6 @@ pub fn sync_host_cache(
                 image = %host.image_path.display(),
                 error = %e,
             );
-            // Clean up the temp directory
-            let _ = fs::remove_dir_all(&host_cache_dir_tmp);
             Err(e)
         }
     }
@@ -455,7 +478,7 @@ pub fn sync_host_cache(
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_capped, is_initrd_name, is_kernel_name, tmp_artifact_path};
+    use super::{TempDirGuard, copy_capped, is_initrd_name, is_kernel_name, tmp_artifact_path};
     use crate::error::ExtractorError;
     use std::fs;
     use std::io::Read as _;
@@ -836,6 +859,71 @@ mod tests {
         assert!(
             !host_cache_dir_old.exists(),
             "The temporary .old directory should have been moved back/cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_temp_dir_guard_cleanup_on_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging_dir = dir.path().join("test_mac.tmp");
+        fs::create_dir_all(&staging_dir).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            let _guard = TempDirGuard::new(staging_dir.clone());
+            panic!("simulate a panic during extraction");
+        });
+
+        assert!(result.is_err());
+        assert!(
+            !staging_dir.exists(),
+            "staging directory should be removed on panic"
+        );
+    }
+
+    #[test]
+    fn test_temp_dir_guard_defused_no_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging_dir = dir.path().join("test_mac.tmp");
+        fs::create_dir_all(&staging_dir).unwrap();
+
+        {
+            let mut guard = TempDirGuard::new(staging_dir.clone());
+            guard.defuse();
+        }
+
+        assert!(
+            staging_dir.exists(),
+            "staging directory should NOT be removed when defused"
+        );
+    }
+
+    #[test]
+    fn test_sync_host_cache_cleanup_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+
+        // Create an invalid image (just a non-empty text file)
+        let corrupt_image_path = dir.path().join("corrupt.img");
+        fs::write(&corrupt_image_path, b"not a valid ISO or GPT disk").unwrap();
+
+        let host = super::HostConfig {
+            mac: "00:11:22:33:44:aa".to_string(),
+            name: "corrupt-host".to_string(),
+            image_path: corrupt_image_path.clone(),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        };
+
+        let res = super::sync_host_cache(&host, &cache_dir, None);
+        assert!(res.is_err());
+
+        // The staging directory should be removed on failure
+        let host_cache_dir_tmp = cache_dir.join(format!("{}.tmp", host.mac));
+        assert!(
+            !host_cache_dir_tmp.exists(),
+            "staging directory should be cleaned up on error"
         );
     }
 }

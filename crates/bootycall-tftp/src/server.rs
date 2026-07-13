@@ -642,21 +642,6 @@ const DEFAULT_TIMEOUT_SECS: u64 = 3;
 const MIN_TIMEOUT_SECS: u64 = 1;
 const MAX_TIMEOUT_SECS: u64 = 10;
 
-/// Wildcard bind address matching the peer's address family.
-///
-/// The per-transfer and reject sockets must share the client's address
-/// family: a socket bound to IPv4 `0.0.0.0:0` cannot `connect` to an IPv6
-/// peer (address-family mismatch), which previously broke IPv6 clients
-/// accepted by a `[::]`-bound listener — the RRQ never transferred and the
-/// client timed out.
-fn wildcard_bind_addr(peer: &SocketAddr) -> &'static str {
-    if peer.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    }
-}
-
 /// Runs the Asynchronous TFTP server UDP loop, serving files from the tftp_root.
 ///
 /// Concurrent transfers are bounded by [`MAX_CONCURRENT_TRANSFERS`]. Use
@@ -667,6 +652,108 @@ fn wildcard_bind_addr(peer: &SocketAddr) -> &'static str {
 /// `run_tftp_server_with_limit{bind_addr}` span (a span per loop iteration
 /// would be meaningless for an accept loop); per-transfer context comes from
 /// the [`handle_tftp_transfer`] span on each spawned transfer task.
+/// Helper to receive a UDP packet and its local interface IP address (on Linux).
+async fn receive_packet_with_info(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, Option<std::net::IpAddr>)> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
+        use std::io::IoSliceMut;
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        use std::os::fd::AsRawFd;
+
+        loop {
+            socket.readable().await?;
+            let res = socket.try_io(tokio::io::Interest::READABLE, || {
+                let mut cmsg_buf = nix::cmsg_space!(nix::libc::in_pktinfo, nix::libc::in6_pktinfo);
+                let mut iov = [IoSliceMut::new(buf)];
+
+                match recvmsg::<nix::sys::socket::SockaddrStorage>(
+                    socket.as_raw_fd(),
+                    &mut iov,
+                    Some(&mut cmsg_buf),
+                    MsgFlags::empty(),
+                ) {
+                    Ok(recv_msg) => {
+                        let len = recv_msg.bytes;
+                        let src_addr = recv_msg
+                            .address
+                            .and_then(|addr| {
+                                addr.as_sockaddr_in()
+                                    .map(|sin| {
+                                        SocketAddr::V4(std::net::SocketAddrV4::new(
+                                            sin.ip(),
+                                            sin.port(),
+                                        ))
+                                    })
+                                    .or_else(|| {
+                                        addr.as_sockaddr_in6().map(|sin6| {
+                                            SocketAddr::V6(std::net::SocketAddrV6::new(
+                                                sin6.ip(),
+                                                sin6.port(),
+                                                sin6.flowinfo(),
+                                                sin6.scope_id(),
+                                            ))
+                                        })
+                                    })
+                            })
+                            .ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "could not parse source address",
+                                )
+                            })?;
+
+                        let mut local_ip = None;
+                        if let Ok(cmsgs) = recv_msg.cmsgs() {
+                            for cmsg in cmsgs {
+                                match cmsg {
+                                    ControlMessageOwned::Ipv4PacketInfo(pktinfo) => {
+                                        let ip = Ipv4Addr::from(u32::from_be(
+                                            pktinfo.ipi_spec_dst.s_addr,
+                                        ));
+                                        local_ip = Some(IpAddr::V4(ip));
+                                    }
+                                    ControlMessageOwned::Ipv6PacketInfo(pktinfo) => {
+                                        let ip = Ipv6Addr::from(pktinfo.ipi6_addr.s6_addr);
+                                        local_ip = Some(IpAddr::V6(ip));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        Ok((len, src_addr, local_ip))
+                    }
+                    Err(e)
+                        if e == nix::errno::Errno::EWOULDBLOCK
+                            || e == nix::errno::Errno::EAGAIN =>
+                    {
+                        Err(std::io::ErrorKind::WouldBlock.into())
+                    }
+                    Err(e) => Err(std::io::Error::from(e)),
+                }
+            });
+
+            match res {
+                Ok(val) => return Ok(val),
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (len, src_addr) = socket.recv_from(buf).await?;
+        Ok((len, src_addr, None))
+    }
+}
+
 #[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_tftp_server(
     bind_addr: &str,
@@ -697,16 +784,50 @@ pub async fn run_tftp_server_with_limit(
 ) -> Result<(), TftpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     info!("TFTP Server listening on {}", bind_addr);
+
+    #[cfg(target_os = "linux")]
+    {
+        let local_addr = socket.local_addr()?;
+        if local_addr.is_ipv4() {
+            let res = nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv4PacketInfo,
+                &true,
+            );
+            if let Err(e) = res {
+                warn!("Failed to set Ipv4PacketInfo (IP_PKTINFO): {:?}", e);
+            }
+        }
+        if local_addr.is_ipv6() {
+            let res = nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6RecvPacketInfo,
+                &true,
+            );
+            if let Err(e) = res {
+                warn!(
+                    "Failed to set Ipv6RecvPacketInfo (IPV6_RECVPKTINFO): {:?}",
+                    e
+                );
+            }
+            let _ = nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv4PacketInfo,
+                &true,
+            );
+        }
+    }
+
     let transfer_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent_transfers));
 
     let mut buf = [0u8; 1500];
     loop {
-        let (len, src_addr) = tokio::select! {
+        let (len, src_addr, local_ip) = tokio::select! {
             _ = shutdown.cancelled() => {
                 info!("TFTP server listener shutting down gracefully");
                 break;
             }
-            res = socket.recv_from(&mut buf) => {
+            res = receive_packet_with_info(&socket, &mut buf) => {
                 match res {
                     Ok(val) => val,
                     Err(e) => {
@@ -883,12 +1004,20 @@ pub async fn run_tftp_server_with_limit(
 
         // From here on the host is already marked `Booting`, and the permit is held,
         // so every setup failure path must go through `mark_tftp_failed`.
-        let transfer_socket = match UdpSocket::bind(wildcard_bind_addr(&src_addr)).await {
+        let bind_addr = if let Some(ip) = local_ip.filter(|ip| ip.is_ipv4() == src_addr.is_ipv4()) {
+            SocketAddr::new(ip, 0)
+        } else if src_addr.is_ipv6() {
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+        } else {
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+        };
+
+        let transfer_socket = match UdpSocket::bind(bind_addr).await {
             Ok(s) => s,
             Err(e) => {
                 error!(
-                    "Failed to bind transfer socket for client {}: {:?}",
-                    src_addr, e
+                    "Failed to bind transfer socket for client {} (bind_addr={:?}): {:?}",
+                    src_addr, bind_addr, e
                 );
                 mark_tftp_failed(
                     &state_store,

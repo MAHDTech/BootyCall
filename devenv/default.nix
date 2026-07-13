@@ -267,6 +267,8 @@ in
   };
 
   enterTest = ''
+    echo "Running version.sh self-tests..."
+    ./scripts/version.sh TEST
     if [[ "''${CI:-false}" == "true" ]]; then
       echo "Skipping workspace tests in CI (handled by cargo-test job)"
     else

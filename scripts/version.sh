@@ -54,6 +54,7 @@ Usage: $(basename "$0") [options] [COMMAND]
 
 Commands:
   CI                   Run CI version collision check
+  TEST                 Run semver_gt self-tests
   MAJOR                Force bump MAJOR version (--major)
   MINOR                Force bump MINOR version (--minor)
   PATCH                Force bump PATCH version (--patch)
@@ -145,6 +146,168 @@ get_default_branch() {
 	exit 1
 }
 
+# Semver comparison helper (returns 0 if arg1 > arg2)
+semver_gt() {
+	local version1="$1"
+	local version2="$2"
+	local core1 prerelease1 core2 prerelease2
+	local LC_ALL=C
+
+	if [[ $version1 =~ - ]]; then
+		core1="${version1%%-*}"
+		prerelease1="${version1#*-}"
+	else
+		core1="$version1"
+		prerelease1=""
+	fi
+
+	if [[ $version2 =~ - ]]; then
+		core2="${version2%%-*}"
+		prerelease2="${version2#*-}"
+	else
+		core2="$version2"
+		prerelease2=""
+	fi
+
+	local -a c1 c2
+	IFS='.' read -r -a c1 <<<"$core1"
+	IFS='.' read -r -a c2 <<<"$core2"
+
+	local i
+	for ((i = ${#c1[@]}; i < 3; i++)); do c1[i]=0; done
+	for ((i = ${#c2[@]}; i < 3; i++)); do c2[i]=0; done
+
+	for ((i = 0; i < 3; i++)); do
+		local comp1=${c1[i]:-0}
+		local comp2=${c2[i]:-0}
+		if ((comp1 > comp2)); then
+			return 0
+		elif ((comp1 < comp2)); then
+			return 1
+		fi
+	done
+
+	if [[ -z $prerelease1 && -z $prerelease2 ]]; then
+		return 1
+	elif [[ -z $prerelease1 && -n $prerelease2 ]]; then
+		return 0
+	elif [[ -n $prerelease1 && -z $prerelease2 ]]; then
+		return 1
+	else
+		local -a p1 p2
+		IFS='.' read -r -a p1 <<<"$prerelease1"
+		IFS='.' read -r -a p2 <<<"$prerelease2"
+
+		local len1=${#p1[@]}
+		local len2=${#p2[@]}
+		local min_len=$((len1 < len2 ? len1 : len2))
+
+		for ((i = 0; i < min_len; i++)); do
+			local id1="${p1[i]:-}"
+			local id2="${p2[i]:-}"
+
+			local id1_is_num=0
+			local id2_is_num=0
+			if [[ $id1 =~ ^[0-9]+$ ]]; then
+				id1_is_num=1
+			fi
+			if [[ $id2 =~ ^[0-9]+$ ]]; then
+				id2_is_num=1
+			fi
+
+			if ((id1_is_num && id2_is_num)); then
+				local val1=$((10#$id1))
+				local val2=$((10#$id2))
+				if ((val1 > val2)); then
+					return 0
+				elif ((val1 < val2)); then
+					return 1
+				fi
+			elif ((id1_is_num && !id2_is_num)); then
+				return 1
+			elif ((!id1_is_num && id2_is_num)); then
+				return 0
+			else
+				if [[ $id1 > $id2 ]]; then
+					return 0
+				elif [[ $id1 < $id2 ]]; then
+					return 1
+				fi
+			fi
+		done
+
+		if ((len1 > len2)); then
+			return 0
+		else
+			return 1
+		fi
+	fi
+}
+
+assert_gt() {
+	local v1="$1"
+	local v2="$2"
+	if ! semver_gt "$v1" "$v2"; then
+		log_error "Assertion failed: Expected $v1 > $v2, but it was not."
+		exit 1
+	else
+		log_info "Assertion passed: $v1 > $v2"
+	fi
+}
+
+assert_not_gt() {
+	local v1="$1"
+	local v2="$2"
+	if semver_gt "$v1" "$v2"; then
+		log_error "Assertion failed: Expected NOT $v1 > $v2, but it was."
+		exit 1
+	else
+		log_info "Assertion passed: NOT $v1 > $v2"
+	fi
+}
+
+run_tests() {
+	log_info "Running semver_gt unit tests..."
+
+	# Core version checks
+	assert_gt "1.0.0" "0.9.0"
+	assert_not_gt "0.9.0" "1.0.0"
+	assert_not_gt "1.0.0" "1.0.0"
+	assert_gt "1.0.1" "1.0.0"
+	assert_gt "1.1.0" "1.0.0"
+	assert_gt "2.0.0" "1.9.9"
+
+	# Normal vs Pre-release checks
+	assert_not_gt "1.0.0-rc.1" "1.0.0"
+	assert_gt "1.0.0" "1.0.0-rc.1"
+	assert_gt "2.0.0-rc.1" "1.9.9"
+	assert_not_gt "1.9.9" "2.0.0-rc.1"
+
+	# Numeric pre-release checks
+	assert_gt "1.0.0-beta.11" "1.0.0-beta.2"
+	assert_not_gt "1.0.0-beta.2" "1.0.0-beta.11"
+
+	# Lexical pre-release checks
+	assert_gt "1.0.0-rc.1" "1.0.0-beta.11"
+	assert_not_gt "1.0.0-beta.11" "1.0.0-rc.1"
+
+	# Numeric vs Non-numeric pre-release checks
+	assert_gt "1.0.0-alpha.beta" "1.0.0-alpha.1"
+	assert_not_gt "1.0.0-alpha.1" "1.0.0-alpha.beta"
+
+	# Field count pre-release checks
+	assert_gt "1.0.0-alpha.1" "1.0.0-alpha"
+	assert_not_gt "1.0.0-alpha" "1.0.0-alpha.1"
+
+	# Complex tags with hyphens and dots
+	assert_gt "1.0.0-rc.1" "1.0.0-beta"
+	assert_gt "1.0.0-beta" "1.0.0-alpha"
+	assert_not_gt "1.0.0-beta" "1.0.0-beta.1"
+	assert_gt "2.0.0-rc.1" "2.0.0-beta.1"
+
+	log_success "All semver_gt tests passed successfully!"
+}
+
 # Run the CI version collision checks
 run_ci_check() {
 	log_info "Running CI version collision check..."
@@ -214,25 +377,7 @@ run_ci_check() {
 	log_info "  Expected version (by convco):  $expected_version"
 	log_info "  Actual PR version:             $CURRENT_VERSION"
 
-	# Semver comparison helper (returns 0 if arg1 > arg2)
-	semver_gt() {
-		local -a v1 v2
-		IFS='.' read -r -a v1 <<<"$1"
-		IFS='.' read -r -a v2 <<<"$2"
-
-		for ((i = ${#v1[@]}; i < 3; i++)); do v1[i]=0; done
-		for ((i = ${#v2[@]}; i < 3; i++)); do v2[i]=0; done
-
-		for ((i = 0; i < 3; i++)); do
-			if ((v1[i] > v2[i])); then
-				return 0
-			elif ((v1[i] < v2[i])); then
-				return 1
-			fi
-		done
-		return 1
-	}
-
+	# Using global semver_gt comparison helper
 	if semver_gt "$expected_version" "$base_version"; then
 		# A bump is required!
 		if [ "$CURRENT_VERSION" = "$base_version" ]; then
@@ -298,6 +443,12 @@ main() {
 	# Log start details in verbose mode
 	log_debug "Verbose logging enabled."
 
+	# Route TEST command early to avoid checking external dependencies
+	if [ "$command" = "TEST" ]; then
+		run_tests
+		exit 0
+	fi
+
 	# Ensure we have the latest tags (fetch from remote if possible)
 	log_debug "Fetching tags from origin remote..."
 	git fetch --tags origin >/dev/null 2>&1 || true
@@ -322,6 +473,10 @@ main() {
 	case "$command" in
 	CI)
 		run_ci_check
+		exit 0
+		;;
+	TEST)
+		run_tests
 		exit 0
 		;;
 	MAJOR)

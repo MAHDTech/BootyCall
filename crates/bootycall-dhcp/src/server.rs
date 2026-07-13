@@ -4,7 +4,7 @@ use bootycall_core::state::{HostStatus, StateStore};
 use bootycall_log::{debug, error, info, warn};
 use dhcproto::{Decodable, Decoder, Encodable, Encoder, v4};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use tokio::net::UdpSocket;
@@ -38,15 +38,62 @@ const CHADDR_MAX_LEN: usize = 16;
 /// worth of bytes to identify the client.
 const MAC_LEN: usize = 6;
 
-static IP_RESOLVE_CACHE: OnceLock<RwLock<HashMap<Ipv4Addr, Ipv4Addr>>> = OnceLock::new();
+const IP_RESOLVE_CACHE_CAPACITY: usize = 1024;
+
+struct FifoCache {
+    map: HashMap<Ipv4Addr, Ipv4Addr>,
+    queue: VecDeque<Ipv4Addr>,
+    capacity: usize,
+}
+
+impl FifoCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(capacity),
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&self, key: &Ipv4Addr) -> Option<&Ipv4Addr> {
+        self.map.get(key)
+    }
+
+    fn insert(&mut self, key: Ipv4Addr, value: Ipv4Addr) -> Option<Ipv4Addr> {
+        if self.map.contains_key(&key) {
+            self.map.insert(key, value)
+        } else {
+            if self.map.len() >= self.capacity {
+                let oldest = self.queue.pop_front();
+                if let Some(o) = oldest {
+                    self.map.remove(&o);
+                }
+            }
+            self.queue.push_back(key);
+            self.map.insert(key, value)
+        }
+    }
+
+    #[allow(dead_code)]
+    fn remove(&mut self, key: &Ipv4Addr) -> Option<Ipv4Addr> {
+        if let Some(pos) = self.queue.iter().position(|x| x == key) {
+            self.queue.remove(pos);
+        }
+        self.map.remove(key)
+    }
+}
+
+static IP_RESOLVE_CACHE: OnceLock<RwLock<FifoCache>> = OnceLock::new();
 
 fn get_cached_local_ip(target: Ipv4Addr) -> Option<Ipv4Addr> {
-    let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let cache =
+        IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(FifoCache::new(IP_RESOLVE_CACHE_CAPACITY)));
     cache.read().get(&target).copied()
 }
 
 fn cache_local_ip(target: Ipv4Addr, local_ip: Ipv4Addr) {
-    let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let cache =
+        IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(FifoCache::new(IP_RESOLVE_CACHE_CAPACITY)));
     cache.write().insert(target, local_ip);
 }
 
@@ -878,7 +925,8 @@ mod tests {
 
         // Make sure target_ip is not in cache before starting
         {
-            let cache = IP_RESOLVE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+            let cache = IP_RESOLVE_CACHE
+                .get_or_init(|| RwLock::new(FifoCache::new(IP_RESOLVE_CACHE_CAPACITY)));
             cache.write().remove(&target_ip);
         }
         assert!(get_cached_local_ip(target_ip).is_none());
@@ -897,5 +945,46 @@ mod tests {
         // Query again, it should return the cached dummy_ip directly
         let resolved_again = resolve_local_ip(&request, &socket).await;
         assert_eq!(resolved_again, dummy_ip);
+    }
+
+    #[test]
+    fn test_fifo_cache_eviction() {
+        let mut cache = FifoCache::new(3);
+
+        let ip1 = Ipv4Addr::new(10, 0, 0, 1);
+        let ip2 = Ipv4Addr::new(10, 0, 0, 2);
+        let ip3 = Ipv4Addr::new(10, 0, 0, 3);
+        let ip4 = Ipv4Addr::new(10, 0, 0, 4);
+
+        let local = Ipv4Addr::new(192, 168, 1, 1);
+
+        cache.insert(ip1, local);
+        cache.insert(ip2, local);
+        cache.insert(ip3, local);
+
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.queue.len(), 3);
+        assert!(cache.get(&ip1).is_some());
+
+        // Insert a fourth entry, which should evict the oldest one (ip1)
+        cache.insert(ip4, local);
+
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.queue.len(), 3);
+        assert!(cache.get(&ip1).is_none());
+        assert!(cache.get(&ip2).is_some());
+        assert!(cache.get(&ip3).is_some());
+        assert!(cache.get(&ip4).is_some());
+
+        // Now remove ip2
+        cache.remove(&ip2);
+        assert_eq!(cache.map.len(), 2);
+        assert_eq!(cache.queue.len(), 2);
+        assert!(cache.get(&ip2).is_none());
+
+        // Updating an existing key shouldn't increase size or evict anything
+        cache.insert(ip3, Ipv4Addr::new(192, 168, 1, 2));
+        assert_eq!(cache.map.len(), 2);
+        assert_eq!(cache.queue.len(), 2);
     }
 }

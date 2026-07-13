@@ -60,22 +60,25 @@ impl FifoCache {
     }
 
     fn insert(&mut self, key: Ipv4Addr, value: Ipv4Addr) -> Option<Ipv4Addr> {
-        if self.map.contains_key(&key) {
-            self.map.insert(key, value)
-        } else {
-            if self.map.len() >= self.capacity {
-                let oldest = self.queue.pop_front();
-                if let Some(o) = oldest {
-                    self.map.remove(&o);
-                }
+        let old_value = self.map.insert(key, value);
+        if old_value.is_some() {
+            // Key already exists; update its position in the queue to be most-recently used (write-LRU).
+            if let Some(pos) = self.queue.iter().position(|x| *x == key) {
+                self.queue.remove(pos);
             }
-            self.queue.push_back(key);
-            self.map.insert(key, value)
+        } else if self.map.len() > self.capacity {
+            // We exceeded capacity; evict the oldest key.
+            if let Some(oldest) = self.queue.pop_front() {
+                self.map.remove(&oldest);
+            }
         }
+        self.queue.push_back(key);
+        old_value
     }
 
     #[allow(dead_code)]
     fn remove(&mut self, key: &Ipv4Addr) -> Option<Ipv4Addr> {
+        // O(N) complexity lookup and removal from VecDeque, acceptable since it is only used in tests.
         if let Some(pos) = self.queue.iter().position(|x| x == key) {
             self.queue.remove(pos);
         }
@@ -1084,5 +1087,23 @@ mod tests {
         cache.insert(ip3, Ipv4Addr::new(192, 168, 1, 2));
         assert_eq!(cache.map.len(), 2);
         assert_eq!(cache.queue.len(), 2);
+
+        // Verify write-LRU / FIFO-with-update logic:
+        // ip3 was updated, so it is now at the back of the queue (queue is [ip4, ip3]).
+        // If we insert a new key ip1, since map has size 2 and capacity is 3, it should not evict.
+        cache.insert(ip1, local);
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.queue.len(), 3);
+
+        // Map has ip4, ip3, ip1. Queue is [ip4, ip3, ip1].
+        // Now if we insert ip2 (which is not in map), we exceed capacity.
+        // The oldest key at the front of the queue (ip4) must be evicted, while ip3 is retained.
+        cache.insert(ip2, local);
+        assert_eq!(cache.map.len(), 3);
+        assert_eq!(cache.queue.len(), 3);
+        assert!(cache.get(&ip4).is_none());
+        assert!(cache.get(&ip3).is_some());
+        assert!(cache.get(&ip1).is_some());
+        assert!(cache.get(&ip2).is_some());
     }
 }

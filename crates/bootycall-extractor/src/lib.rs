@@ -112,7 +112,8 @@ struct CacheMetadata {
 /// must be recognised alongside the x86 `vmlinuz`/`bzimage` names.
 pub(crate) fn is_kernel_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    matches!(lower.as_str(), "vmlinuz" | "bzimage" | "kernel" | "image")
+    let cleaned = lower.split(';').next().unwrap_or("").trim_end_matches('.');
+    matches!(cleaned, "vmlinuz" | "bzimage" | "kernel" | "image")
 }
 
 /// Initrd filename heuristic (case-insensitive substring match), shared by both
@@ -594,7 +595,18 @@ mod tests {
     #[test]
     fn kernel_name_heuristic() {
         for good in [
-            "vmlinuz", "bzImage", "BZIMAGE", "kernel", "Image", "image", "IMAGE",
+            "vmlinuz",
+            "bzImage",
+            "BZIMAGE",
+            "kernel",
+            "Image",
+            "image",
+            "IMAGE",
+            "vmlinuz;1",
+            "kernel.;1",
+            "IMAGE;1",
+            "vmlinuz.;1",
+            "image;123",
         ] {
             assert!(is_kernel_name(good), "{good:?} should match a kernel");
         }
@@ -605,6 +617,8 @@ mod tests {
             "images",
             "kernel.efi",
             "",
+            "vmlinuz.old;1",
+            "initrd;1",
         ] {
             assert!(!is_kernel_name(bad), "{bad:?} should NOT match a kernel");
         }

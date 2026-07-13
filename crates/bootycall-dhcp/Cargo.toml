@@ -13,6 +13,7 @@ bootycall-log = { workspace = true }
 dhcproto = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

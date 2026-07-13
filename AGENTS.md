@@ -66,7 +66,7 @@ The Cargo Workspace is located inside the root project directory and splits resp
 - `bootycall-dhcp`: Proxy DHCP server. Parses Option 60 (vendor class) and Option 93 (architecture) and serves architecture-specific PXE redirection to `PXEClient`s only.
 - `bootycall-tftp`: Asynchronous TFTP server serving UEFI bootloader binaries. Concurrent transfers are bounded by a semaphore.
 - `bootycall-extractor`: User-space extraction of kernels/initrds from ISOs/disk images to a persistent cache. Cache metadata is JSON.
-- `bootycall-http`: HTTP endpoints for dynamic iPXE scripts, file streaming, wallpaper picker, and UI. The mutating `/api/override` endpoint is gated on an optional `api_token`.
+- `bootycall-http`: HTTP endpoints for dynamic iPXE scripts, file streaming, wallpaper picker, and UI. The mutating `/api/override` and read endpoints (`/api/status` and `/api/logs`) are gated on an optional `api_token`.
 - `bootycall-oled`: 160×60 OLED render loop, page state machine, and TrueType text rendering via `ab_glyph`. Runs on a dedicated OS thread.
 - `bootycall-led`: Rackmount status LED driver (blue/white/off) and a boot-blink pattern used during startup.
 - `bootycall-log`: Thin wrapper around `tracing`/`tracing-subscriber` so every crate emits structured logs the same way.

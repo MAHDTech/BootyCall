@@ -199,6 +199,7 @@ dependencies = [
  "bootycall-core",
  "bootycall-log",
  "dhcproto",
+ "nix",
  "parking_lot",
  "serde_json",
  "thiserror",

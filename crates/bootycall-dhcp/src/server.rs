@@ -113,7 +113,14 @@ fn get_default_local_ip() -> Ipv4Addr {
         .unwrap_or_else(|| Ipv4Addr::new(127, 0, 0, 1))
 }
 
-async fn resolve_local_ip(request: &v4::Message, socket: &UdpSocket) -> Ipv4Addr {
+async fn resolve_local_ip(
+    request: &v4::Message,
+    socket: &UdpSocket,
+    local_ip: Option<Ipv4Addr>,
+) -> Ipv4Addr {
+    if let Some(ip) = local_ip.filter(|ip| !ip.is_unspecified()) {
+        return ip;
+    }
     let ciaddr = request.ciaddr();
     let giaddr = request.giaddr();
     let local_addr = socket.local_addr().ok();
@@ -361,6 +368,82 @@ fn choose_reply_dest(
 /// context comes from [`respond_to_pxe_request`] instead — the loop itself
 /// carries one long-lived `run_dhcp_server{bind_addr}` span that groups every
 /// nested record under the DHCP subsystem.
+#[cfg(target_os = "linux")]
+async fn recv_dhcp_packet(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, Option<Ipv4Addr>)> {
+    use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
+    use std::io::IoSliceMut;
+    use std::net::Ipv4Addr;
+    use std::os::fd::AsRawFd;
+
+    loop {
+        socket.readable().await?;
+        let res = socket.try_io(tokio::io::Interest::READABLE, || {
+            let mut cmsg_buf = nix::cmsg_space!(nix::libc::in_pktinfo);
+            let mut iov = [IoSliceMut::new(buf)];
+
+            match recvmsg::<nix::sys::socket::SockaddrStorage>(
+                socket.as_raw_fd(),
+                &mut iov,
+                Some(&mut cmsg_buf),
+                MsgFlags::empty(),
+            ) {
+                Ok(recv_msg) => {
+                    let len = recv_msg.bytes;
+                    let src_addr = recv_msg
+                        .address
+                        .and_then(|addr| {
+                            addr.as_sockaddr_in().map(|sin| {
+                                SocketAddr::V4(std::net::SocketAddrV4::new(sin.ip(), sin.port()))
+                            })
+                        })
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "could not parse source address",
+                            )
+                        })?;
+
+                    let mut local_ip = None;
+                    if let Ok(cmsgs) = recv_msg.cmsgs() {
+                        for cmsg in cmsgs {
+                            if let ControlMessageOwned::Ipv4PacketInfo(pktinfo) = cmsg {
+                                let ip = Ipv4Addr::from(u32::from_be(pktinfo.ipi_spec_dst.s_addr));
+                                local_ip = Some(ip);
+                            }
+                        }
+                    }
+
+                    Ok((len, src_addr, local_ip))
+                }
+                Err(e) if e == nix::errno::Errno::EWOULDBLOCK || e == nix::errno::Errno::EAGAIN => {
+                    Err(std::io::ErrorKind::WouldBlock.into())
+                }
+                Err(e) => Err(std::io::Error::from(e)),
+            }
+        });
+
+        match res {
+            Ok(val) => return Ok(val),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn recv_dhcp_packet(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr, Option<Ipv4Addr>)> {
+    let (len, src_addr) = socket.recv_from(buf).await?;
+    Ok((len, src_addr, None))
+}
+
 #[tracing::instrument(skip(config, state_store, shutdown))]
 pub async fn run_dhcp_server(
     bind_addr: &str,
@@ -370,16 +453,30 @@ pub async fn run_dhcp_server(
 ) -> Result<(), DhcpError> {
     let socket = UdpSocket::bind(bind_addr).await?;
     socket.set_broadcast(true)?;
+    #[cfg(target_os = "linux")]
+    {
+        let local_addr = socket.local_addr()?;
+        if local_addr.is_ipv4() {
+            let res = nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv4PacketInfo,
+                &true,
+            );
+            if let Err(e) = res {
+                warn!("Failed to set Ipv4PacketInfo (IP_PKTINFO): {:?}", e);
+            }
+        }
+    }
     info!("Proxy DHCP Server listening on {}", bind_addr);
 
     let mut buf = [0u8; 1500];
     loop {
-        let (len, src_addr) = tokio::select! {
+        let (len, src_addr, local_ip) = tokio::select! {
             _ = shutdown.cancelled() => {
                 info!("Proxy DHCP server shutting down gracefully");
                 break;
             }
-            res = socket.recv_from(&mut buf) => {
+            res = recv_dhcp_packet(&socket, &mut buf) => {
                 match res {
                     Ok(val) => val,
                     Err(e) => {
@@ -396,7 +493,7 @@ pub async fn run_dhcp_server(
         let Some(parsed) = parse_pxe_request(&buf[..len], src_addr) else {
             continue;
         };
-        respond_to_pxe_request(&socket, &config, &state_store, parsed, src_addr).await;
+        respond_to_pxe_request(&socket, &config, &state_store, parsed, src_addr, local_ip).await;
     }
     Ok(())
 }
@@ -416,6 +513,7 @@ async fn respond_to_pxe_request(
     state_store: &StateStore,
     parsed: PxeRequest,
     src_addr: SocketAddr,
+    local_ip: Option<Ipv4Addr>,
 ) {
     let PxeRequest {
         message: request,
@@ -482,7 +580,7 @@ async fn respond_to_pxe_request(
     };
 
     // Resolve Next-Server IP
-    let our_ip = resolve_local_ip(&request, socket).await;
+    let our_ip = resolve_local_ip(&request, socket, local_ip).await;
 
     // Update StateStore
     let _ = state_store.update_host_status(
@@ -885,7 +983,7 @@ mod tests {
         });
         let state_store = StateStore::new();
 
-        respond_to_pxe_request(&socket, &config, &state_store, parsed, src).await;
+        respond_to_pxe_request(&socket, &config, &state_store, parsed, src, None).await;
         drop(guard);
 
         let bytes = buf.0.lock().expect("buffer lock").clone();
@@ -932,7 +1030,7 @@ mod tests {
         assert!(get_cached_local_ip(target_ip).is_none());
 
         // Call resolve_local_ip (which will do standard resolution and cache it)
-        let resolved_ip = resolve_local_ip(&request, &socket).await;
+        let resolved_ip = resolve_local_ip(&request, &socket, None).await;
 
         // Now, it should be cached!
         let cached_ip = get_cached_local_ip(target_ip).expect("IP must be cached");
@@ -943,7 +1041,7 @@ mod tests {
         cache_local_ip(target_ip, dummy_ip);
 
         // Query again, it should return the cached dummy_ip directly
-        let resolved_again = resolve_local_ip(&request, &socket).await;
+        let resolved_again = resolve_local_ip(&request, &socket, None).await;
         assert_eq!(resolved_again, dummy_ip);
     }
 

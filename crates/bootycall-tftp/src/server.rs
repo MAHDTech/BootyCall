@@ -380,7 +380,6 @@ async fn handle_tftp_transfer(
                             (base..next_to_send).find(|&abs| wire_of(abs) == acked_wire);
                         match acked_abs {
                             Some(abs) => {
-                                let was_partial = abs + 1 < next_to_send;
                                 // Cumulative ACK: retire blocks up to `abs`.
                                 base = abs + 1;
                                 buffered.retain(|&k, _| k >= base);
@@ -389,13 +388,6 @@ async fn handle_tftp_transfer(
                                     && base > lb
                                 {
                                     break; // whole file acknowledged
-                                }
-                                // An ACK for an earlier block than the last one
-                                // sent means the blocks after it were lost or
-                                // dropped out-of-order: roll back to `base` and
-                                // resend the window from there (go-back-N).
-                                if was_partial {
-                                    next_to_send = base;
                                 }
                             }
                             None => {

@@ -117,7 +117,7 @@ impl SystemMetrics {
                 })
                 .map(|addr| addr.ip().to_string())
         {
-            return ip;
+            return truncate_ip(&ip);
         }
 
         if let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
@@ -128,14 +128,45 @@ impl SystemMetrics {
             })
             .map(|addr| addr.ip().to_string())
         {
-            return ip;
+            return truncate_ip(&ip);
+        }
+
+        if let Some(gateway) = get_default_ipv6_gateway()
+            && let Some(ip) = std::net::UdpSocket::bind("[::]:0")
+                .ok()
+                .and_then(|s| {
+                    s.connect((gateway, 80)).ok()?;
+                    s.local_addr().ok()
+                })
+                .map(|addr| addr.ip().to_string())
+        {
+            return truncate_ip(&ip);
+        }
+
+        if let Some(ip) = std::net::UdpSocket::bind("[::]:0")
+            .ok()
+            .and_then(|s| {
+                s.connect((
+                    std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+                    80,
+                ))
+                .ok()?;
+                s.local_addr().ok()
+            })
+            .map(|addr| addr.ip().to_string())
+        {
+            return truncate_ip(&ip);
         }
 
         if let Some(ip) = get_local_ips_from_fib_trie()
             .first()
             .map(|ip| ip.to_string())
         {
-            return ip;
+            return truncate_ip(&ip);
+        }
+
+        if let Some(ip) = get_local_ipv6_addresses().first().map(|ip| ip.to_string()) {
+            return truncate_ip(&ip);
         }
 
         "No IP".to_string()
@@ -276,6 +307,106 @@ fn get_local_ips_from_fib_trie() -> Vec<std::net::Ipv4Addr> {
     }
 }
 
+fn truncate_ip(ip: &str) -> String {
+    if ip.len() > 15 {
+        let prefix = &ip[..9];
+        let suffix = &ip[ip.len() - 4..];
+        format!("{}..{}", prefix, suffix)
+    } else {
+        ip.to_string()
+    }
+}
+
+fn parse_hex_ipv6(hex_str: &str) -> Option<std::net::Ipv6Addr> {
+    let hex_str = hex_str.trim();
+    if hex_str.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
+        bytes[i] = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(std::net::Ipv6Addr::from(bytes))
+}
+
+fn parse_default_ipv6_gateway(content: &str) -> Option<std::net::Ipv6Addr> {
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let dest_hex = parts[0];
+        let dest_prefix_hex = parts[1];
+        let next_hop_hex = parts[4];
+
+        if dest_hex == "00000000000000000000000000000000"
+            && (dest_prefix_hex == "00" || dest_prefix_hex == "0")
+            && next_hop_hex != "00000000000000000000000000000000"
+            && let Some(next_hop) = parse_hex_ipv6(next_hop_hex)
+        {
+            return Some(next_hop);
+        }
+    }
+    None
+}
+
+fn get_default_ipv6_gateway() -> Option<std::net::Ipv6Addr> {
+    let content = std::fs::read_to_string("/proc/net/ipv6_route").ok()?;
+    parse_default_ipv6_gateway(&content)
+}
+
+fn parse_local_ipv6_addresses(content: &str) -> Vec<std::net::Ipv6Addr> {
+    let mut ips = Vec::new();
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let ip_hex = parts[0];
+        let scope_hex = parts[3];
+        let dev_name = parts[5];
+
+        if dev_name == "lo" {
+            continue;
+        }
+
+        let Some(ip) = parse_hex_ipv6(ip_hex) else {
+            continue;
+        };
+
+        if ip.is_loopback() {
+            continue;
+        }
+
+        let Ok(scope) = u8::from_str_radix(scope_hex, 16) else {
+            continue;
+        };
+
+        if scope == 0x10 {
+            continue;
+        }
+
+        ips.push((ip, scope));
+    }
+
+    ips.sort_by_key(|&(_, scope)| match scope {
+        0x00 => 0,
+        0x40 => 1,
+        0x20 => 2,
+        _ => 3,
+    });
+
+    ips.into_iter().map(|(ip, _)| ip).collect()
+}
+
+fn get_local_ipv6_addresses() -> Vec<std::net::Ipv6Addr> {
+    if let Ok(content) = std::fs::read_to_string("/proc/net/if_inet6") {
+        parse_local_ipv6_addresses(&content)
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +455,68 @@ Local:
 ";
         let ips = parse_local_ips_from_fib_trie(trie_content);
         assert_eq!(ips, vec![std::net::Ipv4Addr::new(10, 10, 1, 139)]);
+    }
+
+    #[test]
+    fn test_parse_hex_ipv6() {
+        assert_eq!(
+            parse_hex_ipv6("00000000000000000000000000000001"),
+            Some(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1))
+        );
+        assert_eq!(
+            parse_hex_ipv6("fe800000000000000250b6fffe030807"),
+            Some(std::net::Ipv6Addr::new(
+                0xfe80, 0, 0, 0, 0x0250, 0xb6ff, 0xfe03, 0x0807
+            ))
+        );
+        assert_eq!(parse_hex_ipv6("invalid"), None);
+        assert_eq!(parse_hex_ipv6("0000000000000000000000000000000g"), None);
+    }
+
+    #[test]
+    fn test_parse_default_ipv6_gateway() {
+        let route_content = "\
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000250b6fffe030807 00000400 00000001 00000000 00000807 enp12s0
+20010db8000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00000807 enp12s0
+";
+        assert_eq!(
+            parse_default_ipv6_gateway(route_content),
+            Some(std::net::Ipv6Addr::new(
+                0xfe80, 0, 0, 0, 0x0250, 0xb6ff, 0xfe03, 0x0807
+            ))
+        );
+
+        let no_route = "\
+20010db8000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00000807 enp12s0
+";
+        assert_eq!(parse_default_ipv6_gateway(no_route), None);
+    }
+
+    #[test]
+    fn test_parse_local_ipv6_addresses() {
+        let if_inet6_content = "\
+00000000000000000000000000000001 01 80 10 80 lo
+fe800000000000000250b6fffe030807 02 40 20 80 eth0
+20010db8000000000000000000000001 02 40 00 80 eth0
+";
+        let ips = parse_local_ipv6_addresses(if_inet6_content);
+        assert_eq!(
+            ips,
+            vec![
+                std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1),
+                std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0x0250, 0xb6ff, 0xfe03, 0x0807),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_truncate_ip() {
+        assert_eq!(truncate_ip("192.168.1.1"), "192.168.1.1");
+        assert_eq!(truncate_ip("2001:db8::1234:5678"), "2001:db8:..5678");
+        assert_eq!(
+            truncate_ip("2001:db8:3333:4444:5555:6666:7777:8888"),
+            "2001:db8:..8888"
+        );
     }
 
     const GIB: u64 = 1_073_741_824;

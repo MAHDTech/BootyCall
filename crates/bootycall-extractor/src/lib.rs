@@ -4,6 +4,7 @@ pub mod iso;
 
 use crate::error::ExtractorError;
 use bootycall_core::config::{Config, HostConfig};
+use bootycall_core::state::StateStore;
 use bootycall_log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -195,7 +196,10 @@ impl SyncSummary {
 /// created (a genuine setup failure); per-host extraction failures are
 /// collected into the returned [`SyncSummary`] rather than aborting the sweep.
 #[tracing::instrument(skip_all, fields(hosts = config.hosts.len()))]
-pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorError> {
+pub fn sync_all_hosts_cache(
+    config: &Config,
+    state_store: Option<&StateStore>,
+) -> Result<SyncSummary, ExtractorError> {
     let cache_dir = &config.server.cache_dir;
     if !cache_dir.exists() {
         fs::create_dir_all(cache_dir)?;
@@ -207,7 +211,7 @@ pub fn sync_all_hosts_cache(config: &Config) -> Result<SyncSummary, ExtractorErr
     }
     let mut summary = SyncSummary::default();
     for host in &config.hosts {
-        match sync_host_cache(host, cache_dir, max_artifact_bytes) {
+        match sync_host_cache(host, cache_dir, max_artifact_bytes, state_store) {
             Ok(()) => summary.succeeded += 1,
             Err(e) => {
                 error!(
@@ -273,6 +277,7 @@ pub fn sync_host_cache(
     host: &HostConfig,
     cache_dir: &Path,
     max_artifact_bytes: Option<u64>,
+    state_store: Option<&StateStore>,
 ) -> Result<(), ExtractorError> {
     let host_cache_dir = cache_dir.join(&host.mac);
     let metadata_path = host_cache_dir.join("metadata.json");
@@ -290,9 +295,17 @@ pub fn sync_host_cache(
     let file_meta = match fs::metadata(&host.image_path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(store) = state_store {
+                store.set_cache_ready(&host.mac, false);
+            }
             return Err(ExtractorError::ImageNotFound(host.image_path.clone()));
         }
-        Err(e) => return Err(ExtractorError::Io(e)),
+        Err(e) => {
+            if let Some(store) = state_store {
+                store.set_cache_ready(&host.mac, false);
+            }
+            return Err(ExtractorError::Io(e));
+        }
     };
     let current_mtime = file_meta
         .modified()?
@@ -342,7 +355,14 @@ pub fn sync_host_cache(
             mac = %host.mac,
             image = %host.image_path.display(),
         );
+        if let Some(store) = state_store {
+            store.set_cache_ready(&host.mac, true);
+        }
         return Ok(());
+    } else {
+        if let Some(store) = state_store {
+            store.set_cache_ready(&host.mac, false);
+        }
     }
 
     info!(
@@ -462,6 +482,9 @@ pub fn sync_host_cache(
                 image = %host.image_path.display(),
                 duration_ms = extract_started.elapsed().as_millis() as u64,
             );
+            if let Some(store) = state_store {
+                store.set_cache_ready(&host.mac, true);
+            }
             Ok(())
         }
         Err(e) => {
@@ -472,6 +495,9 @@ pub fn sync_host_cache(
                 image = %host.image_path.display(),
                 error = %e,
             );
+            if let Some(store) = state_store {
+                store.set_cache_ready(&host.mac, false);
+            }
             Err(e)
         }
     }
@@ -739,7 +765,7 @@ mod tests {
         };
 
         // First sync to populate cache initially
-        super::sync_host_cache(&host, &cache_dir, None).unwrap();
+        super::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
         let host_cache_dir = cache_dir.join(&host.mac);
         let cached_kernel = host_cache_dir.join("kernel");
@@ -786,7 +812,7 @@ mod tests {
             if metadata_path.exists() {
                 let _ = fs::remove_file(&metadata_path);
             }
-            super::sync_host_cache(&host, &cache_dir, None).unwrap();
+            super::sync_host_cache(&host, &cache_dir, None, None).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
@@ -817,7 +843,7 @@ mod tests {
         };
 
         // First sync to populate cache initially
-        super::sync_host_cache(&host, &cache_dir, None).unwrap();
+        super::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
         let host_cache_dir = cache_dir.join(&host.mac);
         let host_cache_dir_old = cache_dir.join(format!("{}.old", host.mac));
@@ -850,7 +876,7 @@ mod tests {
             let _ = fs::remove_dir_all(&host_cache_dir_tmp_clone);
         });
 
-        let res = super::sync_host_cache(&host, &cache_dir, None);
+        let res = super::sync_host_cache(&host, &cache_dir, None, None);
         active.store(false, std::sync::atomic::Ordering::Relaxed);
         deleter_thread.join().unwrap();
 
@@ -930,7 +956,7 @@ mod tests {
             cmdline: None,
         };
 
-        let res = super::sync_host_cache(&host, &cache_dir, None);
+        let res = super::sync_host_cache(&host, &cache_dir, None, None);
         assert!(res.is_err());
 
         // The staging directory should be removed on failure

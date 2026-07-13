@@ -757,7 +757,7 @@ async fn test_health_endpoint_reflects_cache_readiness() {
     // Degraded until every configured host has non-empty cached artifacts,
     // then healthy (issue 032).
     let port: u16 = 26105;
-    let (config, _state_store) = spawn_test_server(port).await;
+    let (config, state_store) = spawn_test_server(port).await;
     let (cache_dir, host_mac) = {
         let g = config.read();
         (g.server.cache_dir.clone(), g.hosts[0].mac.clone())
@@ -782,6 +782,7 @@ async fn test_health_endpoint_reflects_cache_readiness() {
     fs::create_dir_all(&host_cache).unwrap();
     fs::write(host_cache.join("kernel"), b"KERNELBYTES").unwrap();
     fs::write(host_cache.join("initrd"), b"INITRDBYTES").unwrap();
+    state_store.set_cache_ready(&host_mac, true);
 
     let (status, body) = http_get(port, "/api/health").await;
     assert!(

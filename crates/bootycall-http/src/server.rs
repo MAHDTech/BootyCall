@@ -906,12 +906,9 @@ async fn api_health_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let (cache_dir, hosts) = {
+    let hosts = {
         let config_guard = state.config.read();
-        (
-            config_guard.server.cache_dir.clone(),
-            config_guard.hosts.clone(),
-        )
+        config_guard.hosts.clone()
     };
     let hosts_total = hosts.len();
 
@@ -919,34 +916,11 @@ async fn api_health_handler(
     // unauthenticated caller still gets status + counts, just not the names.
     let names_authorized = check_api_token(&state, &headers).is_ok();
 
-    // `host_cache_ready` stats two files per configured host with blocking
-    // `std::fs`, so the whole fleet sweep runs on the blocking pool — a load
-    // balancer polling /api/health against a large fleet must not stall
-    // runtime workers (issue 070; see the convention on `safe_join_blocking`).
-    let not_ready: Vec<String> = match tokio::task::spawn_blocking(move || {
-        hosts
-            .into_iter()
-            .filter(|h| !bootycall_extractor::host_cache_ready(&h.mac, &cache_dir))
-            .map(|h| h.name)
-            .collect()
-    })
-    .await
-    {
-        Ok(names) => names,
-        Err(e) => {
-            // The sweep task panicked or was cancelled — report a server
-            // error rather than claiming the box is healthy or degraded.
-            error!("health readiness sweep task failed: {e:?}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "hosts_total": hosts_total,
-                    "hosts_not_ready_count": serde_json::Value::Null,
-                })),
-            );
-        }
-    };
+    let not_ready: Vec<String> = hosts
+        .into_iter()
+        .filter(|h| !state.state_store.get_cache_ready(&h.mac))
+        .map(|h| h.name)
+        .collect();
 
     let healthy = not_ready.is_empty();
     let status_code = if healthy {

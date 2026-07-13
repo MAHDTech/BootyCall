@@ -143,6 +143,16 @@ async fn safe_join_blocking(root: PathBuf, requested: String) -> Option<PathBuf>
     }
 }
 
+async fn safe_open_blocking(root: PathBuf, requested: String) -> std::io::Result<std::fs::File> {
+    match tokio::task::spawn_blocking(move || bootycall_core::safe_open(&root, &requested)).await {
+        Ok(res) => res,
+        Err(e) => {
+            error!("safe_open task panicked or was cancelled: {e:?}");
+            Err(std::io::Error::other("safe_open task failed"))
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RangeSpec {
     Satisfiable { start: u64, end: u64 },
@@ -192,20 +202,27 @@ async fn serve_file_from_dir(
 ) -> Result<Response, StatusCode> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    let full_path = safe_join_blocking(dir, relative_path.clone())
-        .await
-        .ok_or(StatusCode::FORBIDDEN)?;
+    let std_file = match safe_open_blocking(dir, relative_path.clone()).await {
+        Ok(f) => f,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                return Err(StatusCode::FORBIDDEN);
+            } else if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(StatusCode::NOT_FOUND);
+            } else {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    };
 
-    let meta = match tokio::fs::metadata(&full_path).await {
+    let meta = match std_file.metadata() {
         Ok(meta) if meta.is_file() => meta,
-        _ => return Err(StatusCode::NOT_FOUND),
+        Ok(_) => return Err(StatusCode::NOT_FOUND),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
     let file_size = meta.len();
-    let mut file = match tokio::fs::File::open(&full_path).await {
-        Ok(f) => f,
-        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-    };
+    let mut file = tokio::fs::File::from_std(std_file);
 
     let content_type = content_type_for(&relative_path);
 

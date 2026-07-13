@@ -120,6 +120,7 @@ fn parse_rrq(packet: &[u8]) -> Option<RrqRequest> {
         filename = %request.filename,
     )
 )]
+#[allow(clippy::too_many_arguments)]
 async fn handle_tftp_transfer(
     socket: UdpSocket,
     client_addr: SocketAddr,
@@ -127,6 +128,8 @@ async fn handle_tftp_transfer(
     request: RrqRequest,
     state_store: StateStore,
     mac_addr: Option<String>,
+    tftp_root: PathBuf,
+    requested_filename: String,
 ) -> Result<(), TftpError> {
     let transfer_start = std::time::Instant::now();
 
@@ -147,9 +150,15 @@ async fn handle_tftp_transfer(
     // 1. Open file. Distinguish a genuine 404 from a permissions/FD-exhaustion
     // problem: reporting everything as "File not found" hides the real cause
     // both on the wire and in observability.
-    let mut file = match tokio::fs::File::open(&file_path).await {
-        Ok(f) => f,
-        Err(e) => {
+    let std_file = match tokio::task::spawn_blocking({
+        let root = tftp_root.clone();
+        let req = requested_filename.clone();
+        move || bootycall_core::safe_open(&root, &req)
+    })
+    .await
+    {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => {
             let (code, msg): (u16, &str) = match e.kind() {
                 std::io::ErrorKind::NotFound => (1, "File not found"),
                 std::io::ErrorKind::PermissionDenied => (2, "Access violation"),
@@ -165,7 +174,18 @@ async fn handle_tftp_transfer(
             let _ = socket.send(&err_pkt).await;
             return Err(e.into());
         }
+        Err(join_err) => {
+            error!(
+                "safe_open task panicked or was cancelled in TFTP transfer: {:?}",
+                join_err
+            );
+            let err_pkt = make_error_packet(0, "Internal server error");
+            let _ = socket.send(&err_pkt).await;
+            return Err(std::io::Error::other("safe_open task failed").into());
+        }
     };
+
+    let mut file = tokio::fs::File::from_std(std_file);
 
     // 2. Get file size
     let metadata = file.metadata().await?;
@@ -937,6 +957,8 @@ pub async fn run_tftp_server_with_limit(
         // The config read guard above is dropped first: awaiting while
         // holding it would block config reloads for the duration of the
         // filesystem work (parking_lot guards must never live across .await).
+        let tftp_root_for_open = tftp_root.clone();
+        let final_filename_for_open = final_filename.clone();
         let resolved_file_path = match tokio::task::spawn_blocking(move || {
             bootycall_core::safe_join(&tftp_root, &final_filename)
         })
@@ -1044,6 +1066,8 @@ pub async fn run_tftp_server_with_limit(
         }
 
         let transfer_state_store = state_store.clone();
+        let tftp_root_for_spawn = tftp_root_for_open.clone();
+        let final_filename_for_spawn = final_filename_for_open.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_tftp_transfer(
                 transfer_socket,
@@ -1052,6 +1076,8 @@ pub async fn run_tftp_server_with_limit(
                 request,
                 transfer_state_store,
                 mac_addr,
+                tftp_root_for_spawn,
+                final_filename_for_spawn,
             )
             .await
             {

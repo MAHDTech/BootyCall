@@ -103,6 +103,86 @@ pub fn safe_join(root: &Path, requested: &str) -> Option<PathBuf> {
     Some(canonical_ancestor.join(missing_tail))
 }
 
+/// Open a file at `requested` relative to `root` with hardened checks to prevent directory traversal and symlink escape.
+///
+/// On Unix, this resolves the path first using `safe_join`, and then traverses and opens each component of the relative path
+/// using `openat` with `O_NOFOLLOW` to ensure that no intermediate directories or the target file itself are symlinks.
+/// On non-Unix platforms, this delegates to `safe_join` followed by standard `std::fs::File::open`.
+pub fn safe_open(root: &Path, requested: &str) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{OFlag, open, openat};
+        use nix::sys::stat::Mode;
+
+        // 1. Resolve path using safe_join
+        let resolved = safe_join(root, requested).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Access violation (path resolution failed)",
+            )
+        })?;
+
+        // 2. Canonicalise the root directory to open it securely.
+        let canonical_root = root.canonicalize()?;
+
+        // 3. Strip prefix to get the relative path to traverse
+        let rel_path = resolved.strip_prefix(&canonical_root).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Access violation (path not under root)",
+            )
+        })?;
+
+        // 4. Open the canonical root first to get a directory descriptor
+        let mut current_fd = open(
+            &canonical_root,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+
+        // 5. Traverse each component of the relative path
+        let components: Vec<_> = rel_path.components().collect();
+
+        for (i, component) in components.iter().enumerate() {
+            let name = match component {
+                std::path::Component::Normal(s) => s.to_string_lossy(),
+                std::path::Component::CurDir => continue,
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Access violation (invalid component in path)",
+                    ));
+                }
+            };
+
+            let is_last = i == components.len() - 1;
+
+            let flags = if is_last {
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+            } else {
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC
+            };
+
+            current_fd = openat(&current_fd, name.as_ref(), flags, Mode::empty())
+                .map_err(std::io::Error::from)?;
+        }
+
+        Ok(std::fs::File::from(current_fd))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let resolved = safe_join(root, requested).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Access violation (path resolution failed)",
+            )
+        })?;
+        std::fs::File::open(resolved)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +314,47 @@ mod tests {
         symlink(outside.path(), dir.path().join("link")).unwrap();
 
         assert!(safe_join(dir.path(), "link/newfile").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_open_rejects_symlink_that_escapes_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = root();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret"), b"leaked").unwrap();
+
+        // Plant a symlink under the root that points outside the root.
+        symlink(outside.path().join("secret"), dir.path().join("escape")).unwrap();
+
+        assert!(safe_open(dir.path(), "escape").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_open_rejects_parent_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = root();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret"), b"leaked").unwrap();
+
+        // Plant a symlink to outside directory.
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+
+        assert!(safe_open(dir.path(), "link/secret").is_err());
+    }
+
+    #[test]
+    fn safe_open_accepts_normal_file() {
+        let dir = root();
+        fs::write(dir.path().join("test.txt"), b"hello").unwrap();
+        let mut file = safe_open(dir.path(), "test.txt").expect("should open");
+
+        use std::io::Read;
+        let mut content = String::new();
+        file.read_to_string(&mut content).unwrap();
+        assert_eq!(content, "hello");
     }
 }

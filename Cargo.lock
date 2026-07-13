@@ -278,6 +278,7 @@ dependencies = [
  "gpiocdev",
  "libc",
  "sysinfo",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

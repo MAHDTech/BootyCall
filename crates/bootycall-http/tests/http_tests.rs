@@ -1616,3 +1616,70 @@ async fn test_secure_default_host_header_no_reflection() {
         "Should use local bind fallback: {body}"
     );
 }
+
+#[tokio::test]
+async fn test_http_connection_header_read_timeout() {
+    let port: u16 = 26204;
+    let tmp = tempdir().unwrap();
+    let server_config = ServerConfig {
+        http_bind: format!("127.0.0.1:{port}"),
+        tftp_bind: "0.0.0.0:69".to_string(),
+        tftp_root: tmp.path().to_path_buf(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: tmp.path().join("cache"),
+        static_dir: tmp.path().join("static"),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        led_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
+    };
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    tokio::spawn(async move {
+        let _ = bootycall_http::run_http_server(
+            &format!("127.0.0.1:{port}"),
+            server_config_clone,
+            server_store,
+            shutdown_clone,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Connect and send headers slowly (Slowloris test)
+    let mut client = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    client.write_all(b"GET /start HTTP/1.1\r\n").await.unwrap();
+    // Wait for 11 seconds (timeout is 10s)
+    tokio::time::sleep(Duration::from_secs(11)).await;
+
+    // The connection should be closed by the server. Trying to read or write should fail/return 0 bytes read.
+    let mut buf = [0u8; 128];
+    let read_res = client.read(&mut buf).await;
+    assert!(read_res.is_ok());
+    assert_eq!(
+        read_res.unwrap(),
+        0,
+        "Connection should be closed by server timeout"
+    );
+
+    // Clean up
+    shutdown.cancel();
+}

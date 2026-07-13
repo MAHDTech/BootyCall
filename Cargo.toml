@@ -39,6 +39,10 @@ notify = "8.2.0"
 # `#[tracing::instrument]` proc-macro used across the server crates.
 tracing = { version = "0.1.44", features = ["attributes"] }
 axum = "0.8.9"
+hyper = { version = "1.10.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["server", "tokio", "service"] }
+tower-http = { version = "0.6.2", features = ["timeout"] }
+tower-service = "0.3.3"
 clap = { version = "4.6.1", features = ["derive"] }
 bytes = "1.12.0"
 dhcproto = "0.15.0"

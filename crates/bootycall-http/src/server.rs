@@ -1095,14 +1095,56 @@ pub async fn run_http_server(
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     info!("HTTP Server listening on http://{}", bind_addr);
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown.cancelled().await;
-    })
-    .await?;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("HTTP server shutting down gracefully");
+                break;
+            }
+            res = listener.accept() => {
+                let (stream, client_addr) = match res {
+                    Ok(val) => val,
+                    Err(e) => {
+                        error!("accept error: {:?}", e);
+                        continue;
+                    }
+                };
+
+                let app = app.clone();
+                let shutdown_tx_clone = shutdown_tx.clone();
+
+                tokio::spawn(async move {
+                    use hyper_util::rt::{TokioIo, TokioTimer};
+                    use hyper::server::conn::http1;
+
+                    let io = TokioIo::new(stream);
+                    let mut conn_builder = http1::Builder::new();
+                    conn_builder
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(std::time::Duration::from_secs(10));
+
+                    let hyper_service = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        let mut tower_service = app.clone();
+                        req.extensions_mut().insert(ConnectInfo(client_addr));
+                        async move {
+                            use tower_service::Service;
+                            tower_service.call(req).await
+                        }
+                    });
+
+                    if let Err(err) = conn_builder.serve_connection(io, hyper_service).await {
+                        tracing::debug!("failed to serve connection: {err}");
+                    }
+                    drop(shutdown_tx_clone);
+                });
+            }
+        }
+    }
+
+    drop(shutdown_tx);
+    let _ = shutdown_rx.recv().await;
 
     Ok(())
 }

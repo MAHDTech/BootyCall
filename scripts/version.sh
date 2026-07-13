@@ -34,6 +34,19 @@ log_error() {
 	echo -e "${COLOR_ERROR}[ERROR] $*${COLOR_RESET}" >&2
 }
 
+# Global variable to track the temporary file path for cleanup trap
+TEMP_FILE=""
+
+# Cleanup handler for exit, interrupt, and termination signals
+cleanup() {
+	if [ -n "${TEMP_FILE:-}" ] && [ -f "$TEMP_FILE" ]; then
+		log_debug "Cleaning up temporary file: $TEMP_FILE"
+		rm -f "$TEMP_FILE"
+	fi
+}
+
+trap cleanup EXIT INT TERM
+
 # Print script usage instructions
 show_usage() {
 	cat <<EOF
@@ -345,10 +358,10 @@ main() {
 	log_debug "Writing new version to $cargo_toml_path"
 
 	# Update Cargo.toml
-	local tmp_file
-	tmp_file="${cargo_toml_path}.tmp"
-	toml set "$cargo_toml_path" workspace.package.version "${next_version}" >"$tmp_file"
-	mv "$tmp_file" "$cargo_toml_path"
+	TEMP_FILE=$(mktemp "${cargo_toml_path}.tmp.XXXXXX")
+	toml set "$cargo_toml_path" workspace.package.version "${next_version}" >"$TEMP_FILE"
+	mv "$TEMP_FILE" "$cargo_toml_path"
+	TEMP_FILE=""
 
 	# Update Cargo.lock if cargo is installed
 	if command -v cargo &>/dev/null; then

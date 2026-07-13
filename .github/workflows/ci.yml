@@ -212,18 +212,10 @@ jobs:
           cachix-auth-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skip-push: "true"
 
-      - id: run_devenv_tests
-        name: Run Devenv Tests
-        shell: bash -c "nix develop --impure -c bash -- {0}"
-        run: devenv test
-
-      # `devenv test` installs the git hooks but does not run them against the
-      # tree, and pre-commit-style hooks only lint staged files — so on a fresh
-      # CI checkout with nothing staged the lint hooks (actionlint, cspell,
-      # markdownlint, lychee, nixfmt, deadnix, prettier, shellcheck, yamllint,
-      # etc.) would check zero files. Run the full battery against ALL files,
-      # independent of git staging, so a lint regression fails CI. `prek` is the
-      # hook runner provisioned by the dev shell.
+      # Pre-commit-style hooks normally only run against staged files. On a clean
+      # CI checkout, nothing is staged, so they would check zero files. We run
+      # the full battery against all files using `prek` (the hook runner
+      # provisioned by the dev shell) so a lint regression fails CI.
       - id: run_hooks_all_files
         name: Run Pre-commit Hooks (all files)
         shell: bash -c "nix develop --impure -c bash -- {0}"

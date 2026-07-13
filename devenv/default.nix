@@ -271,8 +271,8 @@ in
       echo "Skipping workspace tests in CI (handled by cargo-test job)"
     else
       echo "Running workspace tests..."
-      # Actually run the suite so `devenv test` (locally and the ci-devenv-test
-      # job) is meaningful. --all-features matches ci-cargo-test and the clippy
+      # Actually run the suite so `devenv test` (locally, as it is skipped in CI)
+      # is meaningful. --all-features matches ci-cargo-test and the clippy
       # hook so feature-gated tests run too.
       cargo test --workspace --all-features
     fi

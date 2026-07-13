@@ -170,13 +170,6 @@ where
     }
 }
 
-/// Whether enough time has elapsed since the last optional-hardware acquisition
-/// attempt to try again. Pulled out as a pure fn so the retry cadence is
-/// unit-testable without real hardware.
-fn optional_hw_retry_due(since_last_attempt: Duration) -> bool {
-    since_last_attempt >= OPTIONAL_HW_RETRY_INTERVAL
-}
-
 /// Whether any OLED/LED hardware is present. When neither the framebuffer nor
 /// the GPIO chip node exists (a dev laptop, or a CloudKey with nothing wired),
 /// the render loop runs headless instead of spinning uselessly at 1 Hz.
@@ -210,20 +203,23 @@ fn request_power_enable_line() -> Option<gpiocdev::Request> {
 
 /// An optional GPIO line held for the process lifetime, with a shared
 /// retry-and-log-once discipline. While the line is unavailable it is
-/// re-requested every [`OPTIONAL_HW_RETRY_INTERVAL`] and logged once on
-/// recovery; a still-failing request stays silent (no per-tick spam). The
-/// guard is only re-requested while `None`, so a held line is never dropped
-/// (which would revert its output). Shared by the detect and power-enable
+/// re-requested using exponential backoff (starting at 5 seconds and doubling up to
+/// 60 seconds max) and logged once on recovery; a still-failing request stays silent
+/// (no per-tick spam). The guard is only re-requested while `None`, so a held line is
+/// never dropped (which would revert its output). Shared by the detect and power-enable
 /// lines so both behave identically.
-struct OptionalGpioLine {
-    request: Option<gpiocdev::Request>,
+struct OptionalGpioLineImpl<R = gpiocdev::Request> {
+    request: Option<R>,
     last_attempt: Instant,
-    acquire: fn() -> Option<gpiocdev::Request>,
+    current_backoff: Duration,
+    acquire: fn() -> Option<R>,
     label: &'static str,
 }
 
-impl OptionalGpioLine {
-    fn new(label: &'static str, acquire: fn() -> Option<gpiocdev::Request>, now: Instant) -> Self {
+type OptionalGpioLine = OptionalGpioLineImpl<gpiocdev::Request>;
+
+impl<R> OptionalGpioLineImpl<R> {
+    fn new(label: &'static str, acquire: fn() -> Option<R>, now: Instant) -> Self {
         let request = acquire();
         if request.is_none() {
             info!("{label} not available (optional); will retry periodically");
@@ -231,6 +227,7 @@ impl OptionalGpioLine {
         Self {
             request,
             last_attempt: now,
+            current_backoff: Duration::from_secs(5),
             acquire,
             label,
         }
@@ -239,16 +236,25 @@ impl OptionalGpioLine {
     /// Re-request the line if it is absent and the retry interval has elapsed.
     /// No-op while the line is held.
     fn poll(&mut self, now: Instant) {
-        if self.request.is_none() && optional_hw_retry_due(now.duration_since(self.last_attempt)) {
-            self.last_attempt = now;
-            self.request = (self.acquire)();
-            if self.request.is_some() {
-                info!("{} now available", self.label);
+        if self.request.is_none() {
+            let elapsed = now.saturating_duration_since(self.last_attempt);
+            if elapsed >= self.current_backoff {
+                self.last_attempt = now;
+                self.request = (self.acquire)();
+                if self.request.is_some() {
+                    info!("{} now available", self.label);
+                    self.current_backoff = Duration::from_secs(5);
+                } else {
+                    self.current_backoff = self
+                        .current_backoff
+                        .saturating_mul(2)
+                        .min(Duration::from_secs(60));
+                }
             }
         }
     }
 
-    fn get(&self) -> Option<&gpiocdev::Request> {
+    fn get(&self) -> Option<&R> {
         self.request.as_ref()
     }
 }
@@ -981,18 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn optional_hw_retry_waits_for_full_interval() {
-        assert!(!optional_hw_retry_due(Duration::from_secs(0)));
-        assert!(!optional_hw_retry_due(
-            OPTIONAL_HW_RETRY_INTERVAL - Duration::from_millis(1)
-        ));
-        assert!(optional_hw_retry_due(OPTIONAL_HW_RETRY_INTERVAL));
-        assert!(optional_hw_retry_due(
-            OPTIONAL_HW_RETRY_INTERVAL + Duration::from_secs(30)
-        ));
-    }
-
-    #[test]
     fn mode_brightness_dims_only_the_screensaver() {
         // Metrics uses the configured brightness unchanged.
         assert_eq!(mode_brightness(200, DisplayMode::Metrics), 200);
@@ -1223,5 +1217,106 @@ mod tests {
         assert_eq!(frame_count.load(Ordering::Relaxed), 3);
         assert_eq!(rotation.load(Ordering::Relaxed), 0);
         assert_eq!(brightness.load(Ordering::Relaxed), 128);
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+
+    static TEST_ACQUIRE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static TEST_ACQUIRE_SUCCESS: AtomicBool = AtomicBool::new(false);
+
+    fn test_acquire() -> Option<bool> {
+        TEST_ACQUIRE_COUNT.fetch_add(1, AtomicOrdering::SeqCst);
+        if TEST_ACQUIRE_SUCCESS.load(AtomicOrdering::SeqCst) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_optional_gpio_line_backoff() {
+        // --- Part 1: Check backoff doubling and reset behavior ---
+        TEST_ACQUIRE_COUNT.store(0, AtomicOrdering::SeqCst);
+        TEST_ACQUIRE_SUCCESS.store(false, AtomicOrdering::SeqCst);
+
+        let start = Instant::now();
+        // 1. Initial attempt fails
+        let mut line = OptionalGpioLineImpl::new("test_line", test_acquire, start);
+        assert_eq!(line.get(), None);
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(line.current_backoff, Duration::from_secs(5));
+
+        // 2. Poll too early (2 seconds later) - should not retry
+        line.poll(start + Duration::from_secs(2));
+        assert_eq!(line.get(), None);
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(line.current_backoff, Duration::from_secs(5));
+
+        // 3. Poll after backoff (5 seconds later) - retry fails, backoff doubles to 10s
+        let attempt2_time = start + Duration::from_secs(5);
+        line.poll(attempt2_time);
+        assert_eq!(line.get(), None);
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(line.current_backoff, Duration::from_secs(10));
+
+        // 4. Poll too early (7 seconds after last attempt) - should not retry
+        line.poll(attempt2_time + Duration::from_secs(7));
+        assert_eq!(line.get(), None);
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(line.current_backoff, Duration::from_secs(10));
+
+        // 5. Poll after backoff (10 seconds after last attempt) - retry fails, backoff doubles to 20s
+        let attempt3_time = attempt2_time + Duration::from_secs(10);
+        line.poll(attempt3_time);
+        assert_eq!(line.get(), None);
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 3);
+        assert_eq!(line.current_backoff, Duration::from_secs(20));
+
+        // 6. Set success to true and poll after backoff (20 seconds after last attempt)
+        // Retry succeeds, backoff resets to 5s, line is now Some
+        TEST_ACQUIRE_SUCCESS.store(true, AtomicOrdering::SeqCst);
+        let attempt4_time = attempt3_time + Duration::from_secs(20);
+        line.poll(attempt4_time);
+        assert_eq!(line.get(), Some(&true));
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 4);
+        assert_eq!(line.current_backoff, Duration::from_secs(5));
+
+        // 7. Subsequent poll should not trigger any retry since it is already acquired
+        line.poll(attempt4_time + Duration::from_secs(100));
+        assert_eq!(line.get(), Some(&true));
+        assert_eq!(TEST_ACQUIRE_COUNT.load(AtomicOrdering::SeqCst), 4);
+
+        // --- Part 2: Check backoff ceiling ---
+        TEST_ACQUIRE_COUNT.store(0, AtomicOrdering::SeqCst);
+        TEST_ACQUIRE_SUCCESS.store(false, AtomicOrdering::SeqCst);
+
+        let mut time = Instant::now();
+        let mut line2 = OptionalGpioLineImpl::new("test_line2", test_acquire, time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(5));
+
+        // 1. Fail: 5s -> 10s
+        time += Duration::from_secs(5);
+        line2.poll(time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(10));
+
+        // 2. Fail: 10s -> 20s
+        time += Duration::from_secs(10);
+        line2.poll(time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(20));
+
+        // 3. Fail: 20s -> 40s
+        time += Duration::from_secs(20);
+        line2.poll(time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(40));
+
+        // 4. Fail: 40s -> 60s
+        time += Duration::from_secs(40);
+        line2.poll(time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(60));
+
+        // 5. Fail: 60s -> 60s (capped)
+        time += Duration::from_secs(60);
+        line2.poll(time);
+        assert_eq!(line2.current_backoff, Duration::from_secs(60));
     }
 }

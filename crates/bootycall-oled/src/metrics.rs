@@ -217,12 +217,20 @@ impl SystemMetrics {
 fn parse_default_gateway(content: &str) -> Option<std::net::Ipv4Addr> {
     for line in content.lines().skip(1) {
         let mut parts = line.split_whitespace();
-        let _iface = parts.next()?;
-        let dest_hex = parts.next()?;
-        let gateway_hex = parts.next()?;
+        let Some(_iface) = parts.next() else {
+            continue;
+        };
+        let Some(dest_hex) = parts.next() else {
+            continue;
+        };
+        let Some(gateway_hex) = parts.next() else {
+            continue;
+        };
 
         if dest_hex == "00000000" {
-            let gateway_u32 = u32::from_str_radix(gateway_hex, 16).ok()?;
+            let Ok(gateway_u32) = u32::from_str_radix(gateway_hex, 16) else {
+                continue;
+            };
             if gateway_u32 != 0 {
                 return Some(std::net::Ipv4Addr::from(gateway_u32.to_ne_bytes()));
             }
@@ -274,6 +282,20 @@ mod tests {
 Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
 enp12s0\t00000000\tFE010A0A\t0003\t0\t0\t1024\t00000000\t0\t0\t0
 enp12s0\t00010A0A\t00000000\t0001\t0\t0\t1024\t00FFFFFF\t0\t0\t0
+";
+        let gateway = parse_default_gateway(route_content);
+        assert_eq!(gateway, Some(std::net::Ipv4Addr::new(10, 10, 1, 254)));
+    }
+
+    #[test]
+    fn test_parse_default_gateway_robustness() {
+        let route_content = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+
+enp12s0
+enp12s0\t00000000
+enp12s0\t00000000\tZZZZZZZZ\t0003\t0\t0\t1024\t00000000\t0\t0\t0
+enp12s0\t00000000\tFE010A0A\t0003\t0\t0\t1024\t00000000\t0\t0\t0
 ";
         let gateway = parse_default_gateway(route_content);
         assert_eq!(gateway, Some(std::net::Ipv4Addr::new(10, 10, 1, 254)));

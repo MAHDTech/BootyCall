@@ -42,6 +42,7 @@ pub struct HostState {
     pub last_seen_monotonic: Instant,
     pub client_ip: Option<String>,
     pub architecture: Option<String>,
+    pub cache_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +101,7 @@ impl Clock {
 pub struct StateStore {
     hosts: Arc<RwLock<HashMap<String, HostState>>>,
     logs: Arc<RwLock<VecDeque<LogEvent>>>,
+    pub cache_ready_hosts: Arc<RwLock<HashMap<String, bool>>>,
     clock: Clock,
 }
 
@@ -115,6 +117,7 @@ impl StateStore {
         Self {
             hosts: Arc::new(RwLock::new(HashMap::new())),
             logs: Arc::new(RwLock::new(VecDeque::new())),
+            cache_ready_hosts: Arc::new(RwLock::new(HashMap::new())),
             clock: Clock::real(),
         }
     }
@@ -130,6 +133,7 @@ impl StateStore {
             Self {
                 hosts: Arc::new(RwLock::new(HashMap::new())),
                 logs: Arc::new(RwLock::new(VecDeque::new())),
+                cache_ready_hosts: Arc::new(RwLock::new(HashMap::new())),
                 clock: Clock {
                     mock: Some(state.clone()),
                 },
@@ -175,6 +179,12 @@ impl StateStore {
                 hosts.remove(&oldest_mac);
             }
         }
+        let cache_ready = self
+            .cache_ready_hosts
+            .read()
+            .get(&normalized)
+            .copied()
+            .unwrap_or(false);
         let entry = hosts
             .entry(normalized.clone())
             .or_insert_with(|| HostState {
@@ -186,11 +196,13 @@ impl StateStore {
                 last_seen_monotonic: self.clock.now_instant(),
                 client_ip: None,
                 architecture: None,
+                cache_ready,
             });
 
         entry.status = status;
         entry.last_seen = self.clock.now_system();
         entry.last_seen_monotonic = self.clock.now_instant();
+        entry.cache_ready = cache_ready;
         if name.is_some() {
             entry.name = name;
         }
@@ -298,6 +310,25 @@ impl StateStore {
             }
         });
     }
+
+    /// Sets the cache readiness for a host.
+    pub fn set_cache_ready(&self, mac: &str, ready: bool) {
+        let normalized = crate::mac::normalize_mac(mac);
+        self.cache_ready_hosts
+            .write()
+            .insert(normalized.clone(), ready);
+        // Also update existing tracked HostState if it is present
+        if let Some(host) = self.hosts.write().get_mut(&normalized) {
+            host.cache_ready = ready;
+        }
+    }
+
+    /// Gets the cache readiness for a host.
+    pub fn get_cache_ready(&self, mac: &str) -> bool {
+        let normalized = crate::mac::normalize_mac(mac);
+        let cache_ready = self.cache_ready_hosts.read();
+        cache_ready.get(&normalized).copied().unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +362,14 @@ mod tests {
         assert_eq!(host.assigned_target, Some("target1".to_string()));
         assert_eq!(host.client_ip, Some("192.168.1.100".to_string()));
         assert_eq!(host.architecture, Some("x86_64".to_string()));
+        assert_eq!(host.cache_ready, false);
+
+        // Test cache_ready settings
+        assert_eq!(store.get_cache_ready("aa:bb:cc:11:22:33"), false);
+        store.set_cache_ready("aa:bb:cc:11:22:33", true);
+        assert_eq!(store.get_cache_ready("aa:bb:cc:11:22:33"), true);
+        let host_updated = store.get_host("aa:bb:cc:11:22:33").unwrap();
+        assert_eq!(host_updated.cache_ready, true);
 
         // Log events
         store

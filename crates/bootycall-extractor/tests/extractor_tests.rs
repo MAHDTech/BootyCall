@@ -118,7 +118,7 @@ fn test_gpt_fat_extraction_and_caching() {
     };
 
     // First sync: extracts because cache is missing
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
     let host_cache_dir = cache_dir.join(&host.mac);
     let cached_kernel = host_cache_dir.join("kernel");
@@ -140,7 +140,7 @@ fn test_gpt_fat_extraction_and_caching() {
 
     // Second sync: should skip extraction (cached)
     // We can check if it returns Ok
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
     // Check that files are still there
     assert_eq!(
@@ -166,7 +166,7 @@ fn test_sync_host_cache_missing_image() {
         cmdline: None,
     };
 
-    let result = bootycall_extractor::sync_host_cache(&host, &cache_dir, None);
+    let result = bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None);
     assert!(result.is_err(), "Expected an error for a missing image");
 
     let err = result.unwrap_err();
@@ -281,7 +281,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
     };
 
     // First sync: default (auto-detect) — should pick up "vmlinuz"/"initrd.img".
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
     let host_cache_dir = cache_dir.join(&host.mac);
     let cached_kernel = host_cache_dir.join("kernel");
@@ -300,7 +300,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
         ..host.clone()
     };
 
-    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None, None).unwrap();
 
     assert_eq!(
         fs::read_to_string(&cached_kernel).unwrap(),
@@ -319,7 +319,7 @@ fn test_cache_invalidated_on_kernel_path_change() {
     // override and matches on the next run.
     let before = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host_with_override, &cache_dir, None, None).unwrap();
     let after = fs::metadata(&cached_kernel).unwrap().modified().unwrap();
     assert_eq!(before, after, "second override sync must not re-extract");
 }
@@ -347,7 +347,7 @@ fn test_stale_tmp_artifacts_swept_on_cache_hit() {
         cmdline: None,
     };
 
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None).unwrap();
 
     let host_cache_dir = cache_dir.join(&host.mac);
     let kernel_tmp = host_cache_dir.join("kernel.tmp");
@@ -360,7 +360,7 @@ fn test_stale_tmp_artifacts_swept_on_cache_hit() {
     // Plant crash debris, then re-sync (cache hit) — it must be swept.
     fs::write(&kernel_tmp, b"crash leftover").unwrap();
     fs::write(&initrd_tmp, b"crash leftover").unwrap();
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, None, None).unwrap();
     assert!(!kernel_tmp.exists(), "stale kernel.tmp not swept");
     assert!(!initrd_tmp.exists(), "stale initrd.tmp not swept");
 
@@ -430,7 +430,7 @@ fn test_sync_all_hosts_cache_partial_failure() {
         hosts: vec![good, missing],
     };
 
-    let summary = bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+    let summary = bootycall_extractor::sync_all_hosts_cache(&config, None).unwrap();
     assert_eq!(summary.succeeded, 1, "the good host should extract");
     assert_eq!(summary.failed.len(), 1, "the missing host should fail");
     assert_eq!(summary.failed[0].0, "missing-host");
@@ -459,7 +459,7 @@ fn test_sync_all_hosts_cache_all_failed() {
         server: server_config(&cache_dir),
         hosts: vec![host],
     };
-    let summary = bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+    let summary = bootycall_extractor::sync_all_hosts_cache(&config, None).unwrap();
     assert_eq!(summary.succeeded, 0);
     assert!(summary.all_failed());
     assert!(!summary.partial_failure());
@@ -485,7 +485,7 @@ fn test_sync_host_cache_size_ceiling() {
         cmdline: None,
     };
 
-    let err = bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(5)).unwrap_err();
+    let err = bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(5), None).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("max_artifact_bytes"),
@@ -516,7 +516,7 @@ fn test_sync_host_cache_size_ceiling() {
     );
 
     // A generous ceiling extracts the same host fine.
-    bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(1024)).unwrap();
+    bootycall_extractor::sync_host_cache(&host, &cache_dir, Some(1024), None).unwrap();
     assert!(host_cache_dir.join("kernel").exists());
 }
 
@@ -694,7 +694,7 @@ fn test_fat_recursion_depth_cap() {
         initrd_path: None,
         cmdline: None,
     };
-    let err = bootycall_extractor::sync_host_cache(&deep_host, &cache_dir, None).unwrap_err();
+    let err = bootycall_extractor::sync_host_cache(&deep_host, &cache_dir, None, None).unwrap_err();
     assert!(
         matches!(
             err,
@@ -716,7 +716,7 @@ fn test_fat_recursion_depth_cap() {
         initrd_path: None,
         cmdline: None,
     };
-    bootycall_extractor::sync_host_cache(&shallow_host, &cache_dir, None).unwrap();
+    bootycall_extractor::sync_host_cache(&shallow_host, &cache_dir, None, None).unwrap();
     assert_eq!(
         fs::read_to_string(cache_dir.join(&shallow_host.mac).join("kernel")).unwrap(),
         "deep_kernel"
@@ -957,7 +957,7 @@ fn test_sync_all_hosts_cache_unbounded_warning() {
     };
 
     tracing::subscriber::with_default(subscriber, || {
-        bootycall_extractor::sync_all_hosts_cache(&config).unwrap();
+        bootycall_extractor::sync_all_hosts_cache(&config, None).unwrap();
     });
 
     let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();

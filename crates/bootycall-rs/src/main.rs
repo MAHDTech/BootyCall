@@ -148,14 +148,19 @@ async fn main() -> Result<(), anyhow::Error> {
         }));
     }
 
+    // 5. Setup shared state
+    let state_store = StateStore::new();
+    let shared_config = Arc::new(RwLock::new(config.clone()));
+
     // 4. Initialise extractor cache sync. Extraction can take minutes on
     //    large ISOs and is fully synchronous, so run it on a blocking pool
     //    thread — otherwise it starves the reactor and the boot-blink LED
     //    freezes during startup.
     info!("Performing initial cache synchronisation...");
     let config_for_sync = config.clone();
+    let state_store_for_sync = state_store.clone();
     let sync_result = tokio::task::spawn_blocking(move || {
-        bootycall_extractor::sync_all_hosts_cache(&config_for_sync)
+        bootycall_extractor::sync_all_hosts_cache(&config_for_sync, Some(&state_store_for_sync))
     })
     .await;
     match sync_result {
@@ -163,10 +168,6 @@ async fn main() -> Result<(), anyhow::Error> {
         Ok(Err(e)) => error!("Initial cache sync failed to start (cache dir): {:?}", e),
         Err(join_err) => error!("Initial cache sync task join error: {:?}", join_err),
     }
-
-    // 5. Setup shared state
-    let shared_config = Arc::new(RwLock::new(config.clone()));
-    let state_store = StateStore::new();
 
     let shutdown_token = CancellationToken::new();
 
@@ -194,6 +195,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let shutdown_token_clone = shutdown_token.clone();
     let sync_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let state_store_for_extractor = state_store.clone();
     let extractor_handle = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -211,9 +213,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     let sync_lock_clone = sync_lock.clone();
                     let _permit = sync_lock_clone.lock_owned().await;
                     info!("Configuration file reload: starting background cache sync...");
+                    let state_store_for_reload = state_store_for_extractor.clone();
                     let handle = tokio::task::spawn_blocking(move || {
                         let _permit = _permit;
-                        bootycall_extractor::sync_all_hosts_cache(&new_config)
+                        bootycall_extractor::sync_all_hosts_cache(&new_config, Some(&state_store_for_reload))
                     });
                     let sync_result = handle.await;
                     match sync_result {

@@ -143,7 +143,7 @@ jobs:
         # restore the store the CI matrix already populated for this arch.
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv.lock', 'devenv/default.nix', 'flake.nix', 'flake.lock') }}
+          primary-key: ${{ runner.os }}-${{ runner.arch }}-nix-${{ hashFiles('devenv/default.nix', 'flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: ${{ runner.os }}-${{ runner.arch }}-nix-
           gc-max-store-size-linux: 5G
           purge: true

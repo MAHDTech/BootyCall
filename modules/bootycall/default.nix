@@ -7,8 +7,8 @@ self:
 }:
 let
   cfg = config.services.bootycall;
-  bootycallPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-  assetsPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
+  bootycallPkg = cfg.package;
+  assetsPkg = cfg.assetsPackage;
 
   # Parse the port out of a "host:port" bind address, returning null when the
   # address has no ":port" (e.g. a bare IP). Returning null rather than calling
@@ -176,6 +176,20 @@ in
   options.services.bootycall = {
     enable = lib.mkEnableOption "BootyCall unified network boot service";
 
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      defaultText = lib.literalExpression "self.packages.\${pkgs.stdenv.hostPlatform.system}.default";
+      description = "The bootycall-rs binary package.";
+    };
+
+    assetsPackage = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
+      defaultText = lib.literalExpression "self.packages.\${pkgs.stdenv.hostPlatform.system}.assets";
+      description = "The package containing pre-compiled iPXE binaries and static assets.";
+    };
+
     dataDir = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/bootycall";
@@ -253,6 +267,12 @@ in
     };
 
     server = {
+      allowCustomHttpPort = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Bypass the HTTP port compatibility check for pre-compiled iPXE binaries.";
+      };
+
       httpBind = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1:8080";
@@ -444,6 +464,25 @@ in
         '';
       }) portBinds)
       ++ [
+        # Assert HTTP port compatibility for pre-compiled iPXE binaries.
+        {
+          assertion =
+            let
+              port = bindPort cfg.server.httpBind;
+              isCompatiblePort = port != null && (port == 80 || port == 8080);
+              hasCustomAssets = cfg.assetsPackage != self.packages.${pkgs.stdenv.hostPlatform.system}.assets;
+            in
+            isCompatiblePort || cfg.server.allowCustomHttpPort || hasCustomAssets;
+          message = ''
+            services.bootycall.server.httpBind: HTTP port is set to ${
+              if bindPort cfg.server.httpBind != null then toString (bindPort cfg.server.httpBind) else "invalid"
+            } but must be 80 or 8080.
+            Pre-compiled iPXE binaries (ipxe-amd64 and ipxe-arm64) embed a default HTTP port of 8080.
+            If you want to use a custom port, either:
+            - Set services.bootycall.server.allowCustomHttpPort = true (e.g., if behind a reverse proxy that listens externally on 80/8080).
+            - Override services.bootycall.assetsPackage with a custom iPXE package built with your custom port.
+          '';
+        }
         # StateDirectory (derived from dataDir above) is what creates the data
         # directory with ownership the DynamicUser can write to, and it only
         # manages paths below /var/lib. Reject anything else at eval time —

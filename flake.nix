@@ -46,7 +46,51 @@
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
         in
-        pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        {
+          portValidationTest =
+            let
+              evalWithHttpBind =
+                httpBind: extraConfig:
+                import (nixpkgs + "/nixos/lib/eval-config.nix") {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    (_: {
+                      services.bootycall = {
+                        enable = true;
+                        server.httpBind = httpBind;
+                      }
+                      // extraConfig;
+                    })
+                  ];
+                };
+
+              hasPortFailure =
+                config:
+                let
+                  failed = builtins.filter (
+                    a: !a.assertion && pkgs.lib.hasInfix "httpBind" a.message
+                  ) config.config.assertions;
+                in
+                builtins.length failed > 0;
+
+              test8080 = !(hasPortFailure (evalWithHttpBind "127.0.0.1:8080" { }));
+              test80 = !(hasPortFailure (evalWithHttpBind "127.0.0.1:80" { }));
+              test9090 = hasPortFailure (evalWithHttpBind "127.0.0.1:9090" { });
+              test9090Allowed =
+                !(hasPortFailure (evalWithHttpBind "127.0.0.1:9090" { server.allowCustomHttpPort = true; }));
+              dummyAssets = pkgs.runCommand "dummy-assets" { } "mkdir $out";
+              test9090CustomAssets =
+                !(hasPortFailure (evalWithHttpBind "127.0.0.1:9090" { assetsPackage = dummyAssets; }));
+
+              allTestsPassed = test8080 && test80 && test9090 && test9090Allowed && test9090CustomAssets;
+            in
+            if allTestsPassed then
+              pkgs.runCommand "bootycall-port-validation-test" { } "touch $out"
+            else
+              throw "bootycall portValidationTest failed: test8080=${builtins.toString test8080} test80=${builtins.toString test80} test9090=${builtins.toString test9090} test9090Allowed=${builtins.toString test9090Allowed} test9090CustomAssets=${builtins.toString test9090CustomAssets}";
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           vmTest = pkgs.testers.runNixOSTest {
             name = "bootycall-init-test";
             nodes.server = {

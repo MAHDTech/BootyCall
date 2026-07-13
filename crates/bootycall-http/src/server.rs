@@ -761,9 +761,11 @@ async fn collect_wallpaper_candidates(dir: &Path) -> Vec<String> {
                         continue;
                     }
                     let lower = file_name.to_lowercase();
-                    if lower.ends_with(".png")
+                    if (lower.ends_with(".png")
                         || lower.ends_with(".jpg")
-                        || lower.ends_with(".jpeg")
+                        || lower.ends_with(".jpeg"))
+                        && let Ok(file_type) = entry.file_type().await
+                        && file_type.is_file()
                     {
                         candidates.push(file_name);
                     }
@@ -1477,5 +1479,32 @@ mod tests {
             "localhost:8080",
         );
         assert!(matches!(outcome, PollOutcome::Poll));
+    }
+
+    #[tokio::test]
+    async fn collect_wallpaper_candidates_ignores_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path();
+
+        // Create a regular file that matches the pattern.
+        let file_path = dir_path.join("wallpaper.png");
+        std::fs::write(&file_path, b"").unwrap();
+
+        // Create a directory that matches the pattern (should be ignored).
+        let sub_dir_path = dir_path.join("nested.jpg");
+        std::fs::create_dir(&sub_dir_path).unwrap();
+
+        // Create another directory that does not match.
+        let other_dir_path = dir_path.join("other_dir");
+        std::fs::create_dir(&other_dir_path).unwrap();
+
+        // Create a regular file that does not match.
+        let other_file_path = dir_path.join("readme.txt");
+        std::fs::write(&other_file_path, b"").unwrap();
+
+        let candidates = collect_wallpaper_candidates(dir_path).await;
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], "wallpaper.png");
     }
 }

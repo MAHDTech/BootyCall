@@ -169,6 +169,7 @@ shellcheck
 shfmt
 siaddr
 skellock
+slowloris
 sname
 snmponly
 snponly

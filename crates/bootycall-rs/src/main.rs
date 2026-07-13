@@ -367,8 +367,15 @@ async fn main() -> Result<(), anyhow::Error> {
         // If boot_blink_handle is still running, signal it to stop and await it
         if let Some(handle) = boot_blink_handle.take() {
             let _ = led_stop_tx.send(()).await;
-            if let Err(e) = handle.await {
-                error!("Boot blink task join error on early exit: {:?}", e);
+            let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+            match timed_out {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    error!("Boot blink task join error on early exit: {:?}", e);
+                }
+                Err(_) => {
+                    warn!("Boot blink task join on early exit timed out");
+                }
             }
         }
 
@@ -378,10 +385,14 @@ async fn main() -> Result<(), anyhow::Error> {
     // Stop the boot-blink task and confirm it has completed before spawning led_manager
     let _ = led_stop_tx.send(()).await;
     if let Some(handle) = boot_blink_handle.take() {
-        match handle.await {
-            Ok(()) => {}
-            Err(e) => {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        match timed_out {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 error!("Boot-blink task join error/panic: {:?}", e);
+            }
+            Err(_) => {
+                warn!("Boot-blink task join timed out during transition");
             }
         }
     }
@@ -523,10 +534,14 @@ async fn graceful_shutdown(
     }
 
     if let Some(handle) = led_manager_handle {
-        match handle.await {
-            Ok(()) => {}
-            Err(e) => {
+        let timed_out = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        match timed_out {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 error!("LED manager task panicked or had join error: {:?}", e);
+            }
+            Err(_) => {
+                warn!("LED manager shutdown timed out");
             }
         }
     }

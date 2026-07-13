@@ -852,8 +852,8 @@ fn test_iso_auto_detect() {
     build_minimal_iso(
         &iso,
         &[
-            ("vmlinuz", b"iso_kernel_bytes"),
-            ("initrd", b"iso_initrd_bytes"),
+            ("VMLINUZ.;1", b"iso_kernel_bytes"),
+            ("INITRD;1", b"iso_initrd_bytes"),
         ],
     );
     let out_k = dir.path().join("k");

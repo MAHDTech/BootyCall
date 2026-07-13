@@ -455,7 +455,12 @@ main() {
 
 	# Check dependencies
 	check_dependency "convco" "Install convco to calculate version bumps from Conventional Commits."
-	check_dependency "toml" "Install toml-cli to update version fields in Cargo.toml."
+	check_dependency "cargo" "Install Cargo (Rust package manager)."
+	if ! cargo set-version --help &>/dev/null; then
+		log_error "Required cargo subcommand 'set-version' (from cargo-edit) is missing."
+		log_error "Please install cargo-edit or enable it in your development shell."
+		exit 1
+	fi
 
 	# Resolve Cargo.toml path and get current version
 	local cargo_toml_path
@@ -512,11 +517,8 @@ main() {
 	log_info "Bumping version: ${CURRENT_VERSION} -> ${next_version}"
 	log_debug "Writing new version to $cargo_toml_path"
 
-	# Update Cargo.toml
-	TEMP_FILE=$(mktemp "${cargo_toml_path}.tmp.XXXXXX")
-	toml set "$cargo_toml_path" workspace.package.version "${next_version}" >"$TEMP_FILE"
-	mv "$TEMP_FILE" "$cargo_toml_path"
-	TEMP_FILE=""
+	# Update Cargo.toml and workspace members using cargo set-version
+	cargo set-version --workspace "${next_version}"
 
 	# Update Cargo.lock if cargo is installed
 	if command -v cargo &>/dev/null; then

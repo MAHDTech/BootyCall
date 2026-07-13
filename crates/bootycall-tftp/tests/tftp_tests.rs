@@ -1852,3 +1852,115 @@ async fn test_tftp_garbage_flood_aborts_transfer() {
         state_store.get_host(mac).map(|h| h.status)
     );
 }
+
+#[tokio::test]
+async fn test_tftp_directory_rejected() {
+    // Setup temporary directory for tftp root
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+
+    // Create a directory inside the tftp root
+    let dir_path = tftp_root.join("boot/x64/some_directory");
+    fs::create_dir_all(&dir_path).unwrap();
+
+    let server_config = ServerConfig {
+        http_bind: "0.0.0.0:8080".to_string(),
+        tftp_bind: "127.0.0.1:25300".to_string(),
+        tftp_root: tftp_root.clone(),
+        proxy_dhcp_bind: "0.0.0.0:4011".to_string(),
+        cache_dir: "./cache".into(),
+        static_dir: "./static".into(),
+        default_bootloader_amd64: "boot/x64/ipxe.efi".to_string(),
+        default_bootloader_arm64: "boot/arm64/ipxe.efi".to_string(),
+        default_bootloader_bios: "boot/x64/undionly.kpxe".to_string(),
+        oled_enabled: false,
+        led_enabled: false,
+        oled_brightness: 255,
+        api_token: None,
+        max_artifact_bytes: None,
+        advertised_host: None,
+        allowed_hosts: Vec::new(),
+    };
+
+    let config = Config {
+        server: server_config,
+        hosts: vec![],
+    };
+
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    // Map 127.0.0.1 -> a known MAC so the transfer associates a host.
+    let mac = "00:aa:bb:cc:dd:99";
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("dir-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
+
+    // Spawn TFTP server on port 25300
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25300",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+
+    // Wait for server to bind
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Client socket on a unique port
+    let client_socket = UdpSocket::bind("127.0.0.1:25301").await.unwrap();
+
+    // Request the directory instead of a regular file
+    let rrq = make_rrq_packet("boot/x64/some_directory", &[]);
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25300")
+        .await
+        .unwrap();
+
+    // Receive the ERROR packet from the server's transfer socket
+    let mut response_buf = [0u8; 1024];
+    let (len, _server_tid) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client_socket.recv_from(&mut response_buf),
+    )
+    .await
+    .expect("Timed out waiting for ERROR response")
+    .expect("Failed to receive ERROR response");
+
+    let (opcode, error_code, msg) = parse_error_packet(&response_buf[..len]);
+    assert_eq!(opcode, 5, "Expected ERROR opcode (5)");
+    assert_eq!(error_code, 1, "Expected error code 1 (File Not Found)");
+    assert!(
+        msg.contains("not found") || msg.contains("Not found"),
+        "Error message should mention 'not found', got: {msg}"
+    );
+
+    // Verify state store updated to Failed (state leak prevention)
+    let mut failed = false;
+    for _ in 0..40 {
+        if let Some(hs) = state_store.get_host(mac)
+            && hs.status == HostStatus::Failed
+        {
+            failed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        failed,
+        "host should be marked Failed after the directory transfer reject, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}

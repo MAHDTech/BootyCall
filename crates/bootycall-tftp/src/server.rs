@@ -187,8 +187,24 @@ async fn handle_tftp_transfer(
 
     let mut file = tokio::fs::File::from_std(std_file);
 
-    // 2. Get file size
+    // 2. Get file size and verify it is a regular file
     let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        warn!(
+            "Rejecting TFTP transfer to {}: path {:?} is not a regular file",
+            client_addr, file_path
+        );
+        mark_tftp_failed(&state_store, &mac_addr, &file_path, "not a regular file");
+        bootycall_log::event!(
+            "tftp_transfer_error",
+            file = %file_path.display(),
+            error = "not_a_regular_file",
+            kind = "NotFound",
+        );
+        let err_pkt = make_error_packet(1, "File not found");
+        let _ = socket.send(&err_pkt).await;
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not a regular file").into());
+    }
     let file_size = metadata.len();
 
     // 3. Negotiate options

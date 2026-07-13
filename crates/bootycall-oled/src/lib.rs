@@ -692,7 +692,6 @@ fn render_loop<S: FrameSink>(
 
         // 1. Only poll active SSH sessions every 5 seconds to prevent procfs spam
         if now.duration_since(last_ssh_check) >= Duration::from_secs(5) {
-            sys_metrics.refresh_processes();
             active_ssh = sys_metrics.active_ssh_sessions() > 0;
             last_ssh_check = now;
         }

@@ -2,7 +2,9 @@ use bootycall_log::{info, warn};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::{Mutex, OnceLock, PoisonError};
+#[cfg(not(test))]
+use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 use tokio::time::{Duration, sleep};
 
 const LED_BLUE_PATH: &str = "/sys/class/leds/blue/brightness";
@@ -28,35 +30,63 @@ pub enum LedError {
 /// forever (~4 error lines/sec). Mirroring the OLED `PanelSink.fb_available`
 /// latch, each path logs once on the present→absent transition, stays silent
 /// while absent, and logs once more if the node comes back.
-fn led_availability() -> &'static Mutex<HashMap<String, bool>> {
+#[cfg(not(test))]
+fn with_led_availability<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut HashMap<String, bool>) -> R,
+{
     static LED_AVAILABILITY: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    LED_AVAILABILITY.get_or_init(|| Mutex::new(HashMap::new()))
+    let lock = LED_AVAILABILITY.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    f(&mut guard)
+}
+
+#[cfg(test)]
+thread_local! {
+    static LED_AVAILABILITY: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
+}
+
+#[cfg(test)]
+fn with_led_availability<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut HashMap<String, bool>) -> R,
+{
+    LED_AVAILABILITY.with(|lock| {
+        let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut guard)
+    })
+}
+
+#[cfg(test)]
+pub fn reset_led_availability() {
+    with_led_availability(|availability| {
+        availability.clear();
+    });
 }
 
 /// Feed a write outcome into the availability latch, logging only on
 /// available↔absent transitions for `path`.
 fn note_led_write_result(path: &str, result: &std::io::Result<()>) {
-    let mut availability = led_availability()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let available = availability.entry(path.to_string()).or_insert(true);
-    match result {
-        Ok(()) => {
-            if !*available {
-                info!("LED path {} is now available", path);
-                *available = true;
+    with_led_availability(|availability| {
+        let available = availability.entry(path.to_string()).or_insert(true);
+        match result {
+            Ok(()) => {
+                if !*available {
+                    info!("LED path {} is now available", path);
+                    *available = true;
+                }
+            }
+            Err(e) => {
+                if *available {
+                    warn!(
+                        "LED path {} not available (optional hardware): {}; suppressing further messages until it returns",
+                        path, e
+                    );
+                    *available = false;
+                }
             }
         }
-        Err(e) => {
-            if *available {
-                warn!(
-                    "LED path {} not available (optional hardware): {}; suppressing further messages until it returns",
-                    path, e
-                );
-                *available = false;
-            }
-        }
-    }
+    });
 }
 
 /// Raw sysfs write. Deliberately log-free: every caller routes the outcome
@@ -329,6 +359,7 @@ mod tests {
 
     #[test]
     fn cache_updates_on_successful_write() {
+        reset_led_availability();
         let mut last = None;
         let mut writes = Vec::new();
         set_led_cached_with("test/led-cache-ok", 255, &mut last, |_, v| {
@@ -341,6 +372,7 @@ mod tests {
 
     #[test]
     fn cache_stays_none_when_write_fails() {
+        reset_led_availability();
         let mut last = None;
         let mut writes = Vec::new();
         set_led_cached_with("test/led-cache-fail", 255, &mut last, |_, v| {
@@ -356,6 +388,7 @@ mod tests {
 
     #[test]
     fn cache_hit_skips_write_entirely() {
+        reset_led_availability();
         let mut last = Some(255);
         let mut writes = Vec::new();
         set_led_cached_with("test/led-cache-hit", 255, &mut last, |_, v| {
@@ -370,6 +403,7 @@ mod tests {
 
     #[test]
     fn failed_write_still_retries_on_next_call() {
+        reset_led_availability();
         // The regression BUG-14 covers: a failed first write must not
         // poison `last_value`, so the next call still attempts the write.
         let mut last = None;
@@ -388,6 +422,7 @@ mod tests {
 
     #[test]
     fn repeated_failed_cached_writes_log_absence_once() {
+        reset_led_availability();
         // The regression BUG-072 covers: with the LED sysfs nodes absent the
         // 500 ms manager tick keeps retrying, but the absence must be logged
         // once, not on every attempt.
@@ -413,6 +448,7 @@ mod tests {
 
     #[test]
     fn repeated_failed_raw_writes_log_absence_once() {
+        reset_led_availability();
         // `run_boot_blink`, `activate_*_led`, and `led_test` drive the LEDs
         // through the raw `set_led` path; it shares the same latch, so a
         // boot-blink against absent hardware must not spam either.
@@ -432,6 +468,7 @@ mod tests {
 
     #[test]
     fn each_availability_transition_logs_once() {
+        reset_led_availability();
         let path = "test/led-recovery";
         let output = capture_logs(|| {
             let mut last = None;
@@ -459,6 +496,7 @@ mod tests {
 
     #[test]
     fn led_test_rejects_unknown_color() {
+        reset_led_availability();
         let err = led_test("purple", false).expect_err("purple is not a valid LED color");
         assert!(matches!(err, LedError::UnknownColor(ref c) if c == "purple"));
     }
@@ -469,6 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn boot_blink_clean_stop_signal_reports_running() {
+        reset_led_availability();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         tx.send(())
             .await
@@ -481,6 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn boot_blink_dropped_sender_reports_stopped() {
+        reset_led_availability();
         // The regression BUG-075 covers: `main` returning early on a startup
         // failure drops the sender without a stop signal — that must NOT be
         // treated as a clean stop, or the rack LED turns blue ("Service
@@ -495,6 +535,7 @@ mod tests {
 
     #[test]
     fn test_write_led_sysfs_success() {
+        reset_led_availability();
         let mut path = std::env::temp_dir();
         path.push("bootycall-led-test-brightness");
         let path_str = path.to_str().unwrap();

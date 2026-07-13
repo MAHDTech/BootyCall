@@ -182,6 +182,7 @@ name = "bootycall-core"
 version = "0.1.3"
 dependencies = [
  "bootycall-log",
+ "nix",
  "notify",
  "parking_lot",
  "serde",

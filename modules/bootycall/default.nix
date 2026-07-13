@@ -550,14 +550,19 @@ in
 
           # Copy default TFTP assets, preserving user additions
           if [ -d "${assetsPkg}/tftpboot" ] && [ "$(ls -A "${assetsPkg}/tftpboot")" ]; then
+            # Copy the system-managed boot directory, allowing overwrites
+            if [ -d "${assetsPkg}/tftpboot/boot" ]; then
+              mkdir -p "${cfg.dataDir}/tftpboot/boot"
+              cp -fR "${assetsPkg}/tftpboot/boot/." "${cfg.dataDir}/tftpboot/boot/" || true
+            fi
             cp -rn "${assetsPkg}/tftpboot/." "${cfg.dataDir}/tftpboot/" || true
-            chmod -R u+w "${cfg.dataDir}/tftpboot"
+            chmod -R u+w "${cfg.dataDir}/tftpboot" || true
           fi
 
           # Copy default static assets, preserving user additions
           if [ -d "${assetsPkg}/static" ] && [ "$(ls -A "${assetsPkg}/static")" ]; then
             cp -rn "${assetsPkg}/static/." "${cfg.dataDir}/static/" || true
-            chmod -R u+w "${cfg.dataDir}/static"
+            chmod -R u+w "${cfg.dataDir}/static" || true
           fi
         ''
         + lib.optionalString (cfg.server.apiTokenFile != null) ''

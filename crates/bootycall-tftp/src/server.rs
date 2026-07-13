@@ -274,6 +274,8 @@ async fn handle_tftp_transfer(
     let mut next_to_send: u64 = 1; // next block to transmit
     let mut last_block: Option<u64> = None; // absolute number of the final (short) block
     let mut retries: u32 = 0;
+    let mut duplicate_ack_count: u64 = 0;
+    let mut last_retransmitted_base: Option<u64> = None;
     let mut ack_buf = [0u8; 1024];
 
     // TFTP block numbers are 16-bit and start at 1, wrapping 65535 -> 0.
@@ -384,6 +386,8 @@ async fn handle_tftp_transfer(
                                 base = abs + 1;
                                 buffered.retain(|&k, _| k >= base);
                                 retries = 0;
+                                duplicate_ack_count = 0;
+                                last_retransmitted_base = None;
                                 if let Some(lb) = last_block
                                     && base > lb
                                 {
@@ -396,7 +400,24 @@ async fn handle_tftp_transfer(
                                     "Unexpected ACK block {} from {}, retrying...",
                                     acked_wire, client_addr
                                 );
-                                next_to_send = base;
+                                if acked_wire == wire_of(base - 1) {
+                                    duplicate_ack_count += 1;
+                                    if duplicate_ack_count > window + 2 {
+                                        retries += 1;
+                                    }
+                                    if last_retransmitted_base != Some(base) {
+                                        last_retransmitted_base = Some(base);
+                                        next_to_send = base;
+                                    } else {
+                                        debug!(
+                                            "Ignoring duplicate ACK block {} from {} (already retransmitted for base {})",
+                                            acked_wire, client_addr, base
+                                        );
+                                    }
+                                } else {
+                                    next_to_send = base;
+                                    retries += 1;
+                                }
                             }
                         }
                     }
@@ -405,6 +426,8 @@ async fn handle_tftp_transfer(
                             "Unexpected packet during data transfer from {}, retrying...",
                             client_addr
                         );
+                        next_to_send = base;
+                        retries += 1;
                     }
                 }
             }
@@ -426,6 +449,7 @@ async fn handle_tftp_transfer(
                 );
                 retries += 1;
                 next_to_send = base;
+                last_retransmitted_base = None;
             }
         }
     }
@@ -521,11 +545,12 @@ async fn send_and_await_ack(
                     return Ok(AckOutcome::Acked);
                 }
                 // Anything else (wrong block, wrong opcode, garbage) —
-                // do not count it toward the retry bound, not just timeouts.
+                // count it toward the retry bound.
                 debug!(
                     "Unexpected packet during {} from {}, retrying...",
                     what, client_addr
                 );
+                retries += 1;
             }
             Ok(Err(e)) => {
                 error!(

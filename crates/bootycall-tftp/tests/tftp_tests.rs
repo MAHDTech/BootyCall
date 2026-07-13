@@ -1749,3 +1749,106 @@ async fn test_tftp_windowsize_no_redundant_transmissions_loss_free() {
         "Each block must be sent exactly once under loss-free conditions"
     );
 }
+
+#[tokio::test]
+async fn test_tftp_garbage_flood_aborts_transfer() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    fs::write(
+        tftp_root.join("boot/x64/ipxe.efi"),
+        b"payload-for-garbage-flood-test",
+    )
+    .unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25290", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let mac = "00:aa:bb:cc:dd:99";
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("garbage-flood-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25290",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_socket = UdpSocket::bind("127.0.0.1:25291").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("timeout", "1"), ("tsize", "0")],
+    );
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25290")
+        .await
+        .unwrap();
+
+    // Consume OACK
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) =
+        tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+    let _ = parse_oack(&buf[..n]);
+
+    // Send ACK 0
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    // Receive DATA block 1
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let (block_num, _) = parse_data(&buf[..n]);
+    assert_eq!(block_num, 1);
+
+    // Flood garbage packets/incorrect ACKs to server_tid to trigger early abort.
+    for _ in 0..10 {
+        // Send random garbage bytes
+        let _ = client_socket
+            .send_to(b"GARBAGE_PACKET_DATA_FLOOD", server_tid)
+            .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Verify host state transitions to Failed
+    let mut failed = false;
+    for _ in 0..100 {
+        if let Some(hs) = state_store.get_host(mac)
+            && hs.status == HostStatus::Failed
+        {
+            failed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        failed,
+        "host should be marked Failed after garbage flood aborts transfer, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}

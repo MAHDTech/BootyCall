@@ -335,4 +335,68 @@ mod tests {
             "a larger point size must light more pixels on the panel"
         );
     }
+
+    #[test]
+    fn draw_braille_correctly_renders_tars() {
+        let mut fb = Framebuffer::new();
+        let x_start = 10;
+        let y_start = 20;
+        let col_dist = 3;
+        let row_dist = 4;
+        let char_dist = 15;
+
+        {
+            let mut r = Renderer::new(&mut fb);
+            r.draw_braille(x_start, y_start, col_dist, row_dist, char_dist);
+        }
+
+        // T, A, R, S grids
+        let chars = [
+            // T: dots 2,3,4,5
+            [[false, true], [true, true], [true, false]],
+            // A: dot 1
+            [[true, false], [false, false], [false, false]],
+            // R: dots 1,2,3,5
+            [[true, false], [true, true], [true, false]],
+            // S: dots 2,3,4
+            [[false, true], [true, false], [true, false]],
+        ];
+
+        // Check each expected pixel in the 160x60 framebuffer
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                // Determine if this pixel should be lit.
+                // A pixel (x, y) is lit if it falls within a 2x2 square starting at (dot_x, dot_y)
+                // for some set dot.
+                let mut should_be_lit = false;
+                for (c_idx, char_grid) in chars.iter().enumerate() {
+                    let char_x = x_start + c_idx * char_dist;
+                    for (row_idx, row) in char_grid.iter().enumerate() {
+                        let dot_y = y_start + row_idx * row_dist;
+                        for (col_idx, &is_set) in row.iter().enumerate() {
+                            if is_set {
+                                let dot_x = char_x + col_idx * col_dist;
+                                if x >= dot_x && x < dot_x + 2 && y >= dot_y && y < dot_y + 2 {
+                                    should_be_lit = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let actual_val = fb.buffer[y * WIDTH + x];
+                if should_be_lit {
+                    assert_eq!(
+                        actual_val, 255,
+                        "Pixel at ({x}, {y}) should be lit (255) but is {actual_val}"
+                    );
+                } else {
+                    assert_eq!(
+                        actual_val, 0,
+                        "Pixel at ({x}, {y}) should be dark (0) but is {actual_val}"
+                    );
+                }
+            }
+        }
+    }
 }

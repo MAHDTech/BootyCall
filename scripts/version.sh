@@ -145,7 +145,12 @@ run_ci_check() {
 	# Check if any Rust/Cargo source or config files changed
 	log_debug "Checking if Rust or Cargo files changed between $target and HEAD..."
 	local files_changed
-	files_changed=$(git diff --name-only "$target...HEAD" 2>/dev/null || echo "")
+	local git_diff_out
+	if ! git_diff_out=$(git diff --name-only "$target...HEAD" 2>&1); then
+		log_error "Failed to run git diff against $target: $git_diff_out"
+		exit 1
+	fi
+	files_changed="$git_diff_out"
 
 	local rust_changes=false
 	while read -r file; do

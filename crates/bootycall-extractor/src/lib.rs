@@ -386,11 +386,44 @@ pub fn sync_host_cache(
             };
             meta.write_to_file(&metadata_path_tmp)?;
 
-            // Atomic swap: remove old directory and rename tmp directory to target host_cache_dir
-            if host_cache_dir.exists() {
-                let _ = fs::remove_dir_all(&host_cache_dir);
+            // Atomic swap:
+            // 1. Clean up any existing stale .old directory from a previous crash/interruption.
+            let host_cache_dir_old = cache_dir.join(format!("{}.old", host.mac));
+            if host_cache_dir_old.exists() {
+                fs::remove_dir_all(&host_cache_dir_old)?;
             }
-            fs::rename(&host_cache_dir_tmp, &host_cache_dir)?;
+
+            // 2. Perform the swap
+            if host_cache_dir.exists() {
+                // Rename current cache to .old
+                fs::rename(&host_cache_dir, &host_cache_dir_old)?;
+
+                #[cfg(test)]
+                std::thread::sleep(std::time::Duration::from_millis(50));
+
+                // Rename staging directory to target host_cache_dir
+                if let Err(rename_err) = fs::rename(&host_cache_dir_tmp, &host_cache_dir) {
+                    // Step 2 failed, attempt rollback: rename .old back to current cache
+                    if let Err(rollback_err) = fs::rename(&host_cache_dir_old, &host_cache_dir) {
+                        error!(
+                            "Failed to rollback/restore cache directory from {:?} to {:?} after staging rename failure: {:?}",
+                            host_cache_dir_old, host_cache_dir, rollback_err
+                        );
+                    }
+                    return Err(ExtractorError::Io(rename_err));
+                }
+
+                // Step 3: Clean up / delete the old directory, logging but tolerating cleanup failures
+                if let Err(cleanup_err) = fs::remove_dir_all(&host_cache_dir_old) {
+                    warn!(
+                        "Failed to clean up old cache directory {:?}: {:?}",
+                        host_cache_dir_old, cleanup_err
+                    );
+                }
+            } else {
+                // If there's no active cache directory (first run), rename tmp to it
+                fs::rename(&host_cache_dir_tmp, &host_cache_dir)?;
+            }
 
             info!(
                 "Successfully extracted kernel and initrd for host {} (MAC: {})",
@@ -568,5 +601,241 @@ mod tests {
         for bad in ["vmlinuz", "kernel", "root.squashfs", ""] {
             assert!(!is_initrd_name(bad), "{bad:?} should NOT match an initrd");
         }
+    }
+
+    fn build_dual_kernel_gpt_image(disk_path: &std::path::Path) {
+        use std::fs::File;
+        use std::io::Write as _;
+        let disk_size = 5 * 1024 * 1024;
+        {
+            let f = File::create(disk_path).unwrap();
+            f.set_len(disk_size as u64).unwrap();
+        }
+        {
+            let mut f = File::options()
+                .read(true)
+                .write(true)
+                .open(disk_path)
+                .unwrap();
+            let mbr = gpt::mbr::ProtectiveMBR::with_lb_size(
+                std::convert::TryFrom::try_from((disk_size / 512) - 1).unwrap(),
+            );
+            mbr.overwrite_lba0(&mut f).unwrap();
+        }
+        let (start_byte, len_byte) = {
+            let f = File::options()
+                .read(true)
+                .write(true)
+                .open(disk_path)
+                .unwrap();
+            let mut gdisk = gpt::GptConfig::default()
+                .writable(true)
+                .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
+                .create_from_device(Box::new(f), None)
+                .unwrap();
+            gdisk
+                .update_partitions(std::collections::BTreeMap::new())
+                .unwrap();
+            gdisk
+                .add_partition(
+                    "boot",
+                    4 * 1024 * 1024,
+                    gpt::partition_types::BASIC,
+                    0,
+                    None,
+                )
+                .unwrap();
+            let p = gdisk.partitions().get(&1).unwrap();
+            let s = p.bytes_start(gpt::disk::LogicalBlockSize::Lb512).unwrap();
+            let l = p.bytes_len(gpt::disk::LogicalBlockSize::Lb512).unwrap();
+            gdisk.write().unwrap();
+            (s, l)
+        };
+        let part_file = File::options()
+            .read(true)
+            .write(true)
+            .open(disk_path)
+            .unwrap();
+        let mut slice = crate::disk::PartitionSlice::new(part_file, start_byte, len_byte);
+        fatfs::format_volume(&mut slice, fatfs::FormatVolumeOptions::new()).unwrap();
+        let fs = fatfs::FileSystem::new(slice, fatfs::FsOptions::new()).unwrap();
+        let root_dir = fs.root_dir();
+        root_dir.create_dir("boot").unwrap();
+        root_dir
+            .create_file("boot/vmlinuz")
+            .unwrap()
+            .write_all(b"default_kernel")
+            .unwrap();
+        root_dir
+            .create_file("boot/initrd.img")
+            .unwrap()
+            .write_all(b"default_initrd")
+            .unwrap();
+        root_dir
+            .create_file("boot/vmlinuz-override")
+            .unwrap()
+            .write_all(b"override_kernel")
+            .unwrap();
+        root_dir
+            .create_file("boot/initrd-override.img")
+            .unwrap()
+            .write_all(b"override_initrd")
+            .unwrap();
+    }
+
+    #[test]
+    fn test_sync_host_cache_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_path = dir.path().join("test_disk.img");
+        let cache_dir = dir.path().join("cache");
+
+        build_dual_kernel_gpt_image(&disk_path);
+
+        let host = super::HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            name: "test-host".to_string(),
+            image_path: disk_path.clone(),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        };
+
+        // First sync to populate cache initially
+        super::sync_host_cache(&host, &cache_dir, None).unwrap();
+
+        let host_cache_dir = cache_dir.join(&host.mac);
+        let cached_kernel = host_cache_dir.join("kernel");
+        let cached_initrd = host_cache_dir.join("initrd");
+
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let running_clone = running.clone();
+
+        let reader_thread = std::thread::spawn(move || {
+            let mut read_count = 0;
+            while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                match fs::read_to_string(&cached_kernel) {
+                    Ok(content) => {
+                        assert_eq!(content, "default_kernel");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // It is possible to hit the microsecond-level gap between the two renames,
+                        // which is acceptable as it is resolved almost immediately.
+                    }
+                    Err(e) => {
+                        panic!("Unexpected read error on kernel: {:?}", e);
+                    }
+                }
+
+                match fs::read_to_string(&cached_initrd) {
+                    Ok(content) => {
+                        assert_eq!(content, "default_initrd");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Accept brief NotFound during the rename gap
+                    }
+                    Err(e) => {
+                        panic!("Unexpected read error on initrd: {:?}", e);
+                    }
+                }
+                read_count += 1;
+            }
+            read_count
+        });
+
+        for _ in 0..100 {
+            // Remove metadata.json to force re-extraction
+            let metadata_path = host_cache_dir.join("metadata.json");
+            if metadata_path.exists() {
+                let _ = fs::remove_file(&metadata_path);
+            }
+            super::sync_host_cache(&host, &cache_dir, None).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let total_reads = reader_thread.join().unwrap();
+        println!(
+            "Reader thread successfully completed {} reads during swaps.",
+            total_reads
+        );
+    }
+
+    #[test]
+    fn test_sync_host_cache_rollback_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_path = dir.path().join("test_disk.img");
+        let cache_dir = dir.path().join("cache");
+
+        build_dual_kernel_gpt_image(&disk_path);
+
+        let host = super::HostConfig {
+            mac: "00:11:22:33:44:55".to_string(),
+            name: "test-host".to_string(),
+            image_path: disk_path.clone(),
+            bootloader: None,
+            kernel_path: None,
+            initrd_path: None,
+            cmdline: None,
+        };
+
+        // First sync to populate cache initially
+        super::sync_host_cache(&host, &cache_dir, None).unwrap();
+
+        let host_cache_dir = cache_dir.join(&host.mac);
+        let host_cache_dir_old = cache_dir.join(format!("{}.old", host.mac));
+        let host_cache_dir_tmp = cache_dir.join(format!("{}.tmp", host.mac));
+
+        // Force re-extraction by removing metadata
+        let metadata_path = host_cache_dir.join("metadata.json");
+        if metadata_path.exists() {
+            fs::remove_file(&metadata_path).unwrap();
+        }
+
+        // Spawn a thread to delete host_cache_dir_tmp as soon as host_cache_dir_old exists (Step 1 complete)
+        let host_cache_dir_old_clone = host_cache_dir_old.clone();
+        let host_cache_dir_tmp_clone = host_cache_dir_tmp.clone();
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let active_clone = active.clone();
+
+        let deleter_thread = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !host_cache_dir_old_clone.exists() {
+                if !active_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                if start.elapsed().as_secs() > 5 {
+                    panic!("Timeout waiting for old directory to exist");
+                }
+                std::thread::yield_now();
+            }
+            // Delete the tmp directory immediately to cause Step 2 rename to fail
+            let _ = fs::remove_dir_all(&host_cache_dir_tmp_clone);
+        });
+
+        let res = super::sync_host_cache(&host, &cache_dir, None);
+        active.store(false, std::sync::atomic::Ordering::Relaxed);
+        deleter_thread.join().unwrap();
+
+        assert!(
+            res.is_err(),
+            "Expected sync to fail because the temp directory was deleted mid-swap"
+        );
+
+        // Verify rollback: host_cache_dir should exist and contain the original kernel
+        assert!(
+            host_cache_dir.exists(),
+            "Active cache directory should have been restored"
+        );
+        let cached_kernel = host_cache_dir.join("kernel");
+        assert_eq!(
+            fs::read_to_string(&cached_kernel).unwrap(),
+            "default_kernel",
+            "Kernel content should be restored to original"
+        );
+        assert!(
+            !host_cache_dir_old.exists(),
+            "The temporary .old directory should have been moved back/cleaned up"
+        );
     }
 }

@@ -64,7 +64,8 @@ fn note_led_write_result(path: &str, result: &std::io::Result<()>) {
 /// hardware is logged once per transition, not per attempt.
 fn write_led_sysfs(path: &str, value: u8) -> std::io::Result<()> {
     let mut file = OpenOptions::new().write(true).open(path)?;
-    write!(file, "{}", value)
+    file.write_all(value.to_string().as_bytes())?;
+    file.flush()
 }
 
 fn set_led(path: &str, value: u8) -> std::io::Result<()> {
@@ -490,5 +491,23 @@ mod tests {
             !blink_until_stopped(&mut rx).await,
             "a dropped sender means startup aborted and must resolve to the stopped (white) state"
         );
+    }
+
+    #[test]
+    fn test_write_led_sysfs_success() {
+        let mut path = std::env::temp_dir();
+        path.push("bootycall-led-test-brightness");
+        let path_str = path.to_str().unwrap();
+
+        // Ensure file exists (mimicking sysfs attribute already present)
+        std::fs::write(&path, "").unwrap();
+
+        let res = write_led_sysfs(path_str, 255);
+        assert!(res.is_ok());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "255");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

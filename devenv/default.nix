@@ -42,7 +42,6 @@ in
     gh
     hello
     nil
-    toml-cli
     trivy
   ];
 

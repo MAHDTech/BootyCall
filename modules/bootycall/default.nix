@@ -434,8 +434,8 @@ in
     firewallPorts = {
       tcp = lib.mkOption {
         type = lib.types.listOf lib.types.port;
-        default = [ (extractPort cfg.server.httpBind) ];
-        defaultText = lib.literalExpression "[ (extracted from server.httpBind) ]";
+        default = lib.optional (!isLoopback cfg.server.httpBind) (extractPort cfg.server.httpBind);
+        defaultText = lib.literalExpression "[ (extracted from server.httpBind if not loopback) ]";
         description = "TCP ports to open in the firewall when openFirewall is true.";
       };
 

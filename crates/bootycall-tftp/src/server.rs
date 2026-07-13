@@ -928,10 +928,7 @@ pub async fn run_tftp_server_with_limit(
 
         let (tftp_root, final_filename, mac_addr) = {
             let config_guard = config.read();
-            let state_hosts = state_store.list_hosts();
-            let host_state = state_hosts
-                .iter()
-                .find(|h| h.client_ip.as_deref() == Some(&client_ip_str));
+            let host_state = state_store.get_host_by_ip(&client_ip_str);
 
             let mut mac_addr = None;
             let mut final_filename = filename.clone();

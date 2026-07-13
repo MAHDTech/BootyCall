@@ -1,5 +1,5 @@
-// cspell:ignore iface Iface IRTT
-use sysinfo::{Components, Disks, ProcessesToUpdate, System};
+// cspell:ignore iface Iface IRTT retrnsmt
+use sysinfo::{Components, Disks, System};
 
 /// Bytes per GiB (1024³) — the divisor turning `sysinfo`'s byte counts into the
 /// "G" figures shown on the metrics pages.
@@ -41,8 +41,32 @@ fn parse_thermal_millidegrees(raw: &str) -> Option<f32> {
 /// logged in" signal. Matches the process name `sshd` with a `@pts`
 /// pseudo-terminal argument, ignoring the listener daemon and `@notty`
 /// sessions.
-fn is_interactive_sshd(name: &str, cmd: &[String]) -> bool {
-    name == "sshd" && cmd.iter().any(|c| c.contains("@pts"))
+fn count_established_connections(content: &str, target_port: u16) -> usize {
+    let mut count = 0;
+    for line in content.lines().skip(1) {
+        let mut parts = line.split_whitespace();
+        let Some(_) = parts.next() else {
+            continue;
+        };
+        let Some(local_addr) = parts.next() else {
+            continue;
+        };
+        let Some(_rem_addr) = parts.next() else {
+            continue;
+        };
+        let Some(state) = parts.next() else {
+            continue;
+        };
+
+        if let Some((_, port_hex)) = local_addr.split_once(':')
+            && let Ok(port) = u16::from_str_radix(port_hex, 16)
+            && port == target_port
+            && state == "01"
+        {
+            count += 1;
+        }
+    }
+    count
 }
 
 pub struct SystemMetrics {
@@ -74,7 +98,7 @@ impl SystemMetrics {
             }
         }
         Self {
-            sys: System::new_all(),
+            sys: System::new(),
             components: Components::new_with_refreshed_list(),
             disks: Disks::new_with_refreshed_list(),
             thermal_zones,
@@ -97,9 +121,7 @@ impl SystemMetrics {
         self.disks.refresh(true);
     }
 
-    pub fn refresh_processes(&mut self) {
-        self.sys.refresh_processes(ProcessesToUpdate::All, true);
-    }
+    pub fn refresh_processes(&mut self) {}
 
     pub fn get_hostname(&self) -> String {
         System::host_name()
@@ -234,16 +256,11 @@ impl SystemMetrics {
 
     pub fn active_ssh_sessions(&self) -> usize {
         let mut count = 0;
-        for process in self.sys.processes().values() {
-            let name = process.name().to_string_lossy();
-            let cmd: Vec<String> = process
-                .cmd()
-                .iter()
-                .map(|c| c.to_string_lossy().into_owned())
-                .collect();
-            if is_interactive_sshd(&name, &cmd) {
-                count += 1;
-            }
+        if let Ok(tcp_content) = std::fs::read_to_string("/proc/net/tcp") {
+            count += count_established_connections(&tcp_content, 22);
+        }
+        if let Ok(tcp6_content) = std::fs::read_to_string("/proc/net/tcp6") {
+            count += count_established_connections(&tcp6_content, 22);
         }
         count
     }
@@ -551,17 +568,20 @@ fe800000000000000250b6fffe030807 02 40 20 80 eth0
     }
 
     #[test]
-    fn interactive_sshd_needs_name_and_pts() {
-        assert!(is_interactive_sshd(
-            "sshd",
-            &["sshd: user@pts/0".to_string()]
-        ));
-        assert!(!is_interactive_sshd(
-            "sshd",
-            &["sshd: user@notty".to_string()]
-        ));
-        assert!(!is_interactive_sshd("bash", &["bash @pts/1".to_string()]));
-        assert!(!is_interactive_sshd("sshd", &[]));
+    fn test_parse_tcp_sessions() {
+        let mock_tcp = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 14815 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:0016 0200007F:04D2 01 00000000:00000000 00:00000000 00000000  1000        0 14816 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:04D2 0200007F:04D2 01 00000000:00000000 00:00000000 00000000  1000        0 14817 1 0000000000000000 100 0 0 10 0
+";
+        let mock_tcp6 = "\
+  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000001:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 14820 1 0000000000000000 100 0 0 10 0
+   1: 00000000000000000000000000000001:0016 00000000000000000000000000000001:04D2 01 00000000:00000000 00:00000000 00000000  1000        0 14821 1 0000000000000000 100 0 0 10 0
+";
+        assert_eq!(count_established_connections(mock_tcp, 22), 1);
+        assert_eq!(count_established_connections(mock_tcp6, 22), 1);
     }
 
     #[test]

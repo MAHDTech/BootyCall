@@ -410,7 +410,7 @@ fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
         } else {
             host
         };
-        return if host.contains(':') && !host.starts_with('[') {
+        return if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
             format!("[{host}]:{port}")
         } else {
             format!("{host}:{port}")
@@ -422,7 +422,7 @@ fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
         if server
             .allowed_hosts
             .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(host_only))
+            .any(|allowed| host_without_port(allowed).eq_ignore_ascii_case(host_only))
         {
             return hdr.to_string();
         }
@@ -441,7 +441,7 @@ fn advertised_host_port(server: &ServerConfig, headers: &HeaderMap) -> String {
         .first()
         .map(String::as_str)
         .unwrap_or("localhost");
-    if host.contains(':') {
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
         // Bare IPv6 literal — bracket it so the port stays unambiguous.
         format!("[{host}]:{port}")
     } else {
@@ -1354,6 +1354,35 @@ mod tests {
 
         let resolved = advertised_host_port(&config.server, &headers_with_host("attacker.example"));
         assert_eq!(resolved, "[fd00::2]:8080");
+    }
+
+    #[test]
+    fn ipv6_allowed_host_bracketed_tests() {
+        // 1. If fallback allowed host is already bracketed, it should not be double bracketed.
+        let mut config = test_config(vec![]);
+        config.server.allowed_hosts = vec!["[fd00::2]".to_string()];
+        let resolved = advertised_host_port(&config.server, &headers_with_host("attacker.example"));
+        assert_eq!(resolved, "[fd00::2]:8080");
+
+        // 2. Request with bracketed Host: [fd00::2]:8080 should match config with bracketed host "[fd00::2]"
+        let resolved = advertised_host_port(&config.server, &headers_with_host("[fd00::2]:8080"));
+        assert_eq!(resolved, "[fd00::2]:8080");
+
+        // 3. Request with bracketed Host: [fd00::2]:8080 should match config with unbracketed host "fd00::2"
+        let mut config2 = test_config(vec![]);
+        config2.server.allowed_hosts = vec!["fd00::2".to_string()];
+        let resolved2 = advertised_host_port(&config2.server, &headers_with_host("[fd00::2]:8080"));
+        assert_eq!(resolved2, "[fd00::2]:8080");
+
+        // 4. Request with unbracketed Host: fd00::2 (without port) should match config with bracketed host "[fd00::2]"
+        let resolved3 = advertised_host_port(&config.server, &headers_with_host("fd00::2"));
+        assert_eq!(resolved3, "fd00::2");
+
+        // 5. If http_bind has a bracketed IPv6 and allowed_hosts is empty, it should not be double bracketed.
+        let mut config3 = test_config(vec![]);
+        config3.server.http_bind = "[fd00::2]:8080".to_string();
+        let resolved4 = advertised_host_port(&config3.server, &HeaderMap::new());
+        assert_eq!(resolved4, "[fd00::2]:8080");
     }
 
     #[test]

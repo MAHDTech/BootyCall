@@ -1,7 +1,11 @@
 { pkgs, ... }:
 
 let
-  targetPkgs = if pkgs.stdenv.hostPlatform.isx86_64 then pkgs else pkgs.pkgsCross.gnu64;
+  targetPkgs =
+    if pkgs.stdenv.hostPlatform.isx86_64 && pkgs.stdenv.hostPlatform.isLinux then
+      pkgs
+    else
+      pkgs.pkgsCross.gnu64;
 in
 targetPkgs.callPackage ./default.nix { } {
   pname = "ipxe-amd64";

@@ -66,10 +66,10 @@ pub struct ServerConfig {
     pub oled_brightness: u8,
     #[serde(default = "default_led_enabled")]
     pub led_enabled: bool,
-    /// Shared secret required on mutating dashboard endpoints
-    /// (POST /api/override). When absent, mutating endpoints run
-    /// unauthenticated — same behaviour as before P1-7. Populate this
-    /// (or bind the dashboard behind a reverse proxy) before exposing
+    /// Shared secret required on dashboard API endpoints. Gates mutating endpoints
+    /// (POST /api/override) as well as read endpoints (/api/status and /api/logs).
+    /// When absent, endpoints run unauthenticated — same behaviour as before P1-7.
+    /// Populate this (or bind the dashboard behind a reverse proxy) before exposing
     /// the box beyond localhost.
     #[serde(default)]
     pub api_token: Option<String>,

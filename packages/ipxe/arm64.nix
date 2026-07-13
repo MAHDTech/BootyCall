@@ -2,7 +2,10 @@
 
 let
   targetPkgs =
-    if pkgs.stdenv.hostPlatform.isAarch64 then pkgs else pkgs.pkgsCross.aarch64-multiplatform;
+    if pkgs.stdenv.hostPlatform.isAarch64 && pkgs.stdenv.hostPlatform.isLinux then
+      pkgs
+    else
+      pkgs.pkgsCross.aarch64-multiplatform;
 in
 targetPkgs.callPackage ./default.nix { } {
   pname = "ipxe-arm64";

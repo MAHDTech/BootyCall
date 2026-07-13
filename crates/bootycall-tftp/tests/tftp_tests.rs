@@ -1667,3 +1667,85 @@ async fn test_tftp_windowsize_5_packet_loss_recovery() {
         num_dup_ack_sent
     );
 }
+
+#[tokio::test]
+async fn test_tftp_windowsize_no_redundant_transmissions_loss_free() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+
+    let blksize = 512usize;
+    // A file spanning 8 blocks
+    let payload: Vec<u8> = (0..(8 * blksize)).map(|i| (i % 256) as u8).collect();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &payload).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25260", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25260",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:25261").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("windowsize", "4"), ("tsize", "0")],
+    );
+    client.send_to(&rrq, "127.0.0.1:25260").await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    let _oack = parse_oack(&buf[..n]);
+    client
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    let mut received_blocks = Vec::new();
+    let mut received_bytes = Vec::new();
+
+    loop {
+        let (n, _) =
+            match tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf)).await {
+                Ok(Ok(res)) => res,
+                _ => break,
+            };
+        let (block, data) = parse_data(&buf[..n]);
+        received_blocks.push(block);
+        received_bytes.extend_from_slice(&data);
+
+        // Send ACK for this block immediately to trigger intermediate ACKs
+        client
+            .send_to(&make_ack_packet(block), server_tid)
+            .await
+            .unwrap();
+
+        if data.len() < blksize {
+            break;
+        }
+    }
+
+    assert_eq!(received_bytes, payload);
+    // Under loss-free conditions, each block must be transmitted exactly once.
+    // Since the file is exactly 8 blocks, a 9th empty block (block 9) is sent to signal EOF.
+    let expected_blocks: Vec<u16> = (1..=9).collect();
+    assert_eq!(
+        received_blocks, expected_blocks,
+        "Each block must be sent exactly once under loss-free conditions"
+    );
+}

@@ -1,5 +1,6 @@
 { pkgs }:
 let
+  inherit (pkgs) lib;
   # QUAL-5: read the version from the workspace manifest so the Nix
   # derivation can't drift from Cargo.toml (this file used to hard-code
   # "0.1.0" while the workspace had already moved past that).
@@ -17,7 +18,15 @@ name:
 pinnedRustPlatform.buildRustPackage {
   pname = name;
   version = workspaceVersion;
-  src = ../.;
+  src = lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../Cargo.toml
+      ../Cargo.lock
+      ../rust-toolchain.toml
+      ../crates
+    ];
+  };
   cargoLock = {
     lockFile = ../Cargo.lock;
   };

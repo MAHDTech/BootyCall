@@ -215,14 +215,15 @@ async fn serve_file_from_dir(
         }
     };
 
-    let meta = match std_file.metadata() {
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let meta = match file.metadata().await {
         Ok(meta) if meta.is_file() => meta,
         Ok(_) => return Err(StatusCode::NOT_FOUND),
         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
     let file_size = meta.len();
-    let mut file = tokio::fs::File::from_std(std_file);
 
     let content_type = content_type_for(&relative_path);
 
@@ -1114,6 +1115,7 @@ pub async fn run_http_server(
 
                 let app = app.clone();
                 let shutdown_tx_clone = shutdown_tx.clone();
+                let shutdown_clone = shutdown.clone();
 
                 tokio::spawn(async move {
                     use hyper_util::rt::{TokioIo, TokioTimer};
@@ -1134,8 +1136,21 @@ pub async fn run_http_server(
                         }
                     });
 
-                    if let Err(err) = conn_builder.serve_connection(io, hyper_service).await {
-                        tracing::debug!("failed to serve connection: {err}");
+                    let conn = conn_builder.serve_connection(io, hyper_service);
+                    let mut conn = std::pin::pin!(conn);
+
+                    tokio::select! {
+                        res = conn.as_mut() => {
+                            if let Err(err) = res {
+                                tracing::debug!("failed to serve connection: {err}");
+                            }
+                        }
+                        _ = shutdown_clone.cancelled() => {
+                            conn.as_mut().graceful_shutdown();
+                            if let Err(err) = conn.await {
+                                tracing::debug!("failed to serve connection during shutdown: {err}");
+                            }
+                        }
                     }
                     drop(shutdown_tx_clone);
                 });

@@ -1167,7 +1167,7 @@ mod tests {
         let mut packet = vec![0, 1];
         packet.extend_from_slice(b"test.txt\0octet\0");
         packet.extend_from_slice(b"blksize\0abc\0");
-        packet.extend_from_slice(b"timeout\05\0");
+        packet.extend_from_slice(b"timeout\x005\0");
 
         let req = parse_rrq(&packet).expect("Expected Some RrqRequest");
         assert_eq!(req.filename, "test.txt");

@@ -772,7 +772,7 @@ mod tests {
             succeeded: 1,
             failed: vec![(
                 "host_failed".to_string(),
-                ExtractorError::Io(std::io::Error::new(std::io::ErrorKind::Other, "disk full")),
+                ExtractorError::Io(std::io::Error::other("disk full")),
             )],
         };
         log_sync_summary(&summary_partial);
@@ -782,10 +782,7 @@ mod tests {
             succeeded: 0,
             failed: vec![(
                 "host_failed_1".to_string(),
-                ExtractorError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "network timeout",
-                )),
+                ExtractorError::Io(std::io::Error::other("network timeout")),
             )],
         };
         log_sync_summary(&summary_all_failed);

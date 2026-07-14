@@ -1551,8 +1551,8 @@ async fn test_tftp_windowsize_5_packet_loss_recovery() {
     // Create a file of 10 blocks (10 * 512 = 5120 bytes)
     let block_size = 512;
     let mut file_content = vec![0u8; 10 * block_size];
-    for i in 0..file_content.len() {
-        file_content[i] = (i % 256) as u8;
+    for (i, val) in file_content.iter_mut().enumerate() {
+        *val = (i % 256) as u8;
     }
     fs::write(tftp_root.join("boot/x64/ipxe.efi"), &file_content).unwrap();
 

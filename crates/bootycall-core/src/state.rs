@@ -362,14 +362,14 @@ mod tests {
         assert_eq!(host.assigned_target, Some("target1".to_string()));
         assert_eq!(host.client_ip, Some("192.168.1.100".to_string()));
         assert_eq!(host.architecture, Some("x86_64".to_string()));
-        assert_eq!(host.cache_ready, false);
+        assert!(!host.cache_ready);
 
         // Test cache_ready settings
-        assert_eq!(store.get_cache_ready("aa:bb:cc:11:22:33"), false);
+        assert!(!store.get_cache_ready("aa:bb:cc:11:22:33"));
         store.set_cache_ready("aa:bb:cc:11:22:33", true);
-        assert_eq!(store.get_cache_ready("aa:bb:cc:11:22:33"), true);
+        assert!(store.get_cache_ready("aa:bb:cc:11:22:33"));
         let host_updated = store.get_host("aa:bb:cc:11:22:33").unwrap();
-        assert_eq!(host_updated.cache_ready, true);
+        assert!(host_updated.cache_ready);
 
         // Log events
         store

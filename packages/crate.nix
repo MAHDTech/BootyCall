@@ -34,5 +34,9 @@ pinnedRustPlatform.buildRustPackage {
     "-p"
     name
   ];
+  cargoTestFlags = [
+    "--"
+    "--test-threads=1"
+  ];
   doCheck = true;
 }

@@ -334,6 +334,39 @@ async fn handle_tftp_transfer(
     }
 
     loop {
+        // Bound the wait: retry budget and the overall transfer deadline. Any
+        // receive that isn't a window-advancing ACK (timeout, old/dup ACK, or
+        // garbage) counts against the retry budget so a broken/malicious client
+        // cannot wedge us in a busy loop.
+        //
+        // Mitigation for optionless RRQ amplification/reflection attack (B5):
+        // If the OACK handshake was skipped (meaning options list was empty),
+        // we have not yet established that the client's source IP is not spoofed.
+        // To prevent amplification, we limit the retransmissions of the first block
+        // (before any ACK from the client is received, i.e., base == 1) to at most
+        // 1 retry instead of the standard max_retries (5). Once any ACK is received
+        // (base > 1), the client's address is verified to be responsive, and we
+        // can use the full retry budget.
+        let max_allowed_retries = if options.is_empty() && base == 1 {
+            1
+        } else {
+            retry_policy.max_retries
+        };
+
+        if retries > max_allowed_retries || std::time::Instant::now() >= retry_policy.deadline {
+            error!(
+                "TFTP transfer to {} timed out waiting for ACK (base block {})",
+                client_addr, base
+            );
+            mark_tftp_failed(
+                &state_store,
+                &mac_addr,
+                &file_path,
+                "timed out waiting for data ACK",
+            );
+            return Err(TftpError::BlockAckTimedOut);
+        }
+
         // Fill the window: transmit every block in [base, base + window) not yet
         // sent, reading forward from the file. Retransmits reuse the buffer, so
         // `read_fill` only ever runs on brand-new blocks — a short read (legal
@@ -358,39 +391,6 @@ async fn handle_tftp_transfer(
             };
             send_data_or_fail!(next_to_send, &data);
             next_to_send += 1;
-        }
-
-        // Bound the wait: retry budget and the overall transfer deadline. Any
-        // receive that isn't a window-advancing ACK (timeout, old/dup ACK, or
-        // garbage) counts against the retry budget so a broken/malicious client
-        // cannot wedge us in a busy loop.
-        //
-        // Mitigation for optionless RRQ amplification/reflection attack (B5):
-        // If the OACK handshake was skipped (meaning options list was empty),
-        // we have not yet established that the client's source IP is not spoofed.
-        // To prevent amplification, we limit the retransmissions of the first block
-        // (before any ACK from the client is received, i.e., base == 1) to at most
-        // 1 retry instead of the standard max_retries (5). Once any ACK is received
-        // (base > 1), the client's address is verified to be responsive, and we
-        // can use the full retry budget.
-        let max_allowed_retries = if options.is_empty() && base == 1 {
-            1
-        } else {
-            retry_policy.max_retries
-        };
-
-        if retries >= max_allowed_retries || std::time::Instant::now() >= retry_policy.deadline {
-            error!(
-                "TFTP transfer to {} timed out waiting for ACK (base block {})",
-                client_addr, base
-            );
-            mark_tftp_failed(
-                &state_store,
-                &mac_addr,
-                &file_path,
-                "timed out waiting for data ACK",
-            );
-            return Err(TftpError::BlockAckTimedOut);
         }
 
         match tokio::time::timeout(retry_policy.per_try_timeout, socket.recv(&mut ack_buf)).await {
@@ -432,27 +432,37 @@ async fn handle_tftp_transfer(
                             }
                             None => {
                                 // Old/duplicate ACK or garbage.
-                                debug!(
-                                    "Unexpected ACK block {} from {}, retrying...",
-                                    acked_wire, client_addr
-                                );
-                                if acked_wire == wire_of(base - 1) {
-                                    duplicate_ack_count += 1;
-                                    if duplicate_ack_count > window + 2 {
+                                let diff = (acked_wire as i32 - wire_of(base) as i32) as i16;
+                                let abs_ack = base as i64 + diff as i64;
+                                if abs_ack < base as i64 - 1 {
+                                    // Silently discard stale ACK
+                                    debug!(
+                                        "Silently discarding stale ACK block {} (abs {}) from {}",
+                                        acked_wire, abs_ack, client_addr
+                                    );
+                                } else {
+                                    debug!(
+                                        "Unexpected ACK block {} from {}, retrying...",
+                                        acked_wire, client_addr
+                                    );
+                                    if acked_wire == wire_of(base - 1) {
+                                        duplicate_ack_count += 1;
+                                        if duplicate_ack_count > window + 2 {
+                                            retries += 1;
+                                        }
+                                        if last_retransmitted_base != Some(base) {
+                                            last_retransmitted_base = Some(base);
+                                            next_to_send = base;
+                                        } else {
+                                            debug!(
+                                                "Ignoring duplicate ACK block {} from {} (already retransmitted for base {})",
+                                                acked_wire, client_addr, base
+                                            );
+                                        }
+                                    } else {
+                                        next_to_send = base;
                                         retries += 1;
                                     }
-                                    if last_retransmitted_base != Some(base) {
-                                        last_retransmitted_base = Some(base);
-                                        next_to_send = base;
-                                    } else {
-                                        debug!(
-                                            "Ignoring duplicate ACK block {} from {} (already retransmitted for base {})",
-                                            acked_wire, client_addr, base
-                                        );
-                                    }
-                                } else {
-                                    next_to_send = base;
-                                    retries += 1;
                                 }
                             }
                         }

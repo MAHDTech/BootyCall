@@ -1964,3 +1964,230 @@ async fn test_tftp_directory_rejected() {
         state_store.get_host(mac).map(|h| h.status)
     );
 }
+
+#[tokio::test]
+async fn test_tftp_optionless_rrq_waits_for_retransmission() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    fs::write(
+        tftp_root.join("boot/x64/ipxe.efi"),
+        b"optionless-payload-data-here-12345",
+    )
+    .unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25400", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let mac = "00:11:22:33:44:aa";
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("optionless-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25400",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_socket = UdpSocket::bind("127.0.0.1:25401").await.unwrap();
+    let rrq = make_rrq_packet("boot/x64/ipxe.efi", &[]);
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25400")
+        .await
+        .unwrap();
+
+    // 1. Receive 1st transmission of DATA block 1
+    let mut buf = [0u8; 1024];
+    let (n1, _server_tid) =
+        tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+            .await
+            .expect("should receive initial DATA block 1")
+            .unwrap();
+    let (block_num1, data1) = parse_data(&buf[..n1]);
+    assert_eq!(block_num1, 1);
+    assert_eq!(data1, b"optionless-payload-data-here-12345");
+
+    // Do NOT send any ACK. Wait for the retransmission (1st retry).
+    let (n2, _) = tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf))
+        .await
+        .expect("should receive retransmitted DATA block 1 (retry 1)")
+        .unwrap();
+    let (block_num2, data2) = parse_data(&buf[..n2]);
+    assert_eq!(block_num2, 1);
+    assert_eq!(data2, b"optionless-payload-data-here-12345");
+
+    // Still do NOT send ACK. The server should timeout on this retry and abort.
+    // Since the limit is 1 retry, it should abort and we should not receive a third transmission.
+    let result =
+        tokio::time::timeout(Duration::from_secs(5), client_socket.recv_from(&mut buf)).await;
+    assert!(result.is_err(), "expected no more transmissions (aborted)");
+
+    // The host should transition to Failed.
+    let mut failed = false;
+    for _ in 0..100 {
+        if let Some(hs) = state_store.get_host(mac) {
+            if hs.status == HostStatus::Failed {
+                failed = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        failed,
+        "host should be marked Failed after retry budget exhausted, got {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}
+
+#[tokio::test]
+async fn test_tftp_stale_ack_packets_are_silently_discarded() {
+    let tmp_dir = tempdir().unwrap();
+    let tftp_root = tmp_dir.path().to_path_buf();
+    fs::create_dir_all(tftp_root.join("boot/x64")).unwrap();
+    let block_size = 512;
+    // 2.5 blocks payload to ensure Block 3 is strictly shorter than 512 bytes (terminating block)
+    let payload: Vec<u8> = (0..(2 * block_size + 100))
+        .map(|i| (i % 256) as u8)
+        .collect();
+    fs::write(tftp_root.join("boot/x64/ipxe.efi"), &payload).unwrap();
+
+    let config = Config {
+        server: base_server_config("127.0.0.1:25410", &tftp_root),
+        hosts: vec![],
+    };
+    let shared_config = Arc::new(parking_lot::RwLock::new(config));
+    let state_store = StateStore::new();
+
+    let mac = "00:11:22:33:44:bb";
+    state_store
+        .update_host_status(
+            mac,
+            HostStatus::Polling,
+            Some("stale-ack-client".to_string()),
+            None,
+            Some("127.0.0.1".to_string()),
+            Some("x86_64".to_string()),
+        )
+        .unwrap();
+
+    let server_store = state_store.clone();
+    let server_config_clone = shared_config.clone();
+    tokio::spawn(async move {
+        let _ = bootycall_tftp::run_tftp_server(
+            "127.0.0.1:25410",
+            server_config_clone,
+            server_store,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client_socket = UdpSocket::bind("127.0.0.1:25411").await.unwrap();
+    let rrq = make_rrq_packet(
+        "boot/x64/ipxe.efi",
+        &[("blksize", "512"), ("windowsize", "2"), ("timeout", "1")],
+    );
+    client_socket
+        .send_to(&rrq, "127.0.0.1:25410")
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 1024];
+    let (n, server_tid) =
+        tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+            .await
+            .expect("should receive OACK")
+            .unwrap();
+    let _ = parse_oack(&buf[..n]);
+
+    // Send ACK 0
+    client_socket
+        .send_to(&make_ack_packet(0), server_tid)
+        .await
+        .unwrap();
+
+    // Receive DATA 1 and DATA 2
+    let (n1, _) = tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+        .await
+        .expect("should receive DATA block 1")
+        .unwrap();
+    let (block_num1, _) = parse_data(&buf[..n1]);
+    assert_eq!(block_num1, 1);
+
+    let (n2, _) = tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+        .await
+        .expect("should receive DATA block 2")
+        .unwrap();
+    let (block_num2, _) = parse_data(&buf[..n2]);
+    assert_eq!(block_num2, 2);
+
+    // Send ACK 2 to acknowledge up to block 2. Base is now 3.
+    client_socket
+        .send_to(&make_ack_packet(2), server_tid)
+        .await
+        .unwrap();
+
+    // Receive DATA 3 (final block)
+    let (n3, _) = tokio::time::timeout(Duration::from_secs(2), client_socket.recv_from(&mut buf))
+        .await
+        .expect("should receive DATA block 3")
+        .unwrap();
+    let (block_num3, _) = parse_data(&buf[..n3]);
+    assert_eq!(block_num3, 3);
+
+    // Send 10 stale ACKs for block 1 (since 1 < base - 1 which is 2)
+    for _ in 0..10 {
+        client_socket
+            .send_to(&make_ack_packet(1), server_tid)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Now send the valid ACK 3 to complete the transfer
+    client_socket
+        .send_to(&make_ack_packet(3), server_tid)
+        .await
+        .unwrap();
+
+    // Verify host state transitions to Completed, NOT Failed.
+    let mut completed = false;
+    for _ in 0..100 {
+        if let Some(hs) = state_store.get_host(mac) {
+            if hs.status == HostStatus::Completed {
+                completed = true;
+                break;
+            }
+            if hs.status == HostStatus::Failed {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    assert!(
+        completed,
+        "host should transition to Completed, meaning stale ACKs did not cause abort or fail. status: {:?}",
+        state_store.get_host(mac).map(|h| h.status)
+    );
+}

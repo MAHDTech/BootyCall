@@ -163,6 +163,7 @@ impl StateStore {
                 mac: normalized,
             });
         }
+        let cache_ready = self.get_cache_ready(&normalized);
         let mut hosts = self.hosts.write();
         // SEC-4: if we're at the ceiling and this MAC is new, evict the
         // least-recently-seen entry (LRU) to make room instead of dropping
@@ -179,12 +180,6 @@ impl StateStore {
                 hosts.remove(&oldest_mac);
             }
         }
-        let cache_ready = self
-            .cache_ready_hosts
-            .read()
-            .get(&normalized)
-            .copied()
-            .unwrap_or(false);
         let entry = hosts
             .entry(normalized.clone())
             .or_insert_with(|| HostState {

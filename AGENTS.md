@@ -47,9 +47,11 @@ Always `git add` your changes before running `nix develop`/`devenv` (or committi
 
 This runs check-yaml, cspell, action-validator, cargo-check, clippy, rustfmt, statix, deadnix, shellcheck, markdownlint, lychee, and friends, to verify code correctness and clean style.
 
-Run `nix develop --impure --command devenv test` before committing: it runs the
+Run `nix develop --impure --command devenv --no-tui test` before committing: it runs the
 full git-hook battery **and** the workspace test suite (`cargo test --workspace
 --all-features`), failing if any test fails.
+
+> ⚠️ **CRITICAL WARNING**: Always pass the `--no-tui` flag when running `devenv` commands (e.g., `devenv --no-tui shell`, `devenv --no-tui test`) in automated or AI agent environments to disable the interactive terminal interface and prevent commands from getting stuck.
 
 ### Documentation & Link Standards
 

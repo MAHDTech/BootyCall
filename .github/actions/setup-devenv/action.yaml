@@ -64,30 +64,17 @@ runs:
         purge-created: P7D
         token: ${{ inputs.github-token }}
 
-    - id: install_devenv
-      name: Install Devenv
+    - id: cachix_tools_install
+      name: Install Cachix Tools
       shell: bash
-      # Pin the devenv CLI to the exact revision flake.lock records for the
-      # `devenv` input — the same revision the dev shell uses via
-      # `devenv.lib.mkShell` (flake.nix). Deriving the rev from the lockfile,
-      # rather than hardcoding a DEVENV_REV constant, keeps the CI binary in
-      # lockstep with the project's devenv with no second hand-maintained pin:
-      # Dependabot's `nix` ecosystem bumps flake.lock, which bumps this too, so
-      # the CI pin cannot silently drift from the dev shell (see issue 065).
       run: |
-        devenv_rev="$(jq -r '.nodes.devenv.locked.rev' flake.lock)"
-        if [[ -z "${devenv_rev}" || "${devenv_rev}" == "null" ]]; then
-          echo "::error::Could not read the devenv rev from flake.lock"
-          exit 1
-        fi
-        echo "Installing devenv pinned to flake.lock rev ${devenv_rev}"
-        nix profile install --accept-flake-config "github:cachix/devenv/${devenv_rev}"
+        nix profile install --accept-flake-config nixpkgs#devenv nixpkgs#secretspec nixpkgs#cachix
 
     - id: version_check
       name: Version Check
       shell: bash
       run: |
-        echo "Devenv version: $(devenv --version)"
+        echo "Devenv version: $(devenv --no-tui --version)"
         echo "Cachix version: $(cachix --version)"
 
     - id: warmup_devenv
@@ -97,7 +84,7 @@ runs:
         if [[ -f "devenv.nix" ]];
         then
           echo "Testing using native devenv"
-          devenv shell -- echo "Running native devenv"
+          devenv --no-tui shell -- echo "Running native devenv"
         elif [[ -f "flake.nix" ]];
         then
           echo "Testing using Nix flakes"
